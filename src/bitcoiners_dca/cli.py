@@ -463,8 +463,23 @@ async def _run_daemon(config_path: str):
     cfg = _load_runtime_config(config_path)
     exchanges = _build_exchanges(cfg)
     if not exchanges:
-        console.print("[red]No exchanges configured.[/red]")
-        return
+        # New tenant before they paste any API keys — the dashboard is the
+        # next thing they'll touch. Idle-wait so the container doesn't
+        # restart-loop; pick up the first exchange the moment they configure
+        # one through the dashboard.
+        logging.info(
+            "no exchanges configured — daemon idle. "
+            "Add an exchange via the dashboard, then I'll start automatically."
+        )
+        while not exchanges:
+            await asyncio.sleep(15)
+            try:
+                cfg = _load_runtime_config(config_path)
+                exchanges = _build_exchanges(cfg)
+            except Exception as e:
+                logging.warning("config reload failed while idle: %s", e)
+        logging.info("exchanges configured — exiting idle loop, starting daemon")
+
     router = _build_router(cfg)
     strategy = _build_strategy(cfg, router)
     db = Database(cfg.persistence.db_path)

@@ -58,9 +58,13 @@ services:
       # of bitcoiners-app — nobody else on the LAN can reach it.
       - "0.0.0.0:${TENANT_DASH_PORT}:8000"
     volumes:
-      - ${TENANT_DATA_DIR}/config:/app/config:ro
-      - ${TENANT_DATA_DIR}/data:/app/data:ro
-      - ${TENANT_DATA_DIR}/reports:/app/reports:ro
+      # Dashboard writes to all three: config edits (strategy YAML),
+      # secrets DB (Fernet-encrypted credentials), reports (tax CSV
+      # generation). Read-only mounts here crash the SQLite + ConfigWriter
+      # paths on first use.
+      - ${TENANT_DATA_DIR}/config:/app/config
+      - ${TENANT_DATA_DIR}/data:/app/data
+      - ${TENANT_DATA_DIR}/reports:/app/reports
     env_file:
       - ${TENANT_DATA_DIR}/.env
     depends_on:
