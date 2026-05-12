@@ -15,7 +15,7 @@
   <div class="form-row">
     <label>Frequency</label>
     <select name="frequency">
-      {% for f in ["daily", "weekly", "monthly"] %}
+      {% for f in ["hourly", "daily", "weekly", "monthly"] %}
       <option value="{{ f }}" {% if config.strategy.frequency == f %}selected{% endif %}>{{ f }}</option>
       {% endfor %}
     </select>

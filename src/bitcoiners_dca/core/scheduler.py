@@ -57,24 +57,35 @@ def _build_cron_trigger(cfg: AppConfig) -> CronTrigger:
     """Translate the YAML config into an apscheduler CronTrigger.
 
     Supports:
-      frequency: daily  -> every day at HH:MM (timezone-aware)
-      frequency: weekly -> day_of_week at HH:MM
+      frequency: hourly  -> every hour at :MM (timezone-aware)
+      frequency: daily   -> every day at HH:MM
+      frequency: weekly  -> day_of_week at HH:MM
       frequency: monthly -> 1st of the month at HH:MM
+
+    Hourly fires N times more often than daily; the per-cycle base amount
+    is unchanged, so the risk caps (max_daily_aed + max_single_buy_aed)
+    are what stops accidental over-spend. Set those before flipping to
+    hourly.
     """
     freq = cfg.strategy.frequency.lower()
     hour, minute = cfg.strategy.time.split(":")
     tz = cfg.strategy.timezone
 
-    kwargs: dict = {"hour": int(hour), "minute": int(minute), "timezone": tz}
+    kwargs: dict = {"minute": int(minute), "timezone": tz}
 
-    if freq == "daily":
-        pass  # default = every day
+    if freq == "hourly":
+        # Every hour at the configured minute. `hour` stays unset = wildcard.
+        pass
+    elif freq == "daily":
+        kwargs["hour"] = int(hour)
     elif freq == "weekly":
+        kwargs["hour"] = int(hour)
         dow = _DOW_MAP.get(cfg.strategy.day_of_week.lower())
         if not dow:
             raise ValueError(f"Invalid day_of_week: {cfg.strategy.day_of_week}")
         kwargs["day_of_week"] = dow
     elif freq == "monthly":
+        kwargs["hour"] = int(hour)
         kwargs["day"] = 1
     else:
         raise ValueError(f"Invalid frequency: {freq}")
