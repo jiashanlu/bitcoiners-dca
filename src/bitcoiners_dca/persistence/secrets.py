@@ -180,12 +180,13 @@ class SecretStore:
 
 
 def _redact(value: str) -> str:
-    """`abc…ef4` style redaction. Show first 3 + last 3 if long enough."""
+    """All-bullets redaction. Showing any prefix/suffix of a credential
+    leaks too much for short secrets — e.g. a 9-char OKX passphrase
+    becomes `A8x…xz@`, revealing 67% of the secret to anyone who can read
+    the rendered HTML. Now: always 8 bullets, no exception."""
     if not value:
         return "(empty)"
-    if len(value) < 8:
-        return "•" * len(value)
-    return f"{value[:3]}…{value[-3:]}"
+    return "••••••••"
 
 
 # === Adapter-credential helpers ===

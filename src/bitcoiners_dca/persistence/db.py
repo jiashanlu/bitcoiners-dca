@@ -96,8 +96,20 @@ class Database:
     def __init__(self, path: str | Path = "./data/dca.db"):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self.path))
+        # WAL: allow daemon (writer) + dashboard (reader) to run concurrently
+        # without "database is locked" stalls. busy_timeout: queue waits 5s
+        # instead of failing fast. check_same_thread=False: FastAPI's async
+        # threadpool may dispatch reads from different threads.
+        self._conn = sqlite3.connect(
+            str(self.path),
+            timeout=5.0,
+            check_same_thread=False,
+            isolation_level=None,  # autocommit; explicit BEGIN/COMMIT in writes
+        )
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(SCHEMA)
 
     def record_trade(self, order: Order) -> None:

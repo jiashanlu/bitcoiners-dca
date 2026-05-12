@@ -72,7 +72,9 @@ services:
     labels:
       - "bitcoiners-dca.tenant=${TENANT_ID}"
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8000/healthz"]
+      # FastAPI /healthz only accepts GET; wget --spider sends HEAD → 405 →
+      # container marked "unhealthy" forever. Use a GET + content check.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/healthz | grep -q ok"]
       interval: 60s
       timeout: 5s
       retries: 3

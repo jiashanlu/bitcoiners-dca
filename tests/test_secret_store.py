@@ -67,11 +67,15 @@ def test_list_returns_redacted_only(store):
         assert "…" in e.redacted or e.redacted.startswith("•")
 
 
-def test_redact_helper_handles_short_long_empty():
+def test_redact_helper_never_leaks_any_chars():
+    # `_redact` was leaking 6 of 9 chars of every credential. Now always
+    # 8 bullets regardless of length. The only special-case is empty input.
     assert _redact("") == "(empty)"
-    assert _redact("ab") == "••"
-    assert _redact("12345678") == "123…678"
-    assert _redact("very-long-secret") == "ver…ret"
+    for plain in ["ab", "12345678", "very-long-secret", "A8x422xz@"]:
+        out = _redact(plain)
+        assert out == "••••••••", f"redaction leaked for {plain!r}: {out!r}"
+        for ch in plain:
+            assert ch not in out, f"char {ch!r} leaked through redaction"
 
 
 # === Encryption strength ===

@@ -336,6 +336,20 @@ class DCAStrategy:
                 )
                 return orders
             orders.append(order)
+            # Defensive: refuse to thread a non-filled amount to the next hop.
+            # If hop K-1 didn't actually settle (status != FILLED) or returned
+            # a zero/None amount_base, the next hop would compute base = 0 and
+            # the exchange precision check rejects with a misleading
+            # "below minimum precision" error — that's how we lost cycles
+            # before the OKX fill-poll fix.
+            from bitcoiners_dca.core.models import OrderStatus as _OS
+            if order.status != _OS.FILLED or not order.amount_base or order.amount_base <= 0:
+                raise ExchangeError(
+                    f"Hop {i+1}/{len(route.hops)} on {hop.exchange} {hop.pair} "
+                    f"returned status={order.status} amount_base={order.amount_base!r}; "
+                    f"refusing to thread to next hop. Funds (~{current_amount} "
+                    f"{hop.input_ccy}) may remain on {hop.exchange}."
+                )
             current_amount = order.amount_base
             result.notes.append(
                 f"Hop {i+1}/{len(route.hops)}: {hop.exchange} {hop.pair} "

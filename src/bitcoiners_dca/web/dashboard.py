@@ -33,7 +33,7 @@ import asyncio
 import logging
 import os
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Optional
 
@@ -265,10 +265,11 @@ def create_app(
             "routing.enable_cross_exchange_alerts": form.get("cross_alerts") == "on",
             "routing.preferred_exchange":
                 form.get("preferred_exchange") or None,
-            "risk.max_daily_aed":
-                str(form["max_daily_aed"]) if form.get("max_daily_aed") else None,
-            "risk.max_single_buy_aed":
-                str(form["max_single_buy_aed"]) if form.get("max_single_buy_aed") else None,
+            # "" and "0"/"0.0" both mean "no cap". Treating "0" as a real
+            # daily cap silently halts every cycle, which has caught real
+            # customers (and Ben).
+            "risk.max_daily_aed": _parse_risk_cap(form.get("max_daily_aed")),
+            "risk.max_single_buy_aed": _parse_risk_cap(form.get("max_single_buy_aed")),
         }
         flash = _apply_patch(state["config_path"], patch, _refresh_config)
         return HTMLResponse(jinja.get_template("strategy.html").render(_ctx(
@@ -616,11 +617,28 @@ def _apply_patch(cfg_path: str | Path, patch: dict, refresh) -> dict:
 
 
 def _redact(value: str) -> str:
+    """Bullets only — never leak prefix/suffix of stored secrets to the DOM.
+    Pairs with `persistence.secrets._redact` (same semantics)."""
     if not value:
         return ""
-    if len(value) < 8:
-        return "•" * len(value)
-    return f"{value[:3]}…{value[-3:]}"
+    return "••••••••"
+
+
+def _parse_risk_cap(raw) -> Optional[str]:
+    """Risk-cap form input → YAML value. "" / "0" / "0.0" → None (no cap).
+    Real positive number → preserved as string. Anything else → None."""
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    try:
+        v = Decimal(s)
+    except (InvalidOperation, ValueError):
+        return None
+    if v <= Decimal(0):
+        return None
+    return str(v)
 
 
 def _build_dashboard_exchanges(
