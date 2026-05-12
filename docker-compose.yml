@@ -50,7 +50,7 @@ services:
     depends_on:
       - dca
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8000/healthz"]
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:8000/healthz | grep -q '\"status\":\"ok\"'"]
       interval: 60s
       timeout: 5s
       retries: 3
