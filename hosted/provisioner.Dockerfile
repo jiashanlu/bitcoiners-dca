@@ -12,10 +12,15 @@
 
 FROM python:3.12-slim AS base
 
-# docker CLI + compose plugin (apt-get version is fine for our use)
+# System packages:
+#   - docker-ce-cli + docker-compose-plugin: for `docker compose up`
+#   - gettext-base:                          envsubst (rendering tenant templates)
+#   - iproute2:                              `ss` for port detection in provision.sh
+#   - bash:                                  provision.sh uses bashisms
+#   - curl/ca-certificates:                  healthcheck + general HTTPS
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       ca-certificates curl gnupg \
+       ca-certificates curl gnupg bash \
     && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/debian/gpg \
        | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
@@ -24,17 +29,24 @@ RUN apt-get update \
        > /etc/apt/sources.list.d/docker.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-       docker-ce-cli docker-compose-plugin gettext-base \
+       docker-ce-cli docker-compose-plugin gettext-base iproute2 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Python deps — keep minimal. We don't import the full bitcoiners-dca
-# package here; provision.sh handles the bot-side work.
+# Python deps:
+#   - FastAPI/Uvicorn/Pydantic: the service itself
+#   - cryptography:             scripts/generate_license.py imports it via
+#                               bitcoiners_dca.core.license; provision.sh
+#                               shells out to that script per tenant
+#   - pyyaml + jsonschema:      provision.sh doesn't strictly need these,
+#                               but importing bitcoiners_dca.core.license
+#                               pulls them in transitively
 RUN pip install --no-cache-dir \
     "fastapi==0.115.*" \
     "uvicorn[standard]==0.32.*" \
-    "pydantic[email]==2.10.*"
+    "pydantic[email]==2.10.*" \
+    "cryptography>=42,<46"
 
 COPY hosted/provisioner_service.py /app/provisioner_service.py
 

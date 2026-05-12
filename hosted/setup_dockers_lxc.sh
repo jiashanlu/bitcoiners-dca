@@ -50,10 +50,16 @@ if [[ -s "${PRIVATE_KEY}" ]]; then
   log "License signing key already exists at ${PRIVATE_KEY} — keeping"
   PUBLIC_HEX="$(cat "${PUBLIC_HEX_FILE}")"
 else
-  log "Generating new Ed25519 license signing keypair"
-  # keygen prints the public hex to stdout; capture it
-  out=$(python3 "${INSTALL_DIR}/scripts/generate_license.py" keygen \
-    --out "${PRIVATE_KEY}" 2>&1)
+  log "Generating new Ed25519 license signing keypair via python:3.12-slim"
+  # dockers-LXC is Alpine without python — run keygen inside an ephemeral
+  # python container that has cryptography installed.
+  out=$(docker run --rm \
+    -v "${INSTALL_DIR}:/work:ro" \
+    -v "${KEYS_DIR}:/keys" \
+    -w /work \
+    python:3.12-slim \
+    bash -c "pip install --quiet 'cryptography>=42' && \
+      python scripts/generate_license.py keygen --out /keys/license_signing.pem 2>&1")
   echo "${out}"
   PUBLIC_HEX=$(echo "${out}" | grep -oE '[0-9a-f]{64}' | head -1)
   if [[ -z "${PUBLIC_HEX}" ]]; then
@@ -68,24 +74,21 @@ else
   # verifies against the freshly-generated private key. Idempotent —
   # we only edit the inside of the LICENSE_PUBLIC_KEY_HEX = (...) block.
   log "Patching LICENSE_PUBLIC_KEY_HEX in src/bitcoiners_dca/core/license.py"
-  python3 - <<PY
-import re, pathlib
-p = pathlib.Path("${INSTALL_DIR}/src/bitcoiners_dca/core/license.py")
-src = p.read_text()
-# Replace the first occurrence of a quoted 64-char hex string in the file
-# — that's the LICENSE_PUBLIC_KEY_HEX value. The bootstrap is the only
-# such string in license.py.
-new, n = re.subn(
-    r'"[0-9a-f]{64}"',
-    '"${PUBLIC_HEX}"',
-    src,
-    count=1,
-)
-if n == 0:
-    raise SystemExit("No 64-char hex string found in license.py to replace")
-p.write_text(new)
-print("license.py patched")
-PY
+  # Use sed for the patch — no Python on dockers-LXC. We replace the first
+  # 64-char hex literal in license.py. That's the bootstrap LICENSE_PUBLIC_KEY_HEX.
+  LICENSE_PY="${INSTALL_DIR}/src/bitcoiners_dca/core/license.py"
+  if ! grep -qE '"[0-9a-f]{64}"' "${LICENSE_PY}"; then
+    log "ERROR: no 64-char hex literal found in license.py"
+    exit 1
+  fi
+  # Use a tab as sed delimiter so the hex value (which never contains tabs)
+  # doesn't collide with the slash that sed uses by default.
+  sed -i -e "0,/\"[0-9a-f]\\{64\\}\"/s/\"[0-9a-f]\\{64\\}\"/\"${PUBLIC_HEX}\"/" "${LICENSE_PY}"
+  if ! grep -q "\"${PUBLIC_HEX}\"" "${LICENSE_PY}"; then
+    log "ERROR: license.py patch did not take effect"
+    exit 1
+  fi
+  log "license.py patched"
 fi
 
 # ─── 4. Provisioner shared secret ────────────────────────────────────────
