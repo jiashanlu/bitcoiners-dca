@@ -88,10 +88,29 @@ class Feature(str, Enum):
     FAMILY_OFFICE = "family_office_multi_strategy"
 
 
-# Tier → set of features. Higher tiers inherit lower-tier features.
+# Tier → set of features.
+#
+# v0.7 pivot: ALL features are available to ALL tiers. The software is
+# fully open-source; we sell hosting + services, not feature unlocks.
+# (See docs/PRICING_PHILOSOPHY.md for the rationale.)
+#
+# The tier value is still meaningful to the rest of the bot — it
+# distinguishes "this customer is self-hosting" from "this customer is on
+# our hosted infra" for things like the dashboard's tier badge, telemetry
+# of which features hosted customers actually use, and where premium
+# Business-tier services like onboarding calls get scheduled. But the
+# feature set is identical across tiers.
+_ALL_FEATURES: set[Feature] = set(Feature)
+
 _TIER_FEATURES: dict[LicenseTier, set[Feature]] = {
-    LicenseTier.FREE: set(),  # base DCA always available, no premium features
-    LicenseTier.PRO: {
+    LicenseTier.FREE: _ALL_FEATURES,
+    LicenseTier.PRO: _ALL_FEATURES,
+    LicenseTier.BUSINESS: _ALL_FEATURES,
+}
+
+# Retained for the type-checker so the rest of the module still resolves
+# the same names; previously these were used to build up tiers.
+_LEGACY_PRO_FEATURES = {
         Feature.MULTI_EXCHANGE,
         Feature.MULTI_HOP_ROUTING,
         Feature.CROSS_EXCHANGE_ALERTS,
@@ -102,19 +121,15 @@ _TIER_FEATURES: dict[LicenseTier, set[Feature]] = {
         Feature.DRAWDOWN_SIZING,
         Feature.LIGHTNING_WITHDRAW,
         Feature.FUNDING_MONITOR,
-    },
-    LicenseTier.BUSINESS: {
-        # Pro features inherited dynamically below
+}
+_LEGACY_BUSINESS_FEATURES = {
         Feature.BASIS_TRADE,
         Feature.LN_MARKETS_YIELD,
         Feature.MULTI_ASSET_DCA,
         Feature.STABLECOIN_YIELD,
         Feature.TAX_LOSS_HARVEST,
         Feature.FAMILY_OFFICE,
-    },
 }
-# Business inherits Pro's set
-_TIER_FEATURES[LicenseTier.BUSINESS] |= _TIER_FEATURES[LicenseTier.PRO]
 
 
 # === Signing key — public-key embedded in the bot ===

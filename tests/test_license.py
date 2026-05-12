@@ -20,36 +20,31 @@ from bitcoiners_dca.core.license import (
 
 
 # === Tier feature membership ===
+# v0.7 pivot: every tier unlocks every feature. The license framework is
+# retained for tier-identification (hosted vs self-host) but doesn't gate
+# software capabilities. See core/license.py docstring + pricing page for
+# the rationale.
 
-def test_free_tier_has_no_premium_features():
+def test_free_tier_has_every_feature():
     mgr = LicenseManager(LicenseTier.FREE)
-    assert mgr.is_feature_enabled(Feature.MULTI_EXCHANGE) is False
-    assert mgr.is_feature_enabled(Feature.MULTI_HOP_ROUTING) is False
-    assert mgr.is_feature_enabled(Feature.MAKER_MODE) is False
-    assert mgr.is_feature_enabled(Feature.FUNDING_MONITOR) is False
-
-
-def test_pro_tier_unlocks_multi_exchange_and_strategies():
-    mgr = LicenseManager(LicenseTier.PRO)
     assert mgr.is_feature_enabled(Feature.MULTI_EXCHANGE)
     assert mgr.is_feature_enabled(Feature.MULTI_HOP_ROUTING)
     assert mgr.is_feature_enabled(Feature.MAKER_MODE)
-    assert mgr.is_feature_enabled(Feature.DIP_OVERLAY)
-    assert mgr.is_feature_enabled(Feature.VOLATILITY_WEIGHTED)
-    assert mgr.is_feature_enabled(Feature.LIGHTNING_WITHDRAW)
     assert mgr.is_feature_enabled(Feature.FUNDING_MONITOR)
-    # Business-tier features are NOT included
-    assert mgr.is_feature_enabled(Feature.BASIS_TRADE) is False
-    assert mgr.is_feature_enabled(Feature.LN_MARKETS_YIELD) is False
-
-
-def test_business_tier_inherits_pro_plus_advanced():
-    mgr = LicenseManager(LicenseTier.BUSINESS)
-    assert mgr.is_feature_enabled(Feature.MULTI_HOP_ROUTING)
     assert mgr.is_feature_enabled(Feature.BASIS_TRADE)
     assert mgr.is_feature_enabled(Feature.LN_MARKETS_YIELD)
-    assert mgr.is_feature_enabled(Feature.MULTI_ASSET_DCA)
-    assert mgr.is_feature_enabled(Feature.TAX_LOSS_HARVEST)
+
+
+def test_pro_tier_has_every_feature():
+    mgr = LicenseManager(LicenseTier.PRO)
+    for f in Feature:
+        assert mgr.is_feature_enabled(f), f"PRO tier missing {f}"
+
+
+def test_business_tier_has_every_feature():
+    mgr = LicenseManager(LicenseTier.BUSINESS)
+    for f in Feature:
+        assert mgr.is_feature_enabled(f), f"BUSINESS tier missing {f}"
 
 
 # === Token sign + verify round-trip ===
