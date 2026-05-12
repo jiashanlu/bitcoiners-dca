@@ -24,6 +24,13 @@ services:
     image: ${IMAGE_TAG}
     container_name: bitcoiners-dca-${TENANT_ID}-daemon
     restart: unless-stopped
+    # Hard limits so a single misbehaving tenant can't OOM the LXC.
+    # Daemon's a thin scheduler + a few HTTP polls — 256MB is generous.
+    # CPU cap of 0.5 lets ~30 tenants comfortably share a 16-CPU box.
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 0.5
+    pids_limit: 200
     command: ["run", "--config", "/app/config/config.yaml"]
     volumes:
       - ${TENANT_DATA_DIR}/config:/app/config:ro
@@ -43,6 +50,12 @@ services:
     image: ${IMAGE_TAG}
     container_name: bitcoiners-dca-${TENANT_ID}-dashboard
     restart: unless-stopped
+    # Dashboard handles a single operator's session; uvicorn + jinja
+    # stays well under 256MB.
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 0.5
+    pids_limit: 200
     command:
       - "dashboard"
       - "--config"
