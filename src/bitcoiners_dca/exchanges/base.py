@@ -129,6 +129,43 @@ class Exchange(ABC):
     async def get_order(self, pair: str, order_id: str) -> Order:
         """Refresh order state — used to confirm fills after placing."""
 
+    async def _poll_until_settled(
+        self,
+        pair: str,
+        placed: Order,
+        max_seconds: int = 15,
+    ) -> Order:
+        """Wait for a freshly-placed market order to actually settle.
+
+        Many exchanges return from `create_market_buy_order` with the order
+        in `pending` state and `filled=0`. If the caller threads that 0 into
+        a multi-hop next leg, the next hop's precision check rejects with a
+        misleading "amount below minimum precision" error. This helper
+        polls `get_order` once per second until status is FILLED/CANCELLED
+        or we hit the timeout. Always returns the freshest snapshot.
+
+        Adapters opt-in by calling this from their `place_market_buy` right
+        before returning. Each adapter still handles its own error
+        translation (InsufficientBalance, etc.) — this only deals with the
+        "ordered → fill" race.
+        """
+        import asyncio
+        from bitcoiners_dca.core.models import OrderStatus
+        if not placed.order_id:
+            return placed
+        if placed.status in (OrderStatus.FILLED, OrderStatus.CANCELLED):
+            return placed
+        snap = placed
+        for _ in range(max_seconds):
+            await asyncio.sleep(1)
+            try:
+                snap = await self.get_order(pair, placed.order_id)
+            except Exception:
+                continue
+            if snap.status in (OrderStatus.FILLED, OrderStatus.CANCELLED):
+                break
+        return snap
+
     @abstractmethod
     async def get_trade_history(
         self,

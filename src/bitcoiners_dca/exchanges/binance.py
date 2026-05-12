@@ -131,7 +131,11 @@ class BinanceExchange(Exchange):
                 symbol=pair, amount=float(quote_amount),
                 params={"quoteOrderQty": float(quote_amount)},
             )
-            return self._normalize_order(raw, pair, quote_amount)
+            order = self._normalize_order(raw, pair, quote_amount)
+            # Same fill-race as OKX: ccxt returns before raw["filled"] is
+            # populated. Poll get_order to capture the real amount_base
+            # before threading to next hop.
+            return await self._poll_until_settled(pair, order)
         except ccxt_async.InsufficientFunds as e:
             raise InsufficientBalanceError(str(e)) from e
         except Exception as e:

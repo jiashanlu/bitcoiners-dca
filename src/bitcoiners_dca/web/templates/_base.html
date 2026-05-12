@@ -280,6 +280,7 @@ a { color: var(--accent); text-decoration: none; }
       <a href="{{ prefix }}/prices" {% if active == "prices" %}class="active"{% endif %}>Prices</a>
       <a href="{{ prefix }}/trades" {% if active == "trades" %}class="active"{% endif %}>Trades</a>
       <a href="{{ prefix }}/routes-audit" {% if active == "routes" %}class="active"{% endif %}>Routes</a>
+      <a href="{{ prefix }}/withdrawals" {% if active == "withdrawals" %}class="active"{% endif %}>Withdrawals</a>
       <a href="{{ prefix }}/settings" {% if active == "settings" %}class="active"{% endif %}>Settings</a>
     </nav>
     <div class="user">
@@ -290,6 +291,22 @@ a { color: var(--accent); text-decoration: none; }
   </aside>
   <main class="main">
     {% if flash %}<div class="flash {{ flash.kind }}">{{ flash.message }}</div>{% endif %}
+
+    {# First-visit welcome — surfaces critical next steps so paying customers
+       don't sit in dry-run thinking it's broken. Rendered when no trades yet
+       AND in dry-run mode. #}
+    {% if welcome %}
+    <div class="flash warn" style="line-height:1.65">
+      <strong>👋 Welcome to bitcoiners-dca.</strong> You're in <strong>dry-run mode</strong> right now — cycles fire on schedule but no real orders are placed. Run through this checklist:
+      <ol style="margin:8px 0 0 1.4em">
+        <li>Pick a strategy on <a href="{{ prefix }}/strategy">Strategy</a> (frequency + budget). Watch the live preview to make sure your per-cycle amount is ≥ AED 50.</li>
+        <li>Add your exchange API keys on <a href="{{ prefix }}/exchanges">Exchanges</a> (trade-only scope; never withdraw scope).</li>
+        <li>(Optional but recommended) Set your <a href="{{ prefix }}/withdrawals">auto-withdraw destination</a> — your own hardware wallet address.</li>
+        <li>Set a <strong>daily-spend risk cap</strong> on <a href="{{ prefix }}/strategy">Strategy</a> → Risk caps. Belt + braces.</li>
+        <li>When everything looks right, click <strong>Go live →</strong> in the banner above. The first real cycle fires at the next cron tick — or click <strong>Buy now</strong> to fire one immediately.</li>
+      </ol>
+    </div>
+    {% endif %}
 
     {# Status banner — same on every page so user always knows whether the bot
        is actually placing real orders. The big buttons live here too so they're

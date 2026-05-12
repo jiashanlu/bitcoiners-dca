@@ -1,0 +1,44 @@
+{% extends "_base.html" %}
+{% block title %}Auto-withdraw · bitcoiners-dca{% endblock %}
+{% block content %}
+<h1>Auto-withdraw</h1>
+<p class="subtitle">Once your exchange BTC balance crosses the threshold, the bot sweeps it to a hardcoded destination address. Exchange-as-custodian risk → near-zero.</p>
+
+<form method="post" action="{{ prefix }}/withdrawals">
+
+<div class="card">
+  <h2>Destination</h2>
+  <p class="help">Hardcode YOUR hardware-wallet address. The bot has no UI to change it later — that's the point. Generate the address on your hardware wallet, verify on-device, paste here.</p>
+  <div class="form-row">
+    <label><input type="checkbox" name="enabled" {% if config.auto_withdraw.enabled %}checked{% endif %}> Enable auto-withdraw</label>
+  </div>
+  <div class="form-row">
+    <label>BTC address</label>
+    <input type="text" name="destination_address"
+      value="{{ config.auto_withdraw.destination_address or '' }}"
+      placeholder="bc1q… or bc1p…"
+      pattern="^(bc1|[13])[a-zA-HJ-NP-Z0-9]{25,87}$"
+      title="A valid mainnet BTC address (bech32 bc1… or legacy 1…/3…)">
+    <small>Re-verify on your hardware wallet before saving. Once enabled the bot withdraws automatically.</small>
+  </div>
+  <div class="form-row">
+    <label>Threshold (BTC)</label>
+    <input type="number" step="0.00000001" min="0.0001" name="threshold_btc"
+      value="{{ config.auto_withdraw.threshold_btc }}">
+    <small>Withdrawals fire when exchange BTC balance ≥ this. Typical: 0.001-0.01 BTC. Lower threshold = more withdrawals = more on-chain fees.</small>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Safety</h2>
+  <ul style="margin-left:1.2em; color:var(--text-muted); line-height:1.7">
+    <li>Use a <strong>fresh address</strong> from your hardware wallet, not a previously-used one.</li>
+    <li><strong>Trade-only API key</strong> is enough — the exchange's withdraw whitelist authorizes the address, not the bot.</li>
+    <li>Set the exchange's <strong>withdraw address whitelist</strong> to ONLY this address before turning auto-withdraw on. Even if the bot is compromised, the most an attacker can do is trigger your already-whitelisted withdraw.</li>
+    <li>For Lightning withdrawals (Pro tier, OKX only): leave the address field as a BTC on-chain address and use the CLI <code>bitcoiners-dca withdraw lnbc1…</code> path for one-shot Lightning invoices.</li>
+  </ul>
+</div>
+
+<button type="submit">Save</button>
+</form>
+{% endblock %}

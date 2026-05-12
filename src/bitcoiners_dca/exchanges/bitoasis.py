@@ -268,7 +268,11 @@ class BitOasisExchange(Exchange):
             raise
 
         order_raw = data.get("order", data)
-        return self._normalize_order(order_raw, pair, quote_amount)
+        order = self._normalize_order(order_raw, pair, quote_amount)
+        # Same fill-race as OKX/Binance: BitOasis returns the order in
+        # `pending` with filled=0. Poll get_order until settled (or 15s)
+        # so multi-hop routes see the real filled amount_base.
+        return await self._poll_until_settled(pair, order)
 
     async def place_limit_buy(
         self,

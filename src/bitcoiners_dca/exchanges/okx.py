@@ -145,27 +145,10 @@ class OKXExchange(Exchange):
                 params=params,
             )
             order = self._normalize_order(raw, pair, quote_amount)
-            # OKX returns the order before it's been filled — `raw["filled"]`
-            # is 0 at place-time. For multi-hop routes we need the actually-
-            # filled `amount_base` before threading to the next hop. Poll
-            # briefly (up to 15s) for the order to close.
-            if order.amount_base in (None, Decimal(0)) and order.order_id:
-                import asyncio as _aio
-                from bitcoiners_dca.core.models import OrderStatus
-                for _ in range(15):
-                    await _aio.sleep(1)
-                    try:
-                        order = await self.get_order(pair, order.order_id)
-                    except Exception as e:
-                        logger.warning("OKX get_order poll failed: %s", e)
-                        continue
-                    if order.status in (OrderStatus.FILLED, OrderStatus.CANCELLED):
-                        break
-                logger.info(
-                    "OKX market_buy fill: pair=%s status=%s amount_base=%s",
-                    pair, order.status, order.amount_base,
-                )
-            return order
+            # OKX returns the order before it's been filled (raw["filled"]=0
+            # at place-time). Use the base-class helper to poll for the real
+            # fill — see `Exchange._poll_until_settled` for the rationale.
+            return await self._poll_until_settled(pair, order)
         except ccxt_async.InsufficientFunds as e:
             raise InsufficientBalanceError(str(e)) from e
         except Exception as e:

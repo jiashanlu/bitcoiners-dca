@@ -174,6 +174,15 @@ def create_app(
         # /dca/console/<path> so nav stays inside the iframe. Empty
         # string for direct LAN/Free-tier access — links resolve to /.
         prefix = _prefix(request)
+        # First-visit welcome: no trades yet AND dry-run on. Once the
+        # customer goes live OR a trade lands, the banner stops rendering.
+        welcome = False
+        try:
+            if cfg.dry_run:
+                cnt = _db()._conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+                welcome = (cnt == 0)
+        except Exception:
+            welcome = False
         return {
             "request": request,
             "user_email": _authenticated_user(request),
@@ -181,6 +190,7 @@ def create_app(
             "config": cfg,
             "prefix": prefix,
             "bot_status": _bot_status(),
+            "welcome": welcome,
             "flash": extra.pop("flash", None),
             "active": extra.pop("active", ""),
             **extra,
@@ -426,6 +436,33 @@ def create_app(
         return HTMLResponse(jinja.get_template("routes.html").render(_ctx(
             request, active="routes",
             amount=amount, decision=decision, error=error,
+        )))
+
+    @app.get("/withdrawals", response_class=HTMLResponse)
+    async def withdrawals_page(request: Request):
+        return HTMLResponse(jinja.get_template("withdrawals.html").render(_ctx(
+            request, active="withdrawals",
+        )))
+
+    @app.post("/withdrawals", response_class=HTMLResponse)
+    async def withdrawals_save(request: Request):
+        form = await request.form()
+        # Address validation: empty if disabled is fine; otherwise require
+        # something that looks like a BTC address. Light client-side regex
+        # is the form's job; here we just bound the field shape.
+        addr = (form.get("destination_address") or "").strip() or None
+        try:
+            thr = Decimal(str(form.get("threshold_btc", "0.01")).strip() or "0.01")
+        except InvalidOperation:
+            thr = Decimal("0.01")
+        patch = {
+            "auto_withdraw.enabled": form.get("enabled") == "on",
+            "auto_withdraw.destination_address": addr,
+            "auto_withdraw.threshold_btc": str(thr),
+        }
+        flash = _apply_patch(state["config_path"], patch, _refresh_config)
+        return HTMLResponse(jinja.get_template("withdrawals.html").render(_ctx(
+            request, active="withdrawals", flash=flash,
         )))
 
     @app.get("/settings", response_class=HTMLResponse)

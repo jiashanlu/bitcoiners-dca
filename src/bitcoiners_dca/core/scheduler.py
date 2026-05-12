@@ -184,12 +184,35 @@ class DCAScheduler:
         # but the close-loop runs on `shutdown()`. For a hot-reload we accept
         # the leak: next cycle uses fresh clients.
         old_exchanges = self.exchanges
+        old_cfg = self.config
         self.config = fresh["config"]
         self.exchanges = fresh["exchanges"]
         self.strategy = fresh["strategy"]
         self.router = fresh["router"]
         self.monitor = fresh["monitor"]
         self.risk = fresh.get("risk", self.risk)
+        # If cron-relevant fields changed, swap the trigger on the live job.
+        # Before this fix, customers saved Strategy → frequency: hourly +
+        # every_n_hours: 2 and the daemon kept firing on the old schedule
+        # until container restart.
+        cron_keys = ("frequency", "every_n_hours", "day_of_week", "time", "timezone")
+        if any(
+            getattr(old_cfg.strategy, k, None) != getattr(self.config.strategy, k, None)
+            for k in cron_keys
+        ):
+            try:
+                self._scheduler.reschedule_job(
+                    "dca_cycle", trigger=_build_cron_trigger(self.config)
+                )
+                logger.info(
+                    "DCA cron rescheduled: %s every_n_hours=%s %s %s",
+                    self.config.strategy.frequency,
+                    getattr(self.config.strategy, "every_n_hours", 1),
+                    self.config.strategy.day_of_week,
+                    self.config.strategy.time,
+                )
+            except Exception as e:
+                logger.warning("reschedule_job failed: %s", e)
         # Best-effort close of replaced clients
         for ex in old_exchanges:
             if ex not in self.exchanges:
