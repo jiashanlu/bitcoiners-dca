@@ -227,6 +227,21 @@ class DCAStrategy:
         # 3. Execute the route hop-by-hop
         exchange_map = {ex.name: ex for ex in exchanges}
         chosen_route = decision.chosen.route
+        # Temp debug — print the chosen route so we can verify each hop's
+        # pair + price + input/output currency in the daemon log.
+        import logging as _lg
+        _lg.getLogger(__name__).info(
+            "Chosen route: %d hops, total: %s",
+            len(chosen_route.hops), decision.reason,
+        )
+        for _i, _h in enumerate(chosen_route.hops):
+            _lg.getLogger(__name__).info(
+                "  hop[%d]: exchange=%s pair=%s in=%s out=%s price=%s",
+                _i, _h.exchange, _h.pair,
+                getattr(_h, "input_ccy", "?"),
+                getattr(_h, "output_ccy", "?"),
+                getattr(_h, "price", "?"),
+            )
         try:
             orders = await self._execute_route(
                 chosen_route, amount, exchange_map, result,

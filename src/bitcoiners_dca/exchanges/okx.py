@@ -135,6 +135,10 @@ class OKXExchange(Exchange):
         try:
             # OKX market-buy: pass `quoteOrderQty` for AED-based market buys
             params = {"quoteOrderQty": float(quote_amount), "tgtCcy": "quote_ccy"}
+            logger.info(
+                "OKX place_market_buy: pair=%s amount=%s params=%s",
+                pair, float(quote_amount), params,
+            )
             raw = await self._client.create_market_buy_order(
                 symbol=pair,
                 amount=float(quote_amount),  # ccxt expects float, careful with precision
