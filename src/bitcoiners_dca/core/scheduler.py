@@ -223,6 +223,23 @@ class DCAScheduler:
         except Exception as e:
             logger.exception("DCA cycle failed unexpectedly")
             self.risk.record_cycle_result(success=False)
+            # Persist the failure so the dashboard can show it. Empty
+            # cycle_log made the bot look silently broken — a customer
+            # has no way to know cycles even ran. Record a synthetic
+            # CycleResult with the error string.
+            try:
+                from datetime import datetime, timezone
+                from bitcoiners_dca.core.strategy import ExecutionResult
+                fail_result = ExecutionResult(
+                    timestamp=datetime.now(timezone.utc),
+                    intended_amount_aed=decision.amount_aed,
+                    overlay_applied=None,
+                    routing_decision=None,
+                    errors=[str(e)[:500]],
+                )
+                self.db.record_cycle(fail_result)
+            except Exception:
+                logger.exception("failed to record cycle failure")
             await self.notifier.notify_error("DCA cycle failed", str(e))
 
     async def _run_arbitrage_check(self) -> None:

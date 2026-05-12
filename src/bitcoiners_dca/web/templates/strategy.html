@@ -61,19 +61,36 @@
   const freq = document.getElementById('frequency');
   const out = document.getElementById('cycle_preview');
   if (!amt || !per || !freq || !out) return;
+  // Exchanges reject orders smaller than ~AED 40-50 (OKX BTC/USDT min,
+  // BitOasis BTC/AED min). Surface a clear warning before the user saves
+  // an impossible config.
+  const MIN_PER_CYCLE_AED = 50;
+
   function update() {
     const a = parseFloat(amt.value || '0');
     const p = per.value; const f = freq.value;
-    if (!a || !CYCLES[f]) { out.textContent = 'Enter a number above.'; return; }
+    if (!a || !CYCLES[f]) { out.textContent = 'Enter a number above.'; out.style.color = ''; return; }
+    let perCycle;
+    let summary;
     if (p === 'cycle') {
-      out.textContent = '→ AED ' + a.toFixed(2) + ' per ' + f + ' cycle.';
-      return;
+      perCycle = a;
+      summary = '→ AED ' + a.toFixed(2) + ' per ' + f + ' cycle.';
+    } else {
+      const annual = a * PERIODS[p];
+      perCycle = annual / CYCLES[f];
+      const cyclesPerPeriod = CYCLES[f] / PERIODS[p];
+      summary = '→ AED ' + perCycle.toFixed(2) + ' per cycle '
+        + '(<strong>' + cyclesPerPeriod.toFixed(2) + ' ' + f + ' cycles per ' + p.replace('ly', '') + '</strong>).';
     }
-    const annual = a * PERIODS[p];
-    const perCycle = annual / CYCLES[f];
-    const cyclesPerPeriod = CYCLES[f] / PERIODS[p];
-    out.innerHTML = '→ AED ' + perCycle.toFixed(2) + ' per cycle '
-      + '(<strong>' + cyclesPerPeriod.toFixed(2) + ' ' + f + ' cycles per ' + p.replace('ly', '') + '</strong>).';
+    if (perCycle < MIN_PER_CYCLE_AED) {
+      out.style.color = 'var(--warn, #f0b000)';
+      summary += '<br><strong>⚠ Too small.</strong> Exchanges reject orders below ~AED '
+        + MIN_PER_CYCLE_AED + '. Either raise the budget or pick a less frequent cadence '
+        + '(daily/weekly/monthly). Saving as-is will fail every cycle.';
+    } else {
+      out.style.color = '';
+    }
+    out.innerHTML = summary;
   }
   // Show day-of-week only for weekly. Relabel/hint Time-of-day for hourly.
   const dowRow = document.getElementById('row_day_of_week');
