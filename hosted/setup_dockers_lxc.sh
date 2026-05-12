@@ -74,21 +74,24 @@ else
   # verifies against the freshly-generated private key. Idempotent —
   # we only edit the inside of the LICENSE_PUBLIC_KEY_HEX = (...) block.
   log "Patching LICENSE_PUBLIC_KEY_HEX in src/bitcoiners_dca/core/license.py"
-  # Use sed for the patch — no Python on dockers-LXC. We replace the first
-  # 64-char hex literal in license.py. That's the bootstrap LICENSE_PUBLIC_KEY_HEX.
-  LICENSE_PY="${INSTALL_DIR}/src/bitcoiners_dca/core/license.py"
-  if ! grep -qE '"[0-9a-f]{64}"' "${LICENSE_PY}"; then
-    log "ERROR: no 64-char hex literal found in license.py"
-    exit 1
-  fi
-  # Use a tab as sed delimiter so the hex value (which never contains tabs)
-  # doesn't collide with the slash that sed uses by default.
-  sed -i -e "0,/\"[0-9a-f]\\{64\\}\"/s/\"[0-9a-f]\\{64\\}\"/\"${PUBLIC_HEX}\"/" "${LICENSE_PY}"
-  if ! grep -q "\"${PUBLIC_HEX}\"" "${LICENSE_PY}"; then
-    log "ERROR: license.py patch did not take effect"
-    exit 1
-  fi
-  log "license.py patched"
+  # Alpine busybox sed lacks the `0,/pattern/` range syntax, so we run
+  # the patch inside the python:3.12-slim image we already pulled.
+  docker run --rm \
+    -v "${INSTALL_DIR}:/work" \
+    -e "PUBLIC_HEX=${PUBLIC_HEX}" \
+    -w /work \
+    python:3.12-slim \
+    python -c "
+import os, re, sys, pathlib
+p = pathlib.Path('src/bitcoiners_dca/core/license.py')
+src = p.read_text()
+new, n = re.subn(r'\"[0-9a-f]{64}\"', f'\"{os.environ[\"PUBLIC_HEX\"]}\"', src, count=1)
+if n == 0:
+    print('ERROR: no 64-char hex literal found in license.py', file=sys.stderr)
+    sys.exit(1)
+p.write_text(new)
+print(f'license.py patched: {os.environ[\"PUBLIC_HEX\"][:16]}...')
+"
 fi
 
 # ─── 4. Provisioner shared secret ────────────────────────────────────────
