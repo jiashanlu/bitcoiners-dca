@@ -31,6 +31,18 @@
     </select>
     <small>How often the cron fires. Hourly is aggressive — set Risk caps below.</small>
   </div>
+  <div class="form-row" id="row_every_n_hours">
+    <label>Every</label>
+    <div style="display:flex;gap:8px;align-items:center">
+      <select name="every_n_hours" id="every_n_hours" style="max-width:120px">
+        {% set current_n = config.strategy.every_n_hours or 1 %}
+        {% for n in [1, 2, 3, 4, 6, 8, 12] %}
+        <option value="{{ n }}" {% if current_n == n %}selected{% endif %}>{{ n }} hour{% if n != 1 %}s{% endif %}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <small>Sub-divides the hourly cadence. Stick to divisors of 24 (1, 2, 3, 4, 6, 8, 12) for clean cron alignment.</small>
+  </div>
   <div class="form-row" id="row_day_of_week">
     <label>Day of week</label>
     <select name="day_of_week">
@@ -59,6 +71,7 @@
   const amt = document.getElementById('budget_amount');
   const per = document.getElementById('budget_period');
   const freq = document.getElementById('frequency');
+  const evN = document.getElementById('every_n_hours');
   const out = document.getElementById('cycle_preview');
   if (!amt || !per || !freq || !out) return;
   // Exchanges reject orders smaller than ~AED 40-50 (OKX BTC/USDT min,
@@ -66,43 +79,68 @@
   // an impossible config.
   const MIN_PER_CYCLE_AED = 50;
 
+  function effCycles(f) {
+    // Hourly cycles divided by every_n_hours; other frequencies ignore it.
+    if (f === 'hourly') {
+      const n = Math.max(1, parseInt(evN ? evN.value : '1', 10) || 1);
+      return CYCLES.hourly / n;
+    }
+    return CYCLES[f];
+  }
+  function cadenceLabel(f) {
+    if (f === 'hourly') {
+      const n = Math.max(1, parseInt(evN ? evN.value : '1', 10) || 1);
+      return n === 1 ? 'hour' : `${n}-hour`;
+    }
+    return f;
+  }
   function update() {
     const a = parseFloat(amt.value || '0');
     const p = per.value; const f = freq.value;
     if (!a || !CYCLES[f]) { out.textContent = 'Enter a number above.'; out.style.color = ''; return; }
+    const cyclesYr = effCycles(f);
+    const cad = cadenceLabel(f);
     let perCycle;
     let summary;
     if (p === 'cycle') {
       perCycle = a;
-      summary = '→ AED ' + a.toFixed(2) + ' per ' + f + ' cycle.';
+      summary = '→ AED ' + a.toFixed(2) + ' per ' + cad + ' cycle.';
     } else {
       const annual = a * PERIODS[p];
-      perCycle = annual / CYCLES[f];
-      const cyclesPerPeriod = CYCLES[f] / PERIODS[p];
+      perCycle = annual / cyclesYr;
+      const cyclesPerPeriod = cyclesYr / PERIODS[p];
       summary = '→ AED ' + perCycle.toFixed(2) + ' per cycle '
-        + '(<strong>' + cyclesPerPeriod.toFixed(2) + ' ' + f + ' cycles per ' + p.replace('ly', '') + '</strong>).';
+        + '(<strong>' + cyclesPerPeriod.toFixed(2) + ' ' + cad + ' cycles per ' + p.replace('ly', '') + '</strong>).';
     }
     if (perCycle < MIN_PER_CYCLE_AED) {
       out.style.color = 'var(--warn, #f0b000)';
       summary += '<br><strong>⚠ Too small.</strong> Exchanges reject orders below ~AED '
-        + MIN_PER_CYCLE_AED + '. Either raise the budget or pick a less frequent cadence '
-        + '(daily/weekly/monthly). Saving as-is will fail every cycle.';
+        + MIN_PER_CYCLE_AED + '. Either raise the budget, stretch the cadence (every 4-12 hours), '
+        + 'or pick a less frequent base frequency. Saving as-is will fail every cycle.';
     } else {
       out.style.color = '';
     }
     out.innerHTML = summary;
   }
   // Show day-of-week only for weekly. Relabel/hint Time-of-day for hourly.
+  // Show "Every N hours" picker only when frequency=hourly.
   const dowRow = document.getElementById('row_day_of_week');
+  const evNRow = document.getElementById('row_every_n_hours');
   const labelTime = document.getElementById('label_time');
   const hintTime = document.getElementById('hint_time');
   function applyFreqVisibility() {
     const f = freq.value;
     if (dowRow) dowRow.style.display = (f === 'weekly') ? '' : 'none';
+    if (evNRow) evNRow.style.display = (f === 'hourly') ? '' : 'none';
     if (labelTime && hintTime) {
       if (f === 'hourly') {
         labelTime.textContent = 'Minute of the hour';
-        hintTime.innerHTML = 'Only the minutes matter — e.g. 09:<strong>15</strong> fires every hour at :15.';
+        const n = Math.max(1, parseInt(evN ? evN.value : '1', 10) || 1);
+        if (n === 1) {
+          hintTime.innerHTML = 'Only the minutes matter — e.g. 09:<strong>15</strong> fires every hour at :15.';
+        } else {
+          hintTime.innerHTML = `Only the minutes matter — fires every <strong>${n}</strong> hours at :MM (e.g. 00:15, ${String(n).padStart(2,'0')}:15, …).`;
+        }
       } else if (f === 'monthly') {
         labelTime.textContent = 'Time of day';
         hintTime.innerHTML = 'Fires on the <strong>1st</strong> of each month at this time.';
@@ -119,6 +157,7 @@
     amt.addEventListener(ev, update);
     per.addEventListener(ev, update);
     freq.addEventListener(ev, function () { update(); applyFreqVisibility(); });
+    if (evN) evN.addEventListener(ev, function () { update(); applyFreqVisibility(); });
   });
   update();
   applyFreqVisibility();

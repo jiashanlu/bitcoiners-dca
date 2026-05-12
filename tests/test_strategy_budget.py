@@ -92,6 +92,23 @@ def test_strategy_yaml_backfills_budget_from_amount_aed():
     assert cfg.budget_period == "cycle"
 
 
+# every_n_hours stretching
+
+def test_hourly_every_4_hours_doubles_per_cycle():
+    """Every 4 hours = 1/4 the cycles of every hour, so per-cycle 4×."""
+    base = derive_per_cycle(Decimal("1000"), "daily", "hourly", every_n_hours=1)
+    every4 = derive_per_cycle(Decimal("1000"), "daily", "hourly", every_n_hours=4)
+    # 4×1 = 4 within rounding
+    assert (every4 - base * 4).copy_abs() < Decimal("0.05")
+
+
+def test_cycles_per_period_with_every_n_hours():
+    # Every 6 hours = 1460 hourly cycles/year. Per week = 1460/52 ≈ 28.08
+    # (the 0.08 is the leap-day fractional bit; not exactly 28).
+    cpp = cycles_per_period("hourly", "weekly", every_n_hours=6)
+    assert abs(cpp - Decimal("28.0769")) < Decimal("0.001")
+
+
 def test_strategy_yaml_respects_explicit_budget():
     """When the YAML has both, budget_amount wins — it's the source of
     truth for what the user typed; amount_aed is the derived per-cycle."""

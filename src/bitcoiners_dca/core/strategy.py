@@ -38,10 +38,27 @@ _PERIODS_PER_YEAR: dict[str, int] = {
 }
 
 
-def derive_per_cycle(budget_amount: Decimal, budget_period: str, frequency: str) -> Decimal:
+def _effective_cycles_per_year(frequency: str, every_n_hours: int = 1) -> int:
+    """Effective cycles per year accounting for hourly's `every_n_hours`
+    sub-divider. For non-hourly frequencies, every_n_hours is ignored."""
+    if frequency == "hourly":
+        n = max(1, every_n_hours or 1)
+        return _CYCLES_PER_YEAR["hourly"] // n
+    return _CYCLES_PER_YEAR[frequency]
+
+
+def derive_per_cycle(
+    budget_amount: Decimal,
+    budget_period: str,
+    frequency: str,
+    every_n_hours: int = 1,
+) -> Decimal:
     """Translate a user-stated spend rate into the per-cycle base amount
     the DCA engine uses. `budget_period="cycle"` is a passthrough — the
     entered amount IS the per-cycle amount (legacy/advanced mode).
+
+    `every_n_hours` only matters when frequency=hourly. Defaults to 1
+    (every hour). Stretching to N hours raises the per-cycle amount.
 
     Rounded to 2 decimal places (AED minor-unit precision).
     """
@@ -52,15 +69,15 @@ def derive_per_cycle(budget_amount: Decimal, budget_period: str, frequency: str)
     if frequency not in _CYCLES_PER_YEAR:
         raise ValueError(f"unknown frequency: {frequency}")
     annual_budget = Decimal(budget_amount) * Decimal(_PERIODS_PER_YEAR[budget_period])
-    per_cycle = annual_budget / Decimal(_CYCLES_PER_YEAR[frequency])
+    per_cycle = annual_budget / Decimal(_effective_cycles_per_year(frequency, every_n_hours))
     return per_cycle.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
-def cycles_per_period(frequency: str, period: str) -> Decimal:
+def cycles_per_period(frequency: str, period: str, every_n_hours: int = 1) -> Decimal:
     """How many DCA cycles happen per budget period. For the UI preview."""
     if period == "cycle":
         return Decimal(1)
-    return Decimal(_CYCLES_PER_YEAR[frequency]) / Decimal(_PERIODS_PER_YEAR[period])
+    return Decimal(_effective_cycles_per_year(frequency, every_n_hours)) / Decimal(_PERIODS_PER_YEAR[period])
 
 
 @dataclass

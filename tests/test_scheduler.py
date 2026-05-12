@@ -6,11 +6,17 @@ from bitcoiners_dca.core.scheduler import _build_cron_trigger
 from bitcoiners_dca.utils.config import AppConfig, StrategyYamlConfig
 
 
-def _cfg(frequency: str, time: str = "09:15", day_of_week: str = "monday") -> AppConfig:
+def _cfg(
+    frequency: str,
+    time: str = "09:15",
+    day_of_week: str = "monday",
+    every_n_hours: int = 1,
+) -> AppConfig:
     cfg = AppConfig()
     cfg.strategy = StrategyYamlConfig(
         amount_aed=100,
         frequency=frequency,
+        every_n_hours=every_n_hours,
         day_of_week=day_of_week,
         time=time,
         timezone="UTC",
@@ -55,3 +61,34 @@ def test_invalid_frequency_raises():
     import pytest
     with pytest.raises(ValueError, match="Invalid frequency"):
         _build_cron_trigger(_cfg("yearly"))
+
+
+# every_n_hours — clean divisors of 24
+
+def test_hourly_every_4_hours_uses_step_cron():
+    trig = _build_cron_trigger(_cfg("hourly", time="00:30", every_n_hours=4))
+    f = _trigger_fields(trig)
+    assert f["minute"] == "30"
+    # apscheduler renders */4 explicitly
+    assert f["hour"] in ("*/4", "0,4,8,12,16,20")
+
+
+def test_hourly_every_12_hours_uses_step_cron():
+    trig = _build_cron_trigger(_cfg("hourly", time="00:00", every_n_hours=12))
+    f = _trigger_fields(trig)
+    assert f["hour"] in ("*/12", "0,12")
+
+
+def test_hourly_every_5_hours_snaps_to_clean_divisor():
+    """5 isn't a divisor of 24 — scheduler snaps to 4 + logs a warning."""
+    trig = _build_cron_trigger(_cfg("hourly", time="00:00", every_n_hours=5))
+    f = _trigger_fields(trig)
+    assert f["hour"] in ("*/4", "0,4,8,12,16,20")
+
+
+def test_hourly_every_n_hours_zero_treated_as_one():
+    """Defensive: bogus value (0 or negative) defaults to every hour."""
+    trig = _build_cron_trigger(_cfg("hourly", time="00:15", every_n_hours=0))
+    f = _trigger_fields(trig)
+    assert f["hour"] == "*"
+    assert f["minute"] == "15"

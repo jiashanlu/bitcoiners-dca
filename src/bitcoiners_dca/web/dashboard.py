@@ -229,6 +229,10 @@ def create_app(
         form = await request.form()
         frequency = form.get("frequency", "weekly")
         budget_period = form.get("budget_period", "cycle")
+        try:
+            every_n_hours = max(1, int(form.get("every_n_hours", "1") or "1"))
+        except ValueError:
+            every_n_hours = 1
         # Parse budget amount; fall back to legacy amount_aed if budget_amount
         # is missing (older clients before this UX shipped).
         raw_budget = (form.get("budget_amount") or form.get("amount_aed") or "0").strip()
@@ -236,7 +240,7 @@ def create_app(
             budget_amount = Decimal(raw_budget)
         except InvalidOperation:
             budget_amount = Decimal(0)
-        amount_aed = derive_per_cycle(budget_amount, budget_period, frequency)
+        amount_aed = derive_per_cycle(budget_amount, budget_period, frequency, every_n_hours)
 
         # Build patch dict from form
         patch = {
@@ -244,6 +248,7 @@ def create_app(
             "strategy.budget_amount": str(budget_amount),
             "strategy.budget_period": budget_period,
             "strategy.frequency": frequency,
+            "strategy.every_n_hours": every_n_hours,
             "strategy.day_of_week": form.get("day_of_week", "monday"),
             "strategy.time": form.get("time", "09:00"),
             "strategy.timezone": form.get("timezone", "Asia/Dubai"),

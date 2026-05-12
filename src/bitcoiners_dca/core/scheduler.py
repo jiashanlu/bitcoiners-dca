@@ -57,15 +57,15 @@ def _build_cron_trigger(cfg: AppConfig) -> CronTrigger:
     """Translate the YAML config into an apscheduler CronTrigger.
 
     Supports:
-      frequency: hourly  -> every hour at :MM (timezone-aware)
+      frequency: hourly  -> every N hours at :MM (cfg.strategy.every_n_hours)
       frequency: daily   -> every day at HH:MM
       frequency: weekly  -> day_of_week at HH:MM
       frequency: monthly -> 1st of the month at HH:MM
 
-    Hourly fires N times more often than daily; the per-cycle base amount
-    is unchanged, so the risk caps (max_daily_aed + max_single_buy_aed)
-    are what stops accidental over-spend. Set those before flipping to
-    hourly.
+    Hourly with every_n_hours=1 fires 24x/day; every_n_hours=2 fires 12x/day,
+    etc. Per-cycle base amount is unchanged, so the risk caps
+    (max_daily_aed + max_single_buy_aed) protect against over-spend. Set
+    those before flipping to aggressive cadences.
     """
     freq = cfg.strategy.frequency.lower()
     hour, minute = cfg.strategy.time.split(":")
@@ -74,8 +74,24 @@ def _build_cron_trigger(cfg: AppConfig) -> CronTrigger:
     kwargs: dict = {"minute": int(minute), "timezone": tz}
 
     if freq == "hourly":
-        # Every hour at the configured minute. `hour` stays unset = wildcard.
-        pass
+        n = max(1, int(getattr(cfg.strategy, "every_n_hours", 1) or 1))
+        if n == 1:
+            # Every hour at the configured minute — `hour` wildcard.
+            pass
+        elif 24 % n == 0:
+            # 2,3,4,6,8,12 → clean repeating cron (e.g. */2 = 0,2,4,…22)
+            kwargs["hour"] = f"*/{n}"
+        else:
+            # Non-divisors of 24 (5, 7, 9, 10, 11, …) would drift across
+            # the day boundary if we used */N. Snap to the closest clean
+            # divisor below and warn — keeps cron deterministic.
+            cleaner = max(d for d in (1, 2, 3, 4, 6, 8, 12) if d <= n)
+            logger.warning(
+                "every_n_hours=%d isn't a clean divisor of 24; using every %d hours instead. "
+                "Stick to 1, 2, 3, 4, 6, 8, or 12 for predictable cadence.",
+                n, cleaner,
+            )
+            kwargs["hour"] = f"*/{cleaner}" if cleaner > 1 else "*"
     elif freq == "daily":
         kwargs["hour"] = int(hour)
     elif freq == "weekly":

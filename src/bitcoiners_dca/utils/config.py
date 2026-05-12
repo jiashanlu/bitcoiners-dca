@@ -94,6 +94,7 @@ class StrategyYamlConfig(BaseModel):
     budget_period: str = "cycle"  # cycle | daily | weekly | monthly | yearly
 
     frequency: str = "weekly"     # hourly | daily | weekly | monthly
+    every_n_hours: int = 1        # used when frequency=hourly. 1 = every hour, 2 = every 2h, etc.
     day_of_week: str = "monday"
     time: str = "09:00"
     timezone: str = "Asia/Dubai"
