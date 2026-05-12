@@ -8,17 +8,28 @@
 
 <div class="card">
   <h2>Base DCA</h2>
+  <p class="help">Tell us how much you want to spend over a period and how often to buy. We compute the per-cycle amount automatically.</p>
   <div class="form-row">
-    <label>Amount per cycle (AED)</label>
-    <input type="number" min="10" step="10" name="amount_aed" value="{{ config.strategy.amount_aed }}">
+    <label>Budget</label>
+    <div style="display:flex;gap:8px;align-items:center">
+      <input type="number" min="1" step="1" name="budget_amount" id="budget_amount" value="{{ config.strategy.budget_amount }}" style="flex:1;max-width:160px">
+      <span>AED, per</span>
+      <select name="budget_period" id="budget_period" style="flex:1;max-width:140px">
+        {% for p in ["cycle", "daily", "weekly", "monthly", "yearly"] %}
+        <option value="{{ p }}" {% if config.strategy.budget_period == p %}selected{% endif %}>{{ p }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <small id="cycle_preview" style="margin-top:4px">Saving will compute the per-cycle amount based on your frequency.</small>
   </div>
   <div class="form-row">
     <label>Frequency</label>
-    <select name="frequency">
+    <select name="frequency" id="frequency">
       {% for f in ["hourly", "daily", "weekly", "monthly"] %}
       <option value="{{ f }}" {% if config.strategy.frequency == f %}selected{% endif %}>{{ f }}</option>
       {% endfor %}
     </select>
+    <small>How often the cron fires. Hourly is aggressive — set Risk caps below.</small>
   </div>
   <div class="form-row">
     <label>Day of week</label>
@@ -32,12 +43,47 @@
   <div class="form-row">
     <label>Time of day</label>
     <input type="time" name="time" value="{{ config.strategy.time }}">
+    <small>For hourly, only the minutes matter (e.g. 09:<strong>15</strong> = every hour at :15).</small>
   </div>
   <div class="form-row">
     <label>Timezone</label>
     <input name="timezone" value="{{ config.strategy.timezone }}">
   </div>
 </div>
+
+<script>
+// Live per-cycle preview. Pure JS, no framework — the dashboard already
+// has htmx but this is simpler as a tiny event listener.
+(function() {
+  const CYCLES = { hourly: 8760, daily: 365, weekly: 52, monthly: 12 };
+  const PERIODS = { daily: 365, weekly: 52, monthly: 12, yearly: 1 };
+  const amt = document.getElementById('budget_amount');
+  const per = document.getElementById('budget_period');
+  const freq = document.getElementById('frequency');
+  const out = document.getElementById('cycle_preview');
+  if (!amt || !per || !freq || !out) return;
+  function update() {
+    const a = parseFloat(amt.value || '0');
+    const p = per.value; const f = freq.value;
+    if (!a || !CYCLES[f]) { out.textContent = 'Enter a number above.'; return; }
+    if (p === 'cycle') {
+      out.textContent = '→ AED ' + a.toFixed(2) + ' per ' + f + ' cycle.';
+      return;
+    }
+    const annual = a * PERIODS[p];
+    const perCycle = annual / CYCLES[f];
+    const cyclesPerPeriod = CYCLES[f] / PERIODS[p];
+    out.innerHTML = '→ AED ' + perCycle.toFixed(2) + ' per cycle '
+      + '(<strong>' + cyclesPerPeriod.toFixed(2) + ' ' + f + ' cycles per ' + p.replace('ly', '') + '</strong>).';
+  }
+  ['input', 'change'].forEach(ev => {
+    amt.addEventListener(ev, update);
+    per.addEventListener(ev, update);
+    freq.addEventListener(ev, update);
+  });
+  update();
+})();
+</script>
 
 <div class="card">
   <h2>Execution mode</h2>

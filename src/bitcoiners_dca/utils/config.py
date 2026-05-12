@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class LicenseConfig(BaseModel):
@@ -81,11 +81,31 @@ class ExchangesConfig(BaseModel):
 
 class StrategyYamlConfig(BaseModel):
     type: str = "standard_dca"
+
+    # The bot reads `amount_aed` as the per-cycle base amount. Customers
+    # usually think in terms of a monthly or weekly *spend rate*, so the
+    # dashboard accepts `budget_amount` + `budget_period` and derives
+    # `amount_aed` from them given the chosen `frequency`. The mapping is
+    # one-way: budget_* is the user's stated intent, amount_aed is what
+    # the cron + overlay stack actually uses. See `derive_per_cycle()`
+    # in `core/strategy.py`.
     amount_aed: Decimal = Decimal("500")
-    frequency: str = "weekly"
+    budget_amount: Optional[Decimal] = None
+    budget_period: str = "cycle"  # cycle | daily | weekly | monthly | yearly
+
+    frequency: str = "weekly"     # hourly | daily | weekly | monthly
     day_of_week: str = "monday"
     time: str = "09:00"
     timezone: str = "Asia/Dubai"
+
+    @model_validator(mode="after")
+    def _backfill_budget(self):
+        # Migration for tenants whose config.yaml predates budget_amount:
+        # take the existing amount_aed as the budget (per-cycle), so the
+        # dashboard form shows the value the user actually entered.
+        if self.budget_amount is None:
+            self.budget_amount = self.amount_aed
+        return self
 
 
 class DipOverlayConfig(BaseModel):

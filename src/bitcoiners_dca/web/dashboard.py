@@ -187,11 +187,27 @@ def create_app(
 
     @app.post("/strategy", response_class=HTMLResponse)
     async def strategy_save(request: Request):
+        from decimal import Decimal, InvalidOperation
+        from bitcoiners_dca.core.strategy import derive_per_cycle
+
         form = await request.form()
+        frequency = form.get("frequency", "weekly")
+        budget_period = form.get("budget_period", "cycle")
+        # Parse budget amount; fall back to legacy amount_aed if budget_amount
+        # is missing (older clients before this UX shipped).
+        raw_budget = (form.get("budget_amount") or form.get("amount_aed") or "0").strip()
+        try:
+            budget_amount = Decimal(raw_budget)
+        except InvalidOperation:
+            budget_amount = Decimal(0)
+        amount_aed = derive_per_cycle(budget_amount, budget_period, frequency)
+
         # Build patch dict from form
         patch = {
-            "strategy.amount_aed": str(form.get("amount_aed", "")),
-            "strategy.frequency": form.get("frequency", "weekly"),
+            "strategy.amount_aed": str(amount_aed),
+            "strategy.budget_amount": str(budget_amount),
+            "strategy.budget_period": budget_period,
+            "strategy.frequency": frequency,
             "strategy.day_of_week": form.get("day_of_week", "monday"),
             "strategy.time": form.get("time", "09:00"),
             "strategy.timezone": form.get("timezone", "Asia/Dubai"),

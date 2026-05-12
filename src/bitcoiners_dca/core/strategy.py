@@ -9,13 +9,58 @@ and the SmartRouter decides which one to use for each buy.
 from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 
 from bitcoiners_dca.core.models import Order, Ticker
 from bitcoiners_dca.core.router import RoutingDecision, SmartRouter
 from bitcoiners_dca.core.routing import TradeRoute
 from bitcoiners_dca.exchanges.base import Exchange, ExchangeError, InsufficientBalanceError
+
+
+# === Period → per-cycle conversion =========================================
+# The dashboard accepts a user-stated spend rate ("AED 1000 / month") and
+# the bot needs to translate that into a per-cycle base amount given the
+# cron frequency. Deterministic, no calendar drift — 365-day year averages.
+
+_CYCLES_PER_YEAR: dict[str, int] = {
+    "hourly": 24 * 365,   # 8760
+    "daily": 365,
+    "weekly": 52,
+    "monthly": 12,
+}
+
+_PERIODS_PER_YEAR: dict[str, int] = {
+    "daily": 365,
+    "weekly": 52,
+    "monthly": 12,
+    "yearly": 1,
+}
+
+
+def derive_per_cycle(budget_amount: Decimal, budget_period: str, frequency: str) -> Decimal:
+    """Translate a user-stated spend rate into the per-cycle base amount
+    the DCA engine uses. `budget_period="cycle"` is a passthrough — the
+    entered amount IS the per-cycle amount (legacy/advanced mode).
+
+    Rounded to 2 decimal places (AED minor-unit precision).
+    """
+    if budget_period == "cycle":
+        return Decimal(budget_amount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if budget_period not in _PERIODS_PER_YEAR:
+        raise ValueError(f"unknown budget_period: {budget_period}")
+    if frequency not in _CYCLES_PER_YEAR:
+        raise ValueError(f"unknown frequency: {frequency}")
+    annual_budget = Decimal(budget_amount) * Decimal(_PERIODS_PER_YEAR[budget_period])
+    per_cycle = annual_budget / Decimal(_CYCLES_PER_YEAR[frequency])
+    return per_cycle.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def cycles_per_period(frequency: str, period: str) -> Decimal:
+    """How many DCA cycles happen per budget period. For the UI preview."""
+    if period == "cycle":
+        return Decimal(1)
+    return Decimal(_CYCLES_PER_YEAR[frequency]) / Decimal(_PERIODS_PER_YEAR[period])
 
 
 @dataclass
