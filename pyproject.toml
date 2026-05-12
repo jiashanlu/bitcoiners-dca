@@ -1,6 +1,6 @@
 [project]
 name = "bitcoiners-dca"
-version = "0.1.0"
+version = "0.6.0"
 description = "Self-hostable multi-exchange DCA bot for UAE Bitcoiners — smart routing, arbitrage alerts, tax-ready reporting."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -19,6 +19,9 @@ dependencies = [
   "typer>=0.12",              # CLI framework
   "python-telegram-bot>=21",  # Telegram notifications
   "tenacity>=8.2",            # Retry logic for API calls
+  "cryptography>=42.0",       # License signing + Fernet for secret-at-rest
+  "jinja2>=3.1",              # HTML templates for the customer dashboard
+  "python-multipart>=0.0.20", # Form parsing for dashboard POSTs
 ]
 
 [project.optional-dependencies]
@@ -38,6 +41,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"bitcoiners_dca.web" = ["templates/*.html", "templates/partials/*.html"]
 
 [tool.ruff]
 line-length = 100

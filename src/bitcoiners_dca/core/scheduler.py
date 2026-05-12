@@ -85,7 +85,13 @@ def _build_cron_trigger(cfg: AppConfig) -> CronTrigger:
 # === SCHEDULER ===
 
 class DCAScheduler:
-    """Wires together cron + arbitrage polling + health checks."""
+    """Wires together cron + arbitrage polling + health checks.
+
+    Hot config reload: when `rebuild_dependencies` is provided, the scheduler
+    will call it at the start of each scheduled task to pick up dashboard-
+    initiated config changes without a daemon restart. The callable returns a
+    fresh (config, exchanges, strategy, router, monitor, risk) tuple.
+    """
 
     def __init__(
         self,
@@ -97,6 +103,7 @@ class DCAScheduler:
         db: Database,
         notifier: Notifier,
         risk: Optional[RiskManager] = None,
+        rebuild_dependencies=None,
     ):
         self.config = config
         self.exchanges = exchanges
@@ -111,6 +118,7 @@ class DCAScheduler:
             max_single_buy_aed=config.risk.max_single_buy_aed,
             max_consecutive_failures=config.risk.max_consecutive_failures,
         )
+        self._rebuild_dependencies = rebuild_dependencies
         self.market_data = MarketDataProvider(db=db)
         self.funding_monitor: Optional[FundingMonitor] = None
         if config.funding_monitor.enabled:
@@ -131,9 +139,43 @@ class DCAScheduler:
         """Convenience for the legacy path. Reads from MarketDataProvider."""
         return self.market_data.snapshot().price_7d_ago_aed
 
+    async def _reload_if_changed(self) -> None:
+        """Refresh dependencies from disk if config.yaml changed.
+
+        Cheap to call at the top of every scheduled task. If the rebuild
+        factory wasn't supplied at construction (e.g. legacy callers), this
+        is a no-op.
+        """
+        if self._rebuild_dependencies is None:
+            return
+        try:
+            fresh = self._rebuild_dependencies()
+        except Exception as e:
+            logger.warning("Config reload failed; keeping in-memory state: %s", e)
+            return
+        # Replace mutable references — old exchange clients leak HTTP sessions,
+        # but the close-loop runs on `shutdown()`. For a hot-reload we accept
+        # the leak: next cycle uses fresh clients.
+        old_exchanges = self.exchanges
+        self.config = fresh["config"]
+        self.exchanges = fresh["exchanges"]
+        self.strategy = fresh["strategy"]
+        self.router = fresh["router"]
+        self.monitor = fresh["monitor"]
+        self.risk = fresh.get("risk", self.risk)
+        # Best-effort close of replaced clients
+        for ex in old_exchanges:
+            if ex not in self.exchanges:
+                try:
+                    await ex.close()
+                except Exception:
+                    pass
+
     async def _run_dca_cycle(self) -> None:
         """One scheduled DCA cycle. Errors are caught + logged + notified
         so the scheduler keeps running."""
+        await self._reload_if_changed()
+
         # Risk pre-check — paused state + daily/single-buy caps.
         decision = self.risk.evaluate(self.config.strategy.amount_aed)
         if not decision.allow:
@@ -174,6 +216,7 @@ class DCAScheduler:
 
     async def _run_arbitrage_check(self) -> None:
         """Poll for arbitrage. Alerts only on net-positive opportunities."""
+        await self._reload_if_changed()
         try:
             if len(self.exchanges) < 2:
                 return  # need at least 2 exchanges

@@ -1,61 +1,100 @@
 """
-Read-only FastAPI dashboard.
+Customer-facing FastAPI dashboard.
 
-The dashboard intentionally does NOT expose any mutation endpoints — no buy
-buttons, no key rotation, no withdraw triggers. It's a window into the bot's
-state. Users interact with the bot via the CLI or by editing config.yaml.
+Auth: Cloudflare Access gates the dashboard at the network edge. The
+`Cf-Access-Authenticated-User-Email` header is trusted; if it's absent
+(direct LAN access during self-hosted Free-tier use), we fall back to
+"local-operator".
 
-Routes:
-  GET /                  — overview (recent trades + balances + next-cycle ETA)
-  GET /trades            — full trade history (paginated)
-  GET /arbitrage         — arbitrage opportunities log
-  GET /api/stats         — JSON: lifetime totals
-  GET /api/balances      — JSON: current exchange balances
-  GET /api/prices        — JSON: current ticker across exchanges
-  GET /healthz           — JSON: scheduler + exchange health
+Pages:
+  /                — Overview: KPIs + charts + recent activity
+  /strategy        — Edit strategy params, overlays, execution mode
+  /exchanges       — Enable/disable + set per-exchange API credentials
+  /balances        — Live balance tables across all enabled exchanges
+  /prices          — Live BTC ticker across all enabled exchanges
+  /trades          — Full trade history (paginated)
+  /routes-audit    — Show every viable route at a chosen cycle size
+  /settings        — License key, notifications, risk caps
+  /healthz         — JSON health check
 
-Run with:
+JSON endpoints (machine-readable):
+  /api/stats, /api/balances, /api/prices,
+  /api/cumulative-btc, /api/cost-basis-vs-market
+
+HTMX partials (auto-refreshing fragments):
+  /htmx/balances, /htmx/prices
+
+Run via:
   uvicorn bitcoiners_dca.web.dashboard:app --host 0.0.0.0 --port 8000
 """
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 from datetime import datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, Query
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, Form, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
+from bitcoiners_dca.core.license import LicenseManager
 from bitcoiners_dca.exchanges.base import Exchange
 from bitcoiners_dca.persistence.db import Database
+from bitcoiners_dca.persistence.secrets import (
+    SecretStore, SecretStoreError, credentials_for, required_fields,
+)
 from bitcoiners_dca.utils.config import AppConfig, load_config
+from bitcoiners_dca.web.config_writer import ConfigWriter, ConfigWriteError
+from bitcoiners_dca.web.jinja_env import make_jinja
+
+logger = logging.getLogger(__name__)
 
 
-# === FACTORY ===
+CF_USER_HEADER = "Cf-Access-Authenticated-User-Email"
+
+
+def _authenticated_user(request: Request) -> str:
+    return request.headers.get(CF_USER_HEADER, "local-operator")
+
 
 def create_app(
+    config_path: str | Path = "./config.yaml",
     config: Optional[AppConfig] = None,
     db: Optional[Database] = None,
     exchanges: Optional[list[Exchange]] = None,
 ) -> FastAPI:
-    """Build a FastAPI app with the given dependencies injected.
-
-    When run via uvicorn standalone, dependencies are lazily loaded from
-    config.yaml on first request.
-    """
+    """Build a FastAPI app. Dependencies are lazily loaded on first request
+    when not passed explicitly — supports both standalone uvicorn launch and
+    in-process embedding (tests, scheduler co-host)."""
     app = FastAPI(
         title="bitcoiners-dca dashboard",
-        description="Read-only operations dashboard.",
-        version="0.1.0",
+        description="Self-service operations dashboard.",
+        version="0.6.0",
     )
+    jinja = make_jinja()
+    state: dict = {
+        "config_path": str(config_path),
+        "config": config,
+        "db": db,
+        "exchanges": exchanges,
+        "secrets": None,
+    }
 
-    # Lazy-load on first access; cached after
-    state: dict = {"config": config, "db": db, "exchanges": exchanges}
+    # === Lazy resolvers ===
 
     def _config() -> AppConfig:
         if state["config"] is None:
-            state["config"] = load_config()
+            state["config"] = load_config(state["config_path"])
+        return state["config"]
+
+    def _refresh_config() -> AppConfig:
+        """Force-reload after a write."""
+        state["config"] = load_config(state["config_path"])
+        # Drop the cached exchange list too; credentials may have changed
+        state["exchanges"] = None
         return state["config"]
 
     def _db() -> Database:
@@ -63,237 +102,278 @@ def create_app(
             state["db"] = Database(_config().persistence.db_path)
         return state["db"]
 
+    def _secrets() -> Optional[SecretStore]:
+        """Optional — None if DCA_SECRETS_KEY isn't set."""
+        if state["secrets"] is None:
+            try:
+                state["secrets"] = SecretStore(_config().persistence.db_path)
+            except SecretStoreError as e:
+                logger.warning("SecretStore unavailable: %s", e)
+                return None
+        return state["secrets"]
+
     def _exchanges() -> list[Exchange]:
         if state["exchanges"] is None:
-            from bitcoiners_dca.cli import _build_exchanges
-            state["exchanges"] = _build_exchanges(_config())
+            state["exchanges"] = _build_dashboard_exchanges(_config(), _secrets())
         return state["exchanges"]
 
-    # === ROUTES ===
+    def _license() -> LicenseManager:
+        cfg = _config()
+        return LicenseManager.from_config(cfg.license.tier, cfg.license.key)
+
+    def _ctx(request: Request, **extra) -> dict:
+        cfg = _config()
+        return {
+            "request": request,
+            "user_email": _authenticated_user(request),
+            "license_tier": _license().tier.value,
+            "config": cfg,
+            "flash": extra.pop("flash", None),
+            "active": extra.pop("active", ""),
+            **extra,
+        }
+
+    # === PAGES ===
 
     @app.get("/", response_class=HTMLResponse)
-    async def index():
+    async def overview(request: Request):
         db = _db()
+        cfg = _config()
         total_btc = db.total_btc_bought()
         total_aed = db.total_aed_spent()
         avg_price = total_aed / total_btc if total_btc > 0 else Decimal(0)
-
         cur = db._conn.execute(
-            """SELECT timestamp, exchange, pair, side, amount_quote,
-                      amount_base, price_avg, order_id
+            """SELECT timestamp, exchange, pair, amount_quote, amount_base,
+                      price_avg, order_id
                FROM trades
                WHERE side='buy' AND status='filled'
-               ORDER BY timestamp DESC
-               LIMIT 10"""
+               ORDER BY timestamp DESC LIMIT 8"""
         )
         recent = cur.fetchall()
-
         arb_count = db._conn.execute(
             "SELECT COUNT(*) FROM arbitrage_log WHERE alerted=1"
         ).fetchone()[0]
+        cycle_count = db._conn.execute(
+            "SELECT COUNT(*) FROM cycle_log"
+        ).fetchone()[0]
+        return HTMLResponse(jinja.get_template("overview.html").render(_ctx(
+            request, active="overview",
+            total_btc=total_btc, total_aed=total_aed, avg_price=avg_price,
+            recent=recent, arb_count=arb_count, cycle_count=cycle_count,
+        )))
 
-        rows_html = "".join(
-            f"""<tr>
-                <td>{r['timestamp'].split('T')[0]}</td>
-                <td>{r['exchange']}</td>
-                <td>{r['pair']}</td>
-                <td>{float(r['amount_quote']):.2f}</td>
-                <td>{float(r['amount_base'] or 0):.8f}</td>
-                <td>{float(r['price_avg'] or 0):.2f}</td>
-            </tr>"""
-            for r in recent
+    @app.get("/strategy", response_class=HTMLResponse)
+    async def strategy_page(request: Request):
+        return HTMLResponse(jinja.get_template("strategy.html").render(_ctx(
+            request, active="strategy",
+        )))
+
+    @app.post("/strategy", response_class=HTMLResponse)
+    async def strategy_save(request: Request):
+        form = await request.form()
+        # Build patch dict from form
+        patch = {
+            "strategy.amount_aed": str(form.get("amount_aed", "")),
+            "strategy.frequency": form.get("frequency", "weekly"),
+            "strategy.day_of_week": form.get("day_of_week", "monday"),
+            "strategy.time": form.get("time", "09:00"),
+            "strategy.timezone": form.get("timezone", "Asia/Dubai"),
+            "execution.mode": form.get("execution_mode", "taker"),
+            "execution.maker.timeout_seconds": int(form.get("maker_timeout", 600)),
+            "overlays.buy_the_dip.enabled": form.get("dip_enabled") == "on",
+            "overlays.buy_the_dip.threshold_pct": str(form.get("dip_threshold", "-10")),
+            "overlays.buy_the_dip.multiplier": str(form.get("dip_multiplier", "2.0")),
+            "overlays.buy_the_dip.lookback_days": int(form.get("dip_lookback", 7)),
+            "overlays.volatility_weighted.enabled": form.get("vol_enabled") == "on",
+            "overlays.time_of_day.enabled": form.get("tod_enabled") == "on",
+            "overlays.drawdown_aware.enabled": form.get("dd_enabled") == "on",
+            "routing.enable_two_hop": form.get("two_hop") == "on",
+            "routing.enable_cross_exchange_alerts": form.get("cross_alerts") == "on",
+            "routing.preferred_exchange":
+                form.get("preferred_exchange") or None,
+            "risk.max_daily_aed":
+                str(form["max_daily_aed"]) if form.get("max_daily_aed") else None,
+            "risk.max_single_buy_aed":
+                str(form["max_single_buy_aed"]) if form.get("max_single_buy_aed") else None,
+        }
+        flash = _apply_patch(_config(), patch, _refresh_config)
+        return HTMLResponse(jinja.get_template("strategy.html").render(_ctx(
+            request, active="strategy", flash=flash,
+        )))
+
+    @app.get("/exchanges", response_class=HTMLResponse)
+    async def exchanges_page(request: Request):
+        sec = _secrets()
+        creds: dict[str, dict[str, str]] = {}
+        if sec:
+            for ex in ("okx", "binance", "bitoasis"):
+                stored = credentials_for(sec, ex)
+                # Display redacted
+                creds[ex] = {
+                    field: _redact(value)
+                    for field, value in stored.items()
+                }
+        return HTMLResponse(jinja.get_template("exchanges.html").render(_ctx(
+            request, active="exchanges",
+            credentials=creds, secrets_available=sec is not None,
+            required_fields=required_fields,
+        )))
+
+    @app.post("/exchanges/{name}/toggle", response_class=HTMLResponse)
+    async def exchange_toggle(request: Request, name: str):
+        if name not in ("okx", "binance", "bitoasis"):
+            raise HTTPException(404)
+        form = await request.form()
+        enabled = form.get("enabled") == "on"
+        flash = _apply_patch(_config(), {
+            f"exchanges.{name}.enabled": enabled,
+        }, _refresh_config)
+        return RedirectResponse("/exchanges", status_code=303)
+
+    @app.post("/exchanges/{name}/credentials", response_class=HTMLResponse)
+    async def exchange_credentials(request: Request, name: str):
+        if name not in ("okx", "binance", "bitoasis"):
+            raise HTTPException(404)
+        sec = _secrets()
+        if sec is None:
+            flash = {"kind": "err",
+                     "message": "Secret store not configured. Set DCA_SECRETS_KEY in .env"}
+        else:
+            form = await request.form()
+            updated = 0
+            for field in required_fields(name):
+                val = form.get(field, "").strip()
+                if val and val != "***":  # don't overwrite when user leaves redacted placeholder
+                    sec.set(f"{name}.{field}", val)
+                    updated += 1
+            flash = {"kind": "ok", "message": f"Saved {updated} credential field(s) for {name}"}
+            # Force exchange re-instantiation on next request
+            state["exchanges"] = None
+        return RedirectResponse("/exchanges", status_code=303)
+
+    @app.get("/balances", response_class=HTMLResponse)
+    async def balances_page(request: Request):
+        return HTMLResponse(jinja.get_template("balances.html").render(_ctx(
+            request, active="balances",
+        )))
+
+    @app.get("/htmx/balances", response_class=HTMLResponse)
+    async def htmx_balances(request: Request):
+        results = await asyncio.gather(
+            *[_safe_get_balances(ex) for ex in _exchanges()],
+            return_exceptions=True,
         )
-        if not rows_html:
-            rows_html = "<tr><td colspan='6' style='text-align:center;color:#888'>No trades yet</td></tr>"
+        rows = []
+        for r in results:
+            if isinstance(r, Exception):
+                continue
+            name, bals = r
+            for b in bals if isinstance(bals, list) else []:
+                if b.get("free", 0) or b.get("total", 0):
+                    rows.append({"exchange": name, **b})
+        return HTMLResponse(jinja.get_template("partials/balances_table.html").render(
+            balances=rows, now=datetime.utcnow(),
+        ))
 
-        return HTMLResponse(
-            f"""<!doctype html>
-<html><head>
-<title>bitcoiners-dca dashboard</title>
-<style>
-body{{font-family:-apple-system,Inter,sans-serif;background:#0a0a0a;color:#f5f5f5;margin:0;padding:32px;max-width:1100px;margin:0 auto}}
-h1{{font-size:36px;letter-spacing:-0.03em;margin-bottom:8px}}
-h2{{font-size:22px;letter-spacing:-0.02em;margin-top:48px;color:#F7931A}}
-.stats{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin:24px 0}}
-.stat{{background:#111;border:1px solid #222;border-radius:10px;padding:20px}}
-.stat .label{{color:#888;font-size:13px;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}}
-.stat .val{{font-size:28px;font-weight:800;letter-spacing:-0.02em;color:#fff}}
-.stat .unit{{font-size:14px;color:#888;margin-left:4px}}
-table{{width:100%;border-collapse:collapse;margin-top:16px;font-size:14px}}
-th{{text-align:left;padding:10px;color:#888;border-bottom:1px solid #222;text-transform:uppercase;font-size:11px;letter-spacing:1px}}
-td{{padding:10px;border-bottom:1px solid #181818;color:#f5f5f5}}
-a{{color:#F7931A;text-decoration:none}}
-.nav{{display:flex;gap:18px;margin-top:8px;color:#888;font-size:14px}}
-</style>
-</head><body>
-<h1>🟧 bitcoiners-dca</h1>
-<div class="nav">
-  <a href="/">Overview</a>
-  <a href="/trades">Trades</a>
-  <a href="/arbitrage">Arbitrage</a>
-  <a href="/api/prices">Live prices (JSON)</a>
-  <a href="/healthz">Health</a>
-</div>
+    @app.get("/prices", response_class=HTMLResponse)
+    async def prices_page(request: Request):
+        pair = request.query_params.get("pair", "BTC/AED")
+        return HTMLResponse(jinja.get_template("prices.html").render(_ctx(
+            request, active="prices", pair=pair,
+        )))
 
-<div class="stats">
-  <div class="stat"><div class="label">Total BTC</div><div class="val">{total_btc:.6f}<span class="unit">BTC</span></div></div>
-  <div class="stat"><div class="label">Total AED spent</div><div class="val">{total_aed:.0f}<span class="unit">AED</span></div></div>
-  <div class="stat"><div class="label">Avg cost basis</div><div class="val">{avg_price:.0f}<span class="unit">AED/BTC</span></div></div>
-  <div class="stat"><div class="label">Arb opportunities</div><div class="val">{arb_count}</div></div>
-</div>
-
-<h2>BTC accumulation</h2>
-<div style="background:#111;border:1px solid #222;border-radius:10px;padding:16px">
-  <canvas id="cumChart" height="90"></canvas>
-</div>
-
-<h2>Avg cost basis vs market</h2>
-<div style="background:#111;border:1px solid #222;border-radius:10px;padding:16px">
-  <canvas id="costChart" height="90"></canvas>
-</div>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" defer></script>
-<script defer>
-window.addEventListener('load', async () => {{
-  if (typeof Chart === 'undefined') return;
-  const dim = '#888'; const acc = '#F7931A';
-  Chart.defaults.color = dim;
-  Chart.defaults.borderColor = '#222';
-  try {{
-    const cum = await fetch('/api/cumulative-btc').then(r => r.json());
-    new Chart(document.getElementById('cumChart'), {{
-      type: 'line',
-      data: {{
-        labels: cum.points.map(p => p.date),
-        datasets: [{{
-          label: 'Cumulative BTC',
-          data: cum.points.map(p => parseFloat(p.cumulative_btc)),
-          borderColor: acc,
-          backgroundColor: 'rgba(247,147,26,0.1)',
-          fill: true, tension: 0.2, pointRadius: 0,
-        }}],
-      }},
-      options: {{
-        plugins: {{ legend: {{ display: false }} }},
-        scales: {{ y: {{ beginAtZero: true }} }},
-      }},
-    }});
-  }} catch (e) {{}}
-  try {{
-    const cost = await fetch('/api/cost-basis-vs-market').then(r => r.json());
-    const datasets = [{{
-      label: 'Avg cost basis',
-      data: cost.points.map(p => parseFloat(p.avg_cost_aed_per_btc)),
-      borderColor: '#7aa9ff',
-      backgroundColor: 'rgba(122,169,255,0.08)',
-      fill: false, tension: 0.2, pointRadius: 0,
-    }}];
-    if (cost.current_market_aed_per_btc) {{
-      datasets.push({{
-        label: 'Market now',
-        data: cost.points.map(() => parseFloat(cost.current_market_aed_per_btc)),
-        borderColor: '#5cbb84', borderDash: [4, 4],
-        pointRadius: 0, fill: false,
-      }});
-    }}
-    new Chart(document.getElementById('costChart'), {{
-      type: 'line',
-      data: {{ labels: cost.points.map(p => p.date), datasets }},
-      options: {{
-        plugins: {{ legend: {{ display: true }} }},
-        scales: {{ y: {{ beginAtZero: false }} }},
-      }},
-    }});
-  }} catch (e) {{}}
-}});
-</script>
-
-<h2>Recent trades</h2>
-<table>
-  <thead><tr>
-    <th>Date</th><th>Exchange</th><th>Pair</th>
-    <th>AED</th><th>BTC</th><th>Price</th>
-  </tr></thead>
-  <tbody>{rows_html}</tbody>
-</table>
-</body></html>"""
+    @app.get("/htmx/prices", response_class=HTMLResponse)
+    async def htmx_prices(request: Request):
+        pair = request.query_params.get("pair", "BTC/AED")
+        results = await asyncio.gather(
+            *[_safe_get_ticker(ex, pair) for ex in _exchanges()],
+            return_exceptions=True,
         )
+        rows = []
+        for r in results:
+            if isinstance(r, Exception):
+                continue
+            name, t = r
+            rows.append({"exchange": name, **t})
+        return HTMLResponse(jinja.get_template("partials/prices_table.html").render(
+            prices=rows, pair=pair, now=datetime.utcnow(),
+        ))
 
     @app.get("/trades", response_class=HTMLResponse)
-    async def trades_page(page: int = Query(1, ge=1), per_page: int = 50):
+    async def trades_page(request: Request, page: int = Query(1, ge=1)):
+        per_page = 50
         db = _db()
-        offset = (page - 1) * per_page
-        cur = db._conn.execute(
-            """SELECT * FROM trades ORDER BY timestamp DESC LIMIT ? OFFSET ?""",
-            (per_page, offset),
-        )
-        rows = cur.fetchall()
         total = db._conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+        rows = db._conn.execute(
+            """SELECT timestamp, exchange, pair, side, amount_quote,
+                      amount_base, price_avg, status, order_id
+               FROM trades ORDER BY timestamp DESC LIMIT ? OFFSET ?""",
+            (per_page, (page - 1) * per_page),
+        ).fetchall()
+        last_page = max(1, (total + per_page - 1) // per_page)
+        return HTMLResponse(jinja.get_template("trades.html").render(_ctx(
+            request, active="trades",
+            trades=rows, total=total, page=page,
+            last_page=last_page, prev_page=max(1, page - 1),
+            next_page=min(last_page, page + 1),
+        )))
 
-        rows_html = "".join(
-            f"""<tr>
-                <td>{r['timestamp'].split('T')[0]}</td>
-                <td>{r['exchange']}</td>
-                <td>{r['side']}</td>
-                <td>{float(r['amount_quote']):.2f}</td>
-                <td>{float(r['amount_base'] or 0):.8f}</td>
-                <td>{float(r['price_avg'] or 0):.2f}</td>
-                <td>{r['status']}</td>
-                <td><code style='font-size:11px;color:#888'>{r['order_id'][:16]}</code></td>
-            </tr>"""
-            for r in rows
+    @app.get("/routes-audit", response_class=HTMLResponse)
+    async def routes_audit_page(request: Request):
+        amount = Decimal(request.query_params.get("amount", "500"))
+        from bitcoiners_dca.core.router import SmartRouter
+        cfg = _config()
+        router = SmartRouter(
+            enable_two_hop=cfg.routing.enable_two_hop,
+            intermediates=cfg.routing.intermediates,
+            enable_cross_exchange_alerts=cfg.routing.enable_cross_exchange_alerts,
+            cross_exchange_min_size_aed=cfg.routing.cross_exchange_min_size_aed,
+            cross_exchange_withdrawal_costs=cfg.routing.cross_exchange_withdrawal_costs,
+            preferred_exchange=cfg.routing.preferred_exchange,
+            preferred_bonus_pct=cfg.routing.preferred_bonus_pct,
         )
+        decision = None
+        error = None
+        try:
+            decision = await router.pick(
+                _exchanges(), pair="BTC/AED",
+                required_quote_amount=amount,
+            )
+        except Exception as e:
+            error = str(e)[:200]
+        return HTMLResponse(jinja.get_template("routes.html").render(_ctx(
+            request, active="routes",
+            amount=amount, decision=decision, error=error,
+        )))
 
-        return HTMLResponse(
-            f"""<!doctype html><html><head>
-<title>Trades · bitcoiners-dca</title>
-<style>body{{font-family:-apple-system,Inter,sans-serif;background:#0a0a0a;color:#f5f5f5;padding:32px;max-width:1100px;margin:0 auto}}h1{{font-size:28px}}a{{color:#F7931A}}table{{width:100%;border-collapse:collapse;font-size:13px;margin-top:16px}}th{{text-align:left;padding:10px;color:#888;border-bottom:1px solid #222;font-size:11px;text-transform:uppercase}}td{{padding:10px;border-bottom:1px solid #181818}}.nav{{margin-bottom:16px}}</style>
-</head><body>
-<div class="nav"><a href="/">← Back to overview</a></div>
-<h1>Trades ({total} total)</h1>
-<table>
-  <thead><tr><th>Date</th><th>Exchange</th><th>Side</th><th>AED</th><th>BTC</th><th>Price</th><th>Status</th><th>Order ID</th></tr></thead>
-  <tbody>{rows_html or "<tr><td colspan='8' style='text-align:center;color:#888'>No trades yet</td></tr>"}</tbody>
-</table>
-<p style="margin-top:24px;color:#888;font-size:13px">
-  Page {page} · {per_page} per page ·
-  {f'<a href="/trades?page={page-1}&per_page={per_page}">← Prev</a> ' if page > 1 else ''}
-  {f'<a href="/trades?page={page+1}&per_page={per_page}">Next →</a>' if offset + per_page < total else ''}
-</p>
-</body></html>"""
-        )
+    @app.get("/settings", response_class=HTMLResponse)
+    async def settings_page(request: Request):
+        return HTMLResponse(jinja.get_template("settings.html").render(_ctx(
+            request, active="settings",
+            license_features=[f.value for f in _license().enabled_features],
+        )))
 
-    @app.get("/arbitrage", response_class=HTMLResponse)
-    async def arbitrage_page():
-        db = _db()
-        cur = db._conn.execute(
-            """SELECT * FROM arbitrage_log ORDER BY timestamp DESC LIMIT 100"""
-        )
-        rows = cur.fetchall()
+    @app.post("/settings", response_class=HTMLResponse)
+    async def settings_save(request: Request):
+        form = await request.form()
+        patch = {
+            "license.tier": form.get("license_tier", "free"),
+            "license.key": form.get("license_key") or None,
+            "notifications.telegram.enabled": form.get("tg_enabled") == "on",
+            "notifications.telegram.chat_id":
+                form.get("tg_chat_id") or None,
+            "funding_monitor.enabled": form.get("funding_enabled") == "on",
+            "funding_monitor.alert_threshold_pct":
+                str(form.get("funding_threshold", "15.0")),
+            "dry_run": form.get("dry_run") == "on",
+        }
+        flash = _apply_patch(_config(), patch, _refresh_config)
+        return HTMLResponse(jinja.get_template("settings.html").render(_ctx(
+            request, active="settings", flash=flash,
+            license_features=[f.value for f in _license().enabled_features],
+        )))
 
-        rows_html = "".join(
-            f"""<tr>
-                <td>{r['timestamp']}</td>
-                <td>{r['cheap_exchange']}</td>
-                <td>{r['expensive_exchange']}</td>
-                <td>{float(r['gross_spread_pct']):.2f}%</td>
-                <td style='color:#F7931A;font-weight:600'>{float(r['net_profit_pct']):.2f}%</td>
-            </tr>"""
-            for r in rows
-        )
-
-        return HTMLResponse(
-            f"""<!doctype html><html><head>
-<title>Arbitrage · bitcoiners-dca</title>
-<style>body{{font-family:-apple-system,Inter,sans-serif;background:#0a0a0a;color:#f5f5f5;padding:32px;max-width:900px;margin:0 auto}}h1{{font-size:28px}}a{{color:#F7931A}}table{{width:100%;border-collapse:collapse;font-size:14px;margin-top:16px}}th{{text-align:left;padding:10px;color:#888;border-bottom:1px solid #222;font-size:11px;text-transform:uppercase}}td{{padding:10px;border-bottom:1px solid #181818}}.nav{{margin-bottom:16px}}</style>
-</head><body>
-<div class="nav"><a href="/">← Back to overview</a></div>
-<h1>Arbitrage opportunities (last 100)</h1>
-<table>
-  <thead><tr><th>Detected</th><th>Buy on</th><th>Sell on</th><th>Gross %</th><th>Net %</th></tr></thead>
-  <tbody>{rows_html or "<tr><td colspan='5' style='text-align:center;color:#888'>No opportunities detected yet</td></tr>"}</tbody>
-</table>
-</body></html>"""
-        )
+    # === JSON endpoints (kept for backward compat + CLI/scripting use) ===
 
     @app.get("/api/stats")
     async def api_stats():
@@ -303,9 +383,8 @@ window.addEventListener('load', async () => {{
         return {
             "total_btc": str(total_btc),
             "total_aed_spent": str(total_aed),
-            "average_cost_per_btc": (
-                str(total_aed / total_btc) if total_btc > 0 else "0"
-            ),
+            "average_cost_per_btc":
+                str(total_aed / total_btc) if total_btc > 0 else "0",
             "trades_count": db._conn.execute(
                 "SELECT COUNT(*) FROM trades"
             ).fetchone()[0],
@@ -313,25 +392,63 @@ window.addEventListener('load', async () => {{
 
     @app.get("/api/balances")
     async def api_balances():
-        balances = {}
-        tasks = []
-        for ex in _exchanges():
-            tasks.append(_safe_get_balances(ex))
-        results = await asyncio.gather(*tasks)
-        for name, bals in results:
-            balances[name] = bals
-        return balances
+        results = await asyncio.gather(
+            *[_safe_get_balances(ex) for ex in _exchanges()]
+        )
+        return dict(results)
 
     @app.get("/api/prices")
     async def api_prices(pair: str = "BTC/AED"):
-        tickers = {}
-        tasks = []
+        results = await asyncio.gather(
+            *[_safe_get_ticker(ex, pair) for ex in _exchanges()]
+        )
+        return dict(results)
+
+    @app.get("/api/cumulative-btc")
+    async def api_cumulative_btc():
+        db = _db()
+        rows = db._conn.execute(
+            """SELECT substr(timestamp, 1, 10) AS day,
+                      SUM(CAST(amount_base AS REAL)) AS btc_for_day
+               FROM trades
+               WHERE side='buy' AND status='filled'
+               GROUP BY day ORDER BY day ASC"""
+        ).fetchall()
+        out = []
+        cum = 0.0
+        for r in rows:
+            cum += float(r["btc_for_day"] or 0)
+            out.append({"date": r["day"], "cumulative_btc": f"{cum:.8f}"})
+        return {"points": out}
+
+    @app.get("/api/cost-basis-vs-market")
+    async def api_cost_basis_vs_market():
+        db = _db()
+        rows = db._conn.execute(
+            """SELECT substr(timestamp, 1, 10) AS day,
+                      SUM(CAST(amount_quote AS REAL)) AS aed,
+                      SUM(CAST(amount_base AS REAL)) AS btc
+               FROM trades
+               WHERE side='buy' AND status='filled'
+               GROUP BY day ORDER BY day ASC"""
+        ).fetchall()
+        out = []
+        cum_aed = 0.0
+        cum_btc = 0.0
+        for r in rows:
+            cum_aed += float(r["aed"] or 0)
+            cum_btc += float(r["btc"] or 0)
+            avg = (cum_aed / cum_btc) if cum_btc > 0 else 0.0
+            out.append({"date": r["day"], "avg_cost_aed_per_btc": f"{avg:.2f}"})
+        current_market = None
         for ex in _exchanges():
-            tasks.append(_safe_get_ticker(ex, pair))
-        results = await asyncio.gather(*tasks)
-        for name, t in results:
-            tickers[name] = t
-        return tickers
+            try:
+                t = await ex.get_ticker("BTC/AED")
+                current_market = f"{float(t.last):.2f}"
+                break
+            except Exception:
+                continue
+        return {"points": out, "current_market_aed_per_btc": current_market}
 
     @app.get("/healthz")
     async def health():
@@ -341,86 +458,113 @@ window.addEventListener('load', async () => {{
             "exchanges_configured": [ex.name for ex in _exchanges()],
         }
 
-    @app.get("/api/cumulative-btc")
-    async def api_cumulative_btc():
-        """BTC stack over time — for the dashboard line chart.
-
-        Returns rows like {"date": "2026-05-12", "cumulative_btc": "0.0823"}
-        in chronological order. Skip-friendly for very long histories;
-        we downsample to one point per day even if there were many trades.
-        """
-        db = _db()
-        rows = db._conn.execute(
-            """SELECT substr(timestamp, 1, 10) AS day,
-                      SUM(CAST(amount_base AS REAL)) AS btc_for_day
-               FROM trades
-               WHERE side='buy' AND status='filled'
-               GROUP BY day
-               ORDER BY day ASC"""
-        ).fetchall()
-        out = []
-        cumulative = 0.0
-        for r in rows:
-            cumulative += float(r["btc_for_day"] or 0)
-            out.append({
-                "date": r["day"],
-                "cumulative_btc": f"{cumulative:.8f}",
-            })
-        return {"points": out}
-
-    @app.get("/api/cost-basis-vs-market")
-    async def api_cost_basis_vs_market():
-        """Average cost basis over time vs current market price.
-
-        Lets a user see "my avg buy price is X, BTC is now Y, so my stack
-        is up/down Z%". We compute avg cost per BTC at each day's close
-        plus today's market price for comparison.
-        """
-        db = _db()
-        rows = db._conn.execute(
-            """SELECT substr(timestamp, 1, 10) AS day,
-                      SUM(CAST(amount_quote AS REAL)) AS aed,
-                      SUM(CAST(amount_base AS REAL))  AS btc
-               FROM trades
-               WHERE side='buy' AND status='filled'
-               GROUP BY day
-               ORDER BY day ASC"""
-        ).fetchall()
-        out = []
-        cum_aed = 0.0
-        cum_btc = 0.0
-        for r in rows:
-            cum_aed += float(r["aed"] or 0)
-            cum_btc += float(r["btc"] or 0)
-            avg = (cum_aed / cum_btc) if cum_btc > 0 else 0.0
-            out.append({
-                "date": r["day"],
-                "avg_cost_aed_per_btc": f"{avg:.2f}",
-            })
-
-        # Best-effort market price for today (first enabled exchange's ticker)
-        current_market = None
-        for ex in _exchanges():
-            try:
-                t = await ex.get_ticker("BTC/AED")
-                current_market = f"{float(t.last):.2f}"
-                break
-            except Exception:
-                continue
-        return {
-            "points": out,
-            "current_market_aed_per_btc": current_market,
-        }
-
     return app
 
 
-# === SAFE HELPERS (don't blow up on one bad exchange) ===
+# === Helpers ===
+
+def _apply_patch(cfg: AppConfig, patch: dict, refresh) -> dict:
+    """Apply config patch + refresh in-memory state. Returns a flash dict."""
+    cfg_path = Path("./config.yaml")
+    # Allow override via the existing cfg state (production path uses load_config)
+    writer = ConfigWriter(cfg_path)
+    try:
+        result = writer.patch_and_save(patch)
+        refresh()
+        if not result.changed_keys:
+            return {"kind": "warn", "message": "No changes detected."}
+        return {
+            "kind": "ok",
+            "message": f"Saved. Changes will apply on the next cycle. "
+                       f"({len(result.changed_keys)} fields updated)",
+        }
+    except ConfigWriteError as e:
+        return {"kind": "err", "message": f"Validation failed: {e}"}
+    except Exception as e:
+        return {"kind": "err", "message": f"Write failed: {e}"}
+
+
+def _redact(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) < 8:
+        return "•" * len(value)
+    return f"{value[:3]}…{value[-3:]}"
+
+
+def _build_dashboard_exchanges(
+    cfg: AppConfig,
+    secrets: Optional[SecretStore],
+) -> list[Exchange]:
+    """Construct exchange adapters using SecretStore-backed credentials, with
+    env-var fallback. Mirrors `cli._build_exchanges()` but plumbs through
+    the secret store for the customer-managed credentials path."""
+    out: list[Exchange] = []
+    if cfg.exchanges.okx.enabled:
+        creds = _resolve_creds(secrets, "okx", {
+            "api_key": cfg.exchanges.okx.api_key_env or "OKX_API_KEY",
+            "api_secret": cfg.exchanges.okx.api_secret_env or "OKX_API_SECRET",
+            "passphrase": cfg.exchanges.okx.passphrase_env or "OKX_API_PASSPHRASE",
+        })
+        if creds.get("api_key"):
+            from bitcoiners_dca.exchanges.okx import OKXExchange
+            out.append(OKXExchange(
+                api_key=creds["api_key"],
+                api_secret=creds["api_secret"],
+                passphrase=creds.get("passphrase", ""),
+                dry_run=cfg.dry_run,
+            ))
+    if cfg.exchanges.binance.enabled:
+        creds = _resolve_creds(secrets, "binance", {
+            "api_key": cfg.exchanges.binance.api_key_env or "BINANCE_API_KEY",
+            "api_secret": cfg.exchanges.binance.api_secret_env or "BINANCE_API_SECRET",
+        })
+        if creds.get("api_key"):
+            from bitcoiners_dca.exchanges.binance import BinanceExchange
+            out.append(BinanceExchange(
+                api_key=creds["api_key"],
+                api_secret=creds["api_secret"],
+                dry_run=cfg.dry_run,
+            ))
+    if cfg.exchanges.bitoasis.enabled:
+        creds = _resolve_creds(secrets, "bitoasis", {
+            "token": cfg.exchanges.bitoasis.token_env or "BITOASIS_API_TOKEN",
+        })
+        if creds.get("token"):
+            from bitcoiners_dca.exchanges.bitoasis import BitOasisExchange
+            out.append(BitOasisExchange(
+                api_token=creds["token"],
+                dry_run=cfg.dry_run,
+            ))
+    return out
+
+
+def _resolve_creds(
+    secrets: Optional[SecretStore],
+    exchange: str,
+    env_var_map: dict[str, str],
+) -> dict[str, str]:
+    """SecretStore first, env var fallback. Returns whatever fields resolved."""
+    out: dict[str, str] = {}
+    if secrets is not None:
+        out.update(credentials_for(secrets, exchange))
+    # env-var fallback for fields not in the secret store
+    for field, env_name in env_var_map.items():
+        if field not in out:
+            val = os.environ.get(env_name)
+            if val:
+                out[field] = val
+    return out
+
 
 async def _safe_get_balances(ex: Exchange) -> tuple[str, list[dict] | dict]:
     try:
         bals = await ex.get_balances()
-        return ex.name, [b.model_dump(mode="json") for b in bals]
+        return ex.name, [
+            {"asset": b.asset, "free": str(b.free),
+             "used": str(b.used), "total": str(b.total)}
+            for b in bals
+        ]
     except Exception as e:
         return ex.name, {"error": str(e)[:200]}
 
@@ -428,11 +572,14 @@ async def _safe_get_balances(ex: Exchange) -> tuple[str, list[dict] | dict]:
 async def _safe_get_ticker(ex: Exchange, pair: str) -> tuple[str, dict]:
     try:
         t = await ex.get_ticker(pair)
-        return ex.name, t.model_dump(mode="json")
+        return ex.name, {
+            "bid": str(t.bid), "ask": str(t.ask), "last": str(t.last),
+            "spread_pct": f"{float(t.spread_pct):.4f}",
+        }
     except Exception as e:
         return ex.name, {"error": str(e)[:200]}
 
 
-# === MODULE-LEVEL APP (for `uvicorn bitcoiners_dca.web.dashboard:app`) ===
+# === Module-level app for `uvicorn bitcoiners_dca.web.dashboard:app` ===
 
 app = create_app()

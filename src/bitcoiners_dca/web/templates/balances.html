@@ -1,0 +1,13 @@
+{% extends "_base.html" %}
+{% block title %}Balances · bitcoiners-dca{% endblock %}
+{% block content %}
+<h1>Balances</h1>
+<p class="subtitle">Live, refreshes every 30 seconds. Shows non-zero positions across every enabled exchange.</p>
+
+<div class="card" id="balances-card"
+     hx-get="/htmx/balances"
+     hx-trigger="load, every 30s"
+     hx-swap="innerHTML">
+  <div class="empty">Loading…</div>
+</div>
+{% endblock %}

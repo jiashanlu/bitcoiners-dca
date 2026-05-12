@@ -4,7 +4,7 @@ Self-hostable, multi-exchange Bitcoin DCA bot for UAE residents. Smart-routes
 buys to the cheapest exchange, surfaces arbitrage opportunities, auto-withdraws
 to your hardware wallet, and produces UAE-tax-ready reports.
 
-**Status:** v0.5 — license / tier framework · composable strategy overlays (volatility-weighted, time-of-day, drawdown-aware) · hosted-tenant deployment template · 130+/130+ tests passing. Builds on v0.4 (multi-hop smart routing · maker-mode execution · funding-rate monitor). All three UAE exchanges verified live (OKX BTC/AED, BitOasis BTC/AED + USDT/AED + BTC/USDT, Binance BTC/USDT via binance.com / ADGM).
+**Status:** v0.6 — customer-facing self-service dashboard. Edit strategy + exchanges + secrets entirely from the browser; daemon hot-reloads config every cycle. Encrypted-at-rest credentials (Fernet). Cloudflare Access gates the hosted dashboard. Builds on v0.5 (license + tier framework · composable strategy overlays · hosted-tenant template) and v0.4 (multi-hop smart routing · maker-mode · funding monitor). 165 tests passing.
 
 **Free** = self-host, single exchange, base DCA + tax CSV + on-chain auto-withdraw. **Pro** (AED 49/mo) unlocks multi-exchange routing, maker mode, advanced strategies, Lightning auto-withdraw, funding-rate monitor. **Business** (AED 499+/mo) adds basis-trade execution, LN Markets covered calls, multi-asset DCA, family-office multi-strategy mode. See `docs/TIERS.md` for the full matrix.
 

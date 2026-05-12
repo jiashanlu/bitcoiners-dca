@@ -1,0 +1,57 @@
+{% extends "_base.html" %}
+{% block title %}Routes audit · bitcoiners-dca{% endblock %}
+{% block content %}
+<h1>Routes audit</h1>
+<p class="subtitle">What would the smart router pick at a given cycle size, with current market conditions? Every viable path is ranked.</p>
+
+<form method="get" style="margin-bottom:20px;display:flex;gap:12px;align-items:center">
+  <label>Cycle size (AED):</label>
+  <input type="number" min="50" step="50" name="amount" value="{{ amount }}">
+  <button type="submit">Recompute</button>
+</form>
+
+{% if error %}
+<div class="flash err">{{ error }}</div>
+{% endif %}
+
+{% if decision %}
+<div class="card">
+  <h2>Picked: {{ decision.chosen.route.label }}</h2>
+  <p>{{ decision.reason }}</p>
+  <table>
+    <thead><tr><th>Rank</th><th>Route</th><th>Effective price</th><th>Expected BTC</th><th>Balance</th></tr></thead>
+    <tbody>
+    {% set candidates = [decision.chosen] + decision.alternatives %}
+    {% for c in candidates %}
+      <tr>
+        <td>{{ loop.index }}</td>
+        <td>{{ c.route.label }}</td>
+        <td class="mono">{{ c.effective_price|money }} AED/BTC</td>
+        <td class="mono">{{ c.route.expected_output(amount)|btc }}</td>
+        <td class="mono">{% if c.quote_balance is none %}—{% else %}{{ c.quote_balance|money }} AED{% if c.quote_balance < amount %} <span class="pill warn">underfunded</span>{% endif %}{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% if decision.cross_exchange_alerts %}
+<div class="card">
+  <h2>Cross-exchange alerts (manual execution only)</h2>
+  <p class="help">Bridge via USDT withdrawal beats every other route at this size. We don't auto-execute these because transit time (1-10 min) creates price risk.</p>
+  <table>
+    <thead><tr><th>Route</th><th>Effective price</th><th>Expected BTC</th></tr></thead>
+    <tbody>
+    {% for a in decision.cross_exchange_alerts %}
+      <tr>
+        <td>{{ a.route.label }}</td>
+        <td class="mono">{{ a.effective_price|money }} AED/BTC</td>
+        <td class="mono">{{ a.route.expected_output(amount)|btc }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}

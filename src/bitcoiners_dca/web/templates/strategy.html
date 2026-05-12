@@ -1,0 +1,147 @@
+{% extends "_base.html" %}
+{% block title %}Strategy · bitcoiners-dca{% endblock %}
+{% block content %}
+<h1>Strategy</h1>
+<p class="subtitle">How much, how often, with which overlays. Changes apply on the next DCA cycle — no restart needed.</p>
+
+<form method="post" action="/strategy">
+
+<div class="card">
+  <h2>Base DCA</h2>
+  <div class="form-row">
+    <label>Amount per cycle (AED)</label>
+    <input type="number" min="10" step="10" name="amount_aed" value="{{ config.strategy.amount_aed }}">
+  </div>
+  <div class="form-row">
+    <label>Frequency</label>
+    <select name="frequency">
+      {% for f in ["daily", "weekly", "monthly"] %}
+      <option value="{{ f }}" {% if config.strategy.frequency == f %}selected{% endif %}>{{ f }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="form-row">
+    <label>Day of week</label>
+    <select name="day_of_week">
+      {% for d in ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"] %}
+      <option value="{{ d }}" {% if config.strategy.day_of_week == d %}selected{% endif %}>{{ d }}</option>
+      {% endfor %}
+    </select>
+    <small>(only used when frequency = weekly)</small>
+  </div>
+  <div class="form-row">
+    <label>Time of day</label>
+    <input type="time" name="time" value="{{ config.strategy.time }}">
+  </div>
+  <div class="form-row">
+    <label>Timezone</label>
+    <input name="timezone" value="{{ config.strategy.timezone }}">
+  </div>
+</div>
+
+<div class="card">
+  <h2>Execution mode</h2>
+  <p class="help">
+    <strong>taker</strong> = instant market buy, full taker fee.
+    <strong>maker_only</strong> = limit order; skip cycle if it doesn't fill.
+    <strong>maker_fallback</strong> = limit order with market-buy fallback if not filled at timeout.
+  </p>
+  <div class="form-row">
+    <label>Mode</label>
+    <select name="execution_mode">
+      {% for m in ["taker", "maker_only", "maker_fallback"] %}
+      <option value="{{ m }}" {% if config.execution.mode == m %}selected{% endif %}>{{ m }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="form-row">
+    <label>Maker timeout (s)</label>
+    <input type="number" min="10" max="3600" name="maker_timeout" value="{{ config.execution.maker.timeout_seconds }}">
+  </div>
+</div>
+
+<div class="card">
+  <h2>Smart routing</h2>
+  <div class="form-row">
+    <label>
+      <input type="checkbox" name="two_hop" {% if config.routing.enable_two_hop %}checked{% endif %}>
+      Enable 2-hop synthetic routes
+    </label>
+    <small>AED → USDT → BTC within the same exchange; often beats direct BTC/AED by ~0.1-0.4%.</small>
+  </div>
+  <div class="form-row">
+    <label>
+      <input type="checkbox" name="cross_alerts" {% if config.routing.enable_cross_exchange_alerts %}checked{% endif %}>
+      Cross-exchange alerts
+    </label>
+    <small>Telegram alert when bridging via USDT-withdraw beats every other route. Manual execution only.</small>
+  </div>
+  <div class="form-row">
+    <label>Preferred exchange</label>
+    <select name="preferred_exchange">
+      <option value="" {% if not config.routing.preferred_exchange %}selected{% endif %}>(none)</option>
+      {% for ex in ["okx", "binance", "bitoasis"] %}
+      <option value="{{ ex }}" {% if config.routing.preferred_exchange == ex %}selected{% endif %}>{{ ex }}</option>
+      {% endfor %}
+    </select>
+    <small>Applies a {{ config.routing.preferred_bonus_pct }}% bonus to the selected venue's routes.</small>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Overlays</h2>
+  <p class="help">Strategy modifiers — multipliers compound. See <a href="https://bitcoiners.ae/dca-bot" target="_blank">docs/STRATEGIES.md</a> for the math.</p>
+
+  <h3 style="margin-top:24px;font-size:14px;color:var(--text);">Buy the dip</h3>
+  <div class="form-row">
+    <label><input type="checkbox" name="dip_enabled" {% if config.overlays.buy_the_dip.enabled %}checked{% endif %}> Enabled</label>
+  </div>
+  <div class="form-row">
+    <label>Threshold (% change)</label>
+    <input type="number" step="0.5" name="dip_threshold" value="{{ config.overlays.buy_the_dip.threshold_pct }}">
+    <small>Trigger when price down ≥ this % in the lookback window.</small>
+  </div>
+  <div class="form-row">
+    <label>Multiplier</label>
+    <input type="number" step="0.1" min="1" name="dip_multiplier" value="{{ config.overlays.buy_the_dip.multiplier }}">
+  </div>
+  <div class="form-row">
+    <label>Lookback (days)</label>
+    <input type="number" min="1" max="60" name="dip_lookback" value="{{ config.overlays.buy_the_dip.lookback_days }}">
+  </div>
+
+  <h3 style="margin-top:24px;font-size:14px;color:var(--text);">Volatility-weighted</h3>
+  <div class="form-row">
+    <label><input type="checkbox" name="vol_enabled" {% if config.overlays.volatility_weighted.enabled %}checked{% endif %}> Enabled</label>
+    <small>Reduce buys when 30d realized vol is high; increase when low. Target {{ config.overlays.volatility_weighted.target_vol_pct }}% annualized.</small>
+  </div>
+
+  <h3 style="margin-top:24px;font-size:14px;color:var(--text);">Time of day</h3>
+  <div class="form-row">
+    <label><input type="checkbox" name="tod_enabled" {% if config.overlays.time_of_day.enabled %}checked{% endif %}> Enabled</label>
+    <small>Skip cycles outside the cheapest hours (mode = skip_if_not_best by default).</small>
+  </div>
+
+  <h3 style="margin-top:24px;font-size:14px;color:var(--text);">Drawdown-aware</h3>
+  <div class="form-row">
+    <label><input type="checkbox" name="dd_enabled" {% if config.overlays.drawdown_aware.enabled %}checked{% endif %}> Enabled</label>
+    <small>Multiply buys when BTC is meaningfully below ATH (default tiers: -20% / -40% / -60%).</small>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Risk caps</h2>
+  <div class="form-row">
+    <label>Max daily spend (AED)</label>
+    <input type="number" name="max_daily_aed" value="{{ config.risk.max_daily_aed or '' }}" placeholder="(no cap)">
+  </div>
+  <div class="form-row">
+    <label>Max single buy (AED)</label>
+    <input type="number" name="max_single_buy_aed" value="{{ config.risk.max_single_buy_aed or '' }}" placeholder="(no cap)">
+    <small>Even if overlay multipliers would push higher, the buy clamps to this.</small>
+  </div>
+</div>
+
+<button type="submit">Save strategy</button>
+</form>
+{% endblock %}

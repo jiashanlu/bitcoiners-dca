@@ -1,0 +1,19 @@
+<h2>Balances <span class="muted" style="font-size:11px;font-weight:normal">· refreshed {{ now.strftime('%H:%M:%S') }} UTC</span></h2>
+{% if balances %}
+<table>
+  <thead><tr><th>Exchange</th><th>Asset</th><th>Free</th><th>Used</th><th>Total</th></tr></thead>
+  <tbody>
+  {% for b in balances %}
+    <tr>
+      <td>{{ b.exchange }}</td>
+      <td class="mono">{{ b.asset }}</td>
+      <td class="mono">{{ b.free|btc if b.asset == "BTC" else b.free|money }}</td>
+      <td class="mono">{{ b.used|btc if b.asset == "BTC" else b.used|money }}</td>
+      <td class="mono"><strong>{{ b.total|btc if b.asset == "BTC" else b.total|money }}</strong></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No balances visible. Make sure at least one exchange is enabled with valid credentials in <a href="/exchanges">Exchanges</a>.</div>
+{% endif %}

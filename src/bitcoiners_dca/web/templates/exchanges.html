@@ -1,0 +1,58 @@
+{% extends "_base.html" %}
+{% block title %}Exchanges · bitcoiners-dca{% endblock %}
+{% block content %}
+<h1>Exchanges</h1>
+<p class="subtitle">Enable per-exchange access. Credentials are encrypted at rest (Fernet, key from <code>DCA_SECRETS_KEY</code>) and never displayed in plaintext.</p>
+
+{% if not secrets_available %}
+<div class="flash err">
+  ⚠ Secret store unavailable. Set <code>DCA_SECRETS_KEY</code> in <code>.env</code> to enable customer-entered credentials.
+  Generate one with: <code>python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"</code>
+</div>
+{% endif %}
+
+{% set exchange_meta = {
+  "okx":      {"name": "OKX UAE",     "pairs": "BTC/AED · BTC/USDT · USDT/AED", "scope": "Read + Trade (Withdraw optional for auto-withdraw)"},
+  "binance":  {"name": "Binance UAE", "pairs": "BTC/USDT only (no BTC/AED)",    "scope": "Read + Trade"},
+  "bitoasis": {"name": "BitOasis",    "pairs": "BTC/AED · USDT/AED · BTC/USDT", "scope": "Bearer token from Settings → API Token Management"}
+} %}
+
+{% for ex in ["okx", "binance", "bitoasis"] %}
+{% set meta = exchange_meta[ex] %}
+{% set ex_cfg = config.exchanges[ex] %}
+<div class="card">
+  <h2>{{ meta.name }}
+    {% if ex_cfg.enabled %}<span class="pill ok">enabled</span>{% else %}<span class="pill muted">disabled</span>{% endif %}
+  </h2>
+  <p class="help">Pairs: {{ meta.pairs }} · Required key scope: {{ meta.scope }}</p>
+
+  <form method="post" action="/exchanges/{{ ex }}/toggle" style="margin-bottom:20px">
+    <label style="display:flex;align-items:center;gap:10px;font-size:14px">
+      <input type="checkbox" name="enabled" {% if ex_cfg.enabled %}checked{% endif %} onchange="this.form.submit()">
+      Enable {{ ex }} in routing
+    </label>
+  </form>
+
+  <form method="post" action="/exchanges/{{ ex }}/credentials">
+    <p class="help">Paste new credentials below. Leave a field blank to keep the current value.</p>
+    {% for field in required_fields(ex) %}
+    <div class="form-row">
+      <label>{{ field }}</label>
+      <input type="password" name="{{ field }}" placeholder="{% if credentials.get(ex, {}).get(field) %}{{ credentials[ex][field] }}{% else %}(not set){% endif %}">
+    </div>
+    {% endfor %}
+    <button type="submit">Save credentials</button>
+  </form>
+</div>
+{% endfor %}
+
+<div class="card">
+  <h2 style="color:var(--text-muted);font-size:14px">Security notes</h2>
+  <p class="help">
+    • All credential values are encrypted at rest with Fernet (AES-128 in CBC mode + HMAC) using <code>DCA_SECRETS_KEY</code> from your environment.<br>
+    • Decryption happens only inside the daemon when constructing exchange clients — never in HTTP responses, logs, or YAML files.<br>
+    • For OKX: prefer Read+Trade scope, IP-whitelisted to your dashboard host. Add Withdraw scope only if you enable on-chain auto-withdraw.<br>
+    • Rotate any credentials that were ever pasted into a chat (Telegram, email, etc) before going live.
+  </p>
+</div>
+{% endblock %}

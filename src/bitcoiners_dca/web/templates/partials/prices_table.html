@@ -1,0 +1,23 @@
+<h2>{{ pair }} <span class="muted" style="font-size:11px;font-weight:normal">· refreshed {{ now.strftime('%H:%M:%S') }} UTC</span></h2>
+{% if prices %}
+<table>
+  <thead><tr><th>Exchange</th><th>Bid</th><th>Ask</th><th>Last</th><th>Spread %</th></tr></thead>
+  <tbody>
+  {% for p in prices %}
+    {% if p.error %}
+    <tr><td>{{ p.exchange }}</td><td colspan="4" class="muted" style="font-size:12px">{{ p.error }}</td></tr>
+    {% else %}
+    <tr>
+      <td>{{ p.exchange }}</td>
+      <td class="mono">{{ p.bid|money }}</td>
+      <td class="mono"><strong>{{ p.ask|money }}</strong></td>
+      <td class="mono">{{ p.last|money }}</td>
+      <td class="mono">{{ p.spread_pct }}</td>
+    </tr>
+    {% endif %}
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No exchanges enabled. Add credentials in <a href="/exchanges">Exchanges</a>.</div>
+{% endif %}

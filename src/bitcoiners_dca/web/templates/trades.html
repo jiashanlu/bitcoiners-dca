@@ -1,0 +1,39 @@
+{% extends "_base.html" %}
+{% block title %}Trades · bitcoiners-dca{% endblock %}
+{% block content %}
+<h1>Trades</h1>
+<p class="subtitle">{{ total }} total · page {{ page }} of {{ last_page }}</p>
+
+<div class="card">
+{% if trades %}
+<table>
+  <thead><tr>
+    <th>Date</th><th>Exchange</th><th>Pair</th><th>Side</th>
+    <th>AED</th><th>BTC</th><th>Price</th><th>Status</th><th>Order ID</th>
+  </tr></thead>
+  <tbody>
+  {% for t in trades %}
+    <tr>
+      <td>{{ t['timestamp'].split('T')[0] }}</td>
+      <td>{{ t['exchange'] }}</td>
+      <td>{{ t['pair'] }}</td>
+      <td>{{ t['side'] }}</td>
+      <td class="mono">{{ t['amount_quote']|money }}</td>
+      <td class="mono">{{ t['amount_base']|btc }}</td>
+      <td class="mono">{{ t['price_avg']|money }}</td>
+      <td><span class="pill {% if t['status'] == 'filled' %}ok{% elif t['status'] == 'cancelled' %}muted{% else %}warn{% endif %}">{{ t['status'] }}</span></td>
+      <td class="mono" style="font-size:11px">{{ t['order_id'] }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<div style="margin-top:16px;display:flex;gap:10px;align-items:center">
+  {% if page > 1 %}<a class="btn secondary" href="?page={{ prev_page }}">← Prev</a>{% endif %}
+  <span class="muted">page {{ page }} of {{ last_page }}</span>
+  {% if page < last_page %}<a class="btn secondary" href="?page={{ next_page }}">Next →</a>{% endif %}
+</div>
+{% else %}
+<div class="empty">No trades yet.</div>
+{% endif %}
+</div>
+{% endblock %}

@@ -16,6 +16,7 @@
 
 services:
   dca:
+    image: bitcoiners-dca:latest
     build: .
     container_name: bitcoiners-dca-daemon
     restart: unless-stopped
@@ -33,6 +34,7 @@ services:
       retries: 3
 
   dashboard:
+    image: bitcoiners-dca:latest
     build: .
     container_name: bitcoiners-dca-dashboard
     restart: unless-stopped
@@ -40,8 +42,8 @@ services:
     ports:
       - "0.0.0.0:8000:8000"   # localhost only by default; expose to network if you want
     volumes:
-      - ./config.yaml:/app/config/config.yaml:ro
-      - ./data:/app/data:ro
+      - ./config.yaml:/app/config/config.yaml
+      - ./data:/app/data
       - ./reports:/app/reports:ro
     env_file:
       - .env

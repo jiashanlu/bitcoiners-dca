@@ -1,0 +1,22 @@
+{% extends "_base.html" %}
+{% block title %}Prices · bitcoiners-dca{% endblock %}
+{% block content %}
+<h1>Prices</h1>
+<p class="subtitle">Live tickers, refreshes every 10 seconds. Compare across exchanges to see where the router would buy right now.</p>
+
+<form method="get" style="margin-bottom:20px;display:flex;gap:12px;align-items:center">
+  <label>Pair:</label>
+  <select name="pair" onchange="this.form.submit()">
+    {% for p in ["BTC/AED", "BTC/USDT", "USDT/AED"] %}
+    <option value="{{ p }}" {% if p == pair %}selected{% endif %}>{{ p }}</option>
+    {% endfor %}
+  </select>
+</form>
+
+<div class="card" id="prices-card"
+     hx-get="/htmx/prices?pair={{ pair }}"
+     hx-trigger="load, every 10s"
+     hx-swap="innerHTML">
+  <div class="empty">Loading…</div>
+</div>
+{% endblock %}

@@ -1,0 +1,74 @@
+{% extends "_base.html" %}
+{% block title %}Settings · bitcoiners-dca{% endblock %}
+{% block content %}
+<h1>Settings</h1>
+<p class="subtitle">License, notifications, master flags.</p>
+
+<form method="post" action="/settings">
+
+<div class="card">
+  <h2>License</h2>
+  <p class="help">Free tier is genuinely useful (single-exchange DCA + tax CSV). Pro / Business unlock multi-exchange routing, advanced overlays, and more. See <a href="https://bitcoiners.ae/dca-bot" target="_blank">tiers</a>.</p>
+  <div class="form-row">
+    <label>Tier</label>
+    <select name="license_tier">
+      {% for t in ["free", "pro", "business"] %}
+      <option value="{{ t }}" {% if config.license.tier == t %}selected{% endif %}>{{ t }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="form-row">
+    <label>License key</label>
+    <textarea name="license_key" rows="3" placeholder="(paste signed token here for Pro/Business)">{{ config.license.key or '' }}</textarea>
+    <small>Tier downgrades silently to free if key is missing / invalid / expired.</small>
+  </div>
+  <div class="form-row">
+    <label>Active features</label>
+    <div style="display:flex;flex-wrap:wrap;gap:6px">
+      {% for f in license_features %}
+        <span class="pill accent">{{ f }}</span>
+      {% else %}
+        <span class="muted">Free tier — base features only.</span>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Notifications</h2>
+  <div class="form-row">
+    <label><input type="checkbox" name="tg_enabled" {% if config.notifications.telegram.enabled %}checked{% endif %}> Telegram notifications</label>
+    <small>Cycle results · arbitrage alerts · error escalation.</small>
+  </div>
+  <div class="form-row">
+    <label>Telegram chat ID</label>
+    <input name="tg_chat_id" value="{{ config.notifications.telegram.chat_id or '' }}" placeholder="123456789">
+    <small>Message <code>@userinfobot</code> on Telegram to find yours. Bot token comes from the <code>TG_BOT_TOKEN</code> env var.</small>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Funding monitor</h2>
+  <div class="form-row">
+    <label><input type="checkbox" name="funding_enabled" {% if config.funding_monitor.enabled %}checked{% endif %}> Watch perpetual funding</label>
+    <small>Alert when annualized BTC perp funding crosses your threshold — basis-trade signal.</small>
+  </div>
+  <div class="form-row">
+    <label>Alert threshold (%)</label>
+    <input type="number" step="0.5" name="funding_threshold" value="{{ config.funding_monitor.alert_threshold_pct }}">
+  </div>
+</div>
+
+<div class="card">
+  <h2>Master flags</h2>
+  <div class="form-row">
+    <label><input type="checkbox" name="dry_run" {% if config.dry_run %}checked{% endif %}> dry_run (simulate every buy + withdrawal, no real orders)</label>
+    <small>
+      <strong>Recommended</strong> for first 24 hours of operation. Flip off only after auditing dry-run cycles + verifying auto-withdraw address.
+    </small>
+  </div>
+</div>
+
+<button type="submit">Save settings</button>
+</form>
+{% endblock %}

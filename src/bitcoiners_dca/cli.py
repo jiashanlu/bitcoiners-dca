@@ -134,30 +134,68 @@ console = Console()
 
 
 def _build_exchanges(cfg: AppConfig) -> list[Exchange]:
-    """Instantiate configured + credentialed exchange adapters."""
+    """Instantiate configured + credentialed exchange adapters.
+
+    Credentials resolved in priority order: SecretStore (dashboard-managed) →
+    env vars (config.exchanges.<name>.api_key_env etc). This means a customer
+    who pastes keys in the dashboard sees them used, while self-hosters who
+    set env vars don't have to migrate.
+    """
+    from bitcoiners_dca.persistence.secrets import (
+        SecretStore, SecretStoreError, credentials_for,
+    )
+    secrets = None
+    try:
+        secrets = SecretStore(cfg.persistence.db_path)
+    except SecretStoreError:
+        pass
+
+    def _creds(exchange: str, env_map: dict[str, str]) -> dict[str, str]:
+        out: dict[str, str] = {}
+        if secrets is not None:
+            out.update(credentials_for(secrets, exchange))
+        import os
+        for field, env_name in env_map.items():
+            if field not in out:
+                val = os.environ.get(env_name)
+                if val:
+                    out[field] = val
+        return out
+
     out: list[Exchange] = []
-    if cfg.exchanges.okx.enabled and cfg.exchanges.okx.get_api_key():
-        from bitcoiners_dca.exchanges.okx import OKXExchange
-        out.append(OKXExchange(
-            api_key=cfg.exchanges.okx.get_api_key(),
-            api_secret=cfg.exchanges.okx.get_api_secret(),
-            passphrase=cfg.exchanges.okx.get_passphrase() or "",
-            dry_run=cfg.dry_run,
-        ))
-    if cfg.exchanges.binance.enabled and cfg.exchanges.binance.get_api_key():
-        from bitcoiners_dca.exchanges.binance import BinanceExchange
-        out.append(BinanceExchange(
-            api_key=cfg.exchanges.binance.get_api_key(),
-            api_secret=cfg.exchanges.binance.get_api_secret(),
-            use_uae_endpoint=cfg.exchanges.binance.use_uae_endpoint,
-            dry_run=cfg.dry_run,
-        ))
-    if cfg.exchanges.bitoasis.enabled and cfg.exchanges.bitoasis.get_token():
-        from bitcoiners_dca.exchanges.bitoasis import BitOasisExchange
-        out.append(BitOasisExchange(
-            api_token=cfg.exchanges.bitoasis.get_token(),
-            dry_run=cfg.dry_run,
-        ))
+    if cfg.exchanges.okx.enabled:
+        c = _creds("okx", {
+            "api_key": cfg.exchanges.okx.api_key_env or "OKX_API_KEY",
+            "api_secret": cfg.exchanges.okx.api_secret_env or "OKX_API_SECRET",
+            "passphrase": cfg.exchanges.okx.passphrase_env or "OKX_API_PASSPHRASE",
+        })
+        if c.get("api_key"):
+            from bitcoiners_dca.exchanges.okx import OKXExchange
+            out.append(OKXExchange(
+                api_key=c["api_key"], api_secret=c.get("api_secret", ""),
+                passphrase=c.get("passphrase", ""), dry_run=cfg.dry_run,
+            ))
+    if cfg.exchanges.binance.enabled:
+        c = _creds("binance", {
+            "api_key": cfg.exchanges.binance.api_key_env or "BINANCE_API_KEY",
+            "api_secret": cfg.exchanges.binance.api_secret_env or "BINANCE_API_SECRET",
+        })
+        if c.get("api_key"):
+            from bitcoiners_dca.exchanges.binance import BinanceExchange
+            out.append(BinanceExchange(
+                api_key=c["api_key"], api_secret=c.get("api_secret", ""),
+                use_uae_endpoint=cfg.exchanges.binance.use_uae_endpoint,
+                dry_run=cfg.dry_run,
+            ))
+    if cfg.exchanges.bitoasis.enabled:
+        c = _creds("bitoasis", {
+            "token": cfg.exchanges.bitoasis.token_env or "BITOASIS_API_TOKEN",
+        })
+        if c.get("token"):
+            from bitcoiners_dca.exchanges.bitoasis import BitOasisExchange
+            out.append(BitOasisExchange(
+                api_token=c["token"], dry_run=cfg.dry_run,
+            ))
     return out
 
 
@@ -436,9 +474,31 @@ async def _run_daemon(config_path: str):
         slippage_buffer_pct=cfg.arbitrage.slippage_buffer_pct,
     )
 
+    def rebuild():
+        """Hot-reload factory — re-reads config + secrets + rebuilds every
+        component the scheduler depends on. Called at the top of every
+        scheduled task so dashboard edits to config.yaml take effect on
+        the next cycle without a daemon restart."""
+        fresh_cfg = _load_runtime_config(config_path)
+        fresh_exchanges = _build_exchanges(fresh_cfg)
+        fresh_router = _build_router(fresh_cfg)
+        fresh_strategy = _build_strategy(fresh_cfg, fresh_router)
+        fresh_monitor = ArbitrageMonitor(
+            min_spread_pct=fresh_cfg.arbitrage.min_spread_pct,
+            slippage_buffer_pct=fresh_cfg.arbitrage.slippage_buffer_pct,
+        )
+        return {
+            "config": fresh_cfg,
+            "exchanges": fresh_exchanges,
+            "router": fresh_router,
+            "strategy": fresh_strategy,
+            "monitor": fresh_monitor,
+        }
+
     scheduler = DCAScheduler(
         config=cfg, exchanges=exchanges, strategy=strategy,
         router=router, monitor=monitor, db=db, notifier=notifier,
+        rebuild_dependencies=rebuild,
     )
     await scheduler.run_forever()
 
