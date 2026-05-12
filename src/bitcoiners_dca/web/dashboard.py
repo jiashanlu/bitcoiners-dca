@@ -142,6 +142,30 @@ def create_app(
         the parent app's root."""
         return RedirectResponse(_prefix(request) + path, status_code=303)
 
+    def _bot_status() -> dict:
+        """One-stop status the banner + Overview card both read.
+
+        Three top-line states:
+          - "paused" — risk manager paused (auto after N failures or
+                       manual via /controls/pause)
+          - "dry_run" — running normally but config.dry_run=true; no real
+                        orders placed even when cron fires
+          - "live"   — running normally with real orders
+        """
+        try:
+            from bitcoiners_dca.core.risk import RiskManager, META_PAUSED_REASON
+            db = _db()
+            paused = db.get_meta("risk.paused") == "true"
+            reason = db.get_meta(META_PAUSED_REASON) or None
+        except Exception:
+            paused = False
+            reason = None
+        if paused:
+            return {"state": "paused", "reason": reason}
+        if _config().dry_run:
+            return {"state": "dry_run", "reason": None}
+        return {"state": "live", "reason": None}
+
     def _ctx(request: Request, **extra) -> dict:
         cfg = _config()
         # When proxied behind bitcoiners-app's /dca/console/[[...path]],
@@ -156,6 +180,7 @@ def create_app(
             "license_tier": _license().tier.value,
             "config": cfg,
             "prefix": prefix,
+            "bot_status": _bot_status(),
             "flash": extra.pop("flash", None),
             "active": extra.pop("active", ""),
             **extra,
@@ -416,6 +441,35 @@ def create_app(
             request, active="settings", flash=flash,
             license_features=[f.value for f in _license().enabled_features],
         )))
+
+    # === Lifecycle controls ===
+
+    @app.post("/controls/pause", response_class=HTMLResponse)
+    async def controls_pause(request: Request):
+        """Manual pause via the dashboard. Skips every cycle until resumed."""
+        from bitcoiners_dca.core.risk import RiskManager
+        rm = RiskManager(_db(), max_consecutive_failures=999)
+        rm.pause("manual via dashboard")
+        return _redirect(request, "/")
+
+    @app.post("/controls/resume", response_class=HTMLResponse)
+    async def controls_resume(request: Request):
+        from bitcoiners_dca.core.risk import RiskManager
+        rm = RiskManager(_db(), max_consecutive_failures=999)
+        rm.resume()
+        return _redirect(request, "/")
+
+    @app.post("/controls/go-live", response_class=HTMLResponse)
+    async def controls_go_live(request: Request):
+        """Flip dry_run=false. Cycle next time cron fires."""
+        _apply_patch(state["config_path"], {"dry_run": False}, _refresh_config)
+        return _redirect(request, "/")
+
+    @app.post("/controls/go-dry-run", response_class=HTMLResponse)
+    async def controls_go_dry_run(request: Request):
+        """Flip dry_run=true. Cycles still tick but no real orders placed."""
+        _apply_patch(state["config_path"], {"dry_run": True}, _refresh_config)
+        return _redirect(request, "/")
 
     # === JSON endpoints (kept for backward compat + CLI/scripting use) ===
 

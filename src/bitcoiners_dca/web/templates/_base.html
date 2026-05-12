@@ -211,6 +211,39 @@ button.secondary, .btn.secondary {
 .flash.ok { background: rgba(92,187,132,0.1); border: 1px solid var(--ok); color: var(--ok); }
 .flash.err { background: rgba(224,82,74,0.1); border: 1px solid var(--err); color: var(--err); }
 .flash.warn { background: rgba(240,176,0,0.1); border: 1px solid var(--warn); color: var(--warn); }
+
+/* Status banner — sticky context for the bot's current state. Visible on every
+   page. Big buttons live inline. */
+.status-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 20px;
+  border-radius: 10px;
+  margin-bottom: 20px;
+  font-size: 14px;
+  flex-wrap: wrap;
+}
+.status-banner .status-text { flex: 1; min-width: 240px; }
+.status-banner .status-controls { display: flex; gap: 8px; flex-wrap: wrap; }
+.status-banner .btn-primary-sm,
+.status-banner .btn-secondary-sm {
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+.status-banner .btn-primary-sm   { background: var(--accent); color: #000; }
+.status-banner .btn-primary-sm:hover { filter: brightness(1.08); }
+.status-banner .btn-secondary-sm { background: transparent; color: var(--text); border-color: var(--border); }
+.status-banner .btn-secondary-sm:hover { border-color: var(--text-muted); background: rgba(255,255,255,0.03); }
+
+.status-live    { background: rgba(92,187,132,0.08); border: 1px solid var(--ok); }
+.status-dry_run { background: rgba(240,176,0,0.08); border: 1px solid var(--warn); }
+.status-paused  { background: rgba(136,136,136,0.08); border: 1px solid var(--text-muted); }
 .pill {
   display: inline-block;
   padding: 2px 10px;
@@ -257,6 +290,45 @@ a { color: var(--accent); text-decoration: none; }
   </aside>
   <main class="main">
     {% if flash %}<div class="flash {{ flash.kind }}">{{ flash.message }}</div>{% endif %}
+
+    {# Status banner — same on every page so user always knows whether the bot
+       is actually placing real orders. The big buttons live here too so they're
+       reachable from anywhere, not just /. #}
+    {% if bot_status %}
+    <div class="status-banner status-{{ bot_status.state }}">
+      <div class="status-text">
+        {% if bot_status.state == "paused" %}
+          <strong>⏸️ Paused</strong> — cron is firing but every cycle is being skipped{% if bot_status.reason %} ({{ bot_status.reason }}){% endif %}.
+        {% elif bot_status.state == "dry_run" %}
+          <strong>🟡 Dry-run</strong> — cycles fire on schedule but no real orders are placed. Flip to live when you're ready.
+        {% elif bot_status.state == "live" %}
+          <strong>🟢 Live</strong> — real orders place on every scheduled cycle.
+        {% endif %}
+      </div>
+      <div class="status-controls">
+        {% if bot_status.state == "paused" %}
+          <form method="post" action="{{ prefix }}/controls/resume" style="display:inline">
+            <button type="submit" class="btn-primary-sm">Resume cycles</button>
+          </form>
+        {% else %}
+          <form method="post" action="{{ prefix }}/controls/pause" style="display:inline">
+            <button type="submit" class="btn-secondary-sm">Pause</button>
+          </form>
+          {% if bot_status.state == "dry_run" %}
+            <form method="post" action="{{ prefix }}/controls/go-live" style="display:inline"
+                  onsubmit="return confirm('Go live? Cycles will place real orders against your exchange API key. Make sure your Risk caps + auto-withdraw destination are set the way you want them.')">
+              <button type="submit" class="btn-primary-sm">Go live →</button>
+            </form>
+          {% else %}
+            <form method="post" action="{{ prefix }}/controls/go-dry-run" style="display:inline">
+              <button type="submit" class="btn-secondary-sm">Switch to dry-run</button>
+            </form>
+          {% endif %}
+        {% endif %}
+      </div>
+    </div>
+    {% endif %}
+
     {% block content %}{% endblock %}
   </main>
 </div>

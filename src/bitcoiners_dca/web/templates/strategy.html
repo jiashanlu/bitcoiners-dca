@@ -31,19 +31,18 @@
     </select>
     <small>How often the cron fires. Hourly is aggressive — set Risk caps below.</small>
   </div>
-  <div class="form-row">
+  <div class="form-row" id="row_day_of_week">
     <label>Day of week</label>
     <select name="day_of_week">
       {% for d in ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"] %}
       <option value="{{ d }}" {% if config.strategy.day_of_week == d %}selected{% endif %}>{{ d }}</option>
       {% endfor %}
     </select>
-    <small>(only used when frequency = weekly)</small>
   </div>
-  <div class="form-row">
-    <label>Time of day</label>
+  <div class="form-row" id="row_time">
+    <label id="label_time">Time of day</label>
     <input type="time" name="time" value="{{ config.strategy.time }}">
-    <small>For hourly, only the minutes matter (e.g. 09:<strong>15</strong> = every hour at :15).</small>
+    <small id="hint_time"></small>
   </div>
   <div class="form-row">
     <label>Timezone</label>
@@ -76,12 +75,36 @@
     out.innerHTML = '→ AED ' + perCycle.toFixed(2) + ' per cycle '
       + '(<strong>' + cyclesPerPeriod.toFixed(2) + ' ' + f + ' cycles per ' + p.replace('ly', '') + '</strong>).';
   }
+  // Show day-of-week only for weekly. Relabel/hint Time-of-day for hourly.
+  const dowRow = document.getElementById('row_day_of_week');
+  const labelTime = document.getElementById('label_time');
+  const hintTime = document.getElementById('hint_time');
+  function applyFreqVisibility() {
+    const f = freq.value;
+    if (dowRow) dowRow.style.display = (f === 'weekly') ? '' : 'none';
+    if (labelTime && hintTime) {
+      if (f === 'hourly') {
+        labelTime.textContent = 'Minute of the hour';
+        hintTime.innerHTML = 'Only the minutes matter — e.g. 09:<strong>15</strong> fires every hour at :15.';
+      } else if (f === 'monthly') {
+        labelTime.textContent = 'Time of day';
+        hintTime.innerHTML = 'Fires on the <strong>1st</strong> of each month at this time.';
+      } else if (f === 'weekly') {
+        labelTime.textContent = 'Time of day';
+        hintTime.innerHTML = 'Fires on the selected day each week at this time.';
+      } else {
+        labelTime.textContent = 'Time of day';
+        hintTime.innerHTML = 'Fires every day at this time.';
+      }
+    }
+  }
   ['input', 'change'].forEach(ev => {
     amt.addEventListener(ev, update);
     per.addEventListener(ev, update);
-    freq.addEventListener(ev, update);
+    freq.addEventListener(ev, function () { update(); applyFreqVisibility(); });
   });
   update();
+  applyFreqVisibility();
 })();
 </script>
 
