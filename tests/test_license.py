@@ -20,28 +20,48 @@ from bitcoiners_dca.core.license import (
 
 
 # === Tier feature membership ===
-# v0.7 pivot: every tier unlocks every feature. The license framework is
-# retained for tier-identification (hosted vs self-host) but doesn't gate
-# software capabilities. See core/license.py docstring + pricing page for
-# the rationale.
+# Tier-gating model:
+#   Free      : single-exchange DCA + maker mode + basic dip overlay
+#   Pro       : multi-exchange routing + advanced overlays + Lightning + monitors
+#   Business  : Pro + basis-trade execution + LN Markets + multi-asset
 
-def test_free_tier_has_every_feature():
+def test_free_tier_limited_to_basics():
     mgr = LicenseManager(LicenseTier.FREE)
+    # In Free
+    assert mgr.is_feature_enabled(Feature.MAKER_MODE)
+    assert mgr.is_feature_enabled(Feature.DIP_OVERLAY)
+    # Pro features NOT in Free
+    assert not mgr.is_feature_enabled(Feature.MULTI_EXCHANGE)
+    assert not mgr.is_feature_enabled(Feature.MULTI_HOP_ROUTING)
+    assert not mgr.is_feature_enabled(Feature.VOLATILITY_WEIGHTED)
+    assert not mgr.is_feature_enabled(Feature.LIGHTNING_WITHDRAW)
+    assert not mgr.is_feature_enabled(Feature.FUNDING_MONITOR)
+    # Business features NOT in Free
+    assert not mgr.is_feature_enabled(Feature.BASIS_TRADE)
+
+
+def test_pro_tier_unlocks_routing_and_overlays():
+    mgr = LicenseManager(LicenseTier.PRO)
+    # Pro-tier features
     assert mgr.is_feature_enabled(Feature.MULTI_EXCHANGE)
     assert mgr.is_feature_enabled(Feature.MULTI_HOP_ROUTING)
-    assert mgr.is_feature_enabled(Feature.MAKER_MODE)
+    assert mgr.is_feature_enabled(Feature.CROSS_EXCHANGE_ALERTS)
+    assert mgr.is_feature_enabled(Feature.VOLATILITY_WEIGHTED)
+    assert mgr.is_feature_enabled(Feature.TIME_OF_DAY)
+    assert mgr.is_feature_enabled(Feature.DRAWDOWN_SIZING)
+    assert mgr.is_feature_enabled(Feature.LIGHTNING_WITHDRAW)
     assert mgr.is_feature_enabled(Feature.FUNDING_MONITOR)
-    assert mgr.is_feature_enabled(Feature.BASIS_TRADE)
-    assert mgr.is_feature_enabled(Feature.LN_MARKETS_YIELD)
+    # Inherits Free
+    assert mgr.is_feature_enabled(Feature.MAKER_MODE)
+    assert mgr.is_feature_enabled(Feature.DIP_OVERLAY)
+    # Business features still locked
+    assert not mgr.is_feature_enabled(Feature.BASIS_TRADE)
+    assert not mgr.is_feature_enabled(Feature.LN_MARKETS_YIELD)
+    assert not mgr.is_feature_enabled(Feature.MULTI_ASSET_DCA)
+    assert not mgr.is_feature_enabled(Feature.TAX_LOSS_HARVEST)
 
 
-def test_pro_tier_has_every_feature():
-    mgr = LicenseManager(LicenseTier.PRO)
-    for f in Feature:
-        assert mgr.is_feature_enabled(f), f"PRO tier missing {f}"
-
-
-def test_business_tier_has_every_feature():
+def test_business_tier_unlocks_everything():
     mgr = LicenseManager(LicenseTier.BUSINESS)
     for f in Feature:
         assert mgr.is_feature_enabled(f), f"BUSINESS tier missing {f}"

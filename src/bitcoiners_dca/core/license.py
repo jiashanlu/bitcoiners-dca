@@ -90,45 +90,66 @@ class Feature(str, Enum):
 
 # Tier → set of features.
 #
-# v0.7 pivot: ALL features are available to ALL tiers. The software is
-# fully open-source; we sell hosting + services, not feature unlocks.
-# (See docs/PRICING_PHILOSOPHY.md for the rationale.)
+# Feature-gating model (v0.8): the Free tier is a real product but limited
+# to single-exchange DCA + basic execution. Multi-exchange smart routing
+# (our killer feature), advanced strategy overlays, and basis-trade
+# execution are gated upward.
 #
-# The tier value is still meaningful to the rest of the bot — it
-# distinguishes "this customer is self-hosting" from "this customer is on
-# our hosted infra" for things like the dashboard's tier badge, telemetry
-# of which features hosted customers actually use, and where premium
-# Business-tier services like onboarding calls get scheduled. But the
-# feature set is identical across tiers.
-_ALL_FEATURES: set[Feature] = set(Feature)
+# What stays in Free:
+#   * Single-exchange DCA + maker mode + basic buy-the-dip overlay
+#   * On-chain auto-withdraw, UAE tax CSV, risk circuit breakers
+#   * Local read-only dashboard + CLI
+# What unlocks at Pro (hosted, AED 49/mo):
+#   * Multi-exchange routing including multi-hop AED→USDT→BTC
+#   * All advanced overlays (volatility-weighted, time-of-day, drawdown)
+#   * Cross-exchange arb alerts + funding-rate monitor
+#   * Lightning auto-withdraw + backtest engine
+# What unlocks at Business (hosted, concierge):
+#   * Basis-trade execution + LN Markets covered calls
+#   * Multi-asset DCA + stablecoin yield + tax-loss harvesting
+#   * Family-office multi-strategy mode
+#
+# Self-hosters who want the Pro features have two paths: get a Pro license
+# token (paid) or fork-and-modify (we don't prevent that; the spirit is
+# "fair model" not "DRM").
+
+_FREE_FEATURES: set[Feature] = {
+    # Free tier: basic DCA only. Free users get a real product, but the
+    # killer alpha (multi-exchange) requires Pro.
+    Feature.MAKER_MODE,
+    Feature.DIP_OVERLAY,
+}
+
+_PRO_FEATURES: set[Feature] = _FREE_FEATURES | {
+    # The smart-routing killer feature lives here.
+    Feature.MULTI_EXCHANGE,
+    Feature.MULTI_HOP_ROUTING,
+    Feature.CROSS_EXCHANGE_ALERTS,
+    # Advanced strategy overlays.
+    Feature.VOLATILITY_WEIGHTED,
+    Feature.TIME_OF_DAY,
+    Feature.DRAWDOWN_SIZING,
+    # Withdrawal upgrade.
+    Feature.LIGHTNING_WITHDRAW,
+    # Monitoring + analytics.
+    Feature.FUNDING_MONITOR,
+}
+
+_BUSINESS_FEATURES: set[Feature] = _PRO_FEATURES | {
+    # Business-tier execution + yield strategies. Most require white-glove
+    # onboarding so they're effectively gated by the "Contact us" flow.
+    Feature.BASIS_TRADE,
+    Feature.LN_MARKETS_YIELD,
+    Feature.MULTI_ASSET_DCA,
+    Feature.STABLECOIN_YIELD,
+    Feature.TAX_LOSS_HARVEST,
+    Feature.FAMILY_OFFICE,
+}
 
 _TIER_FEATURES: dict[LicenseTier, set[Feature]] = {
-    LicenseTier.FREE: _ALL_FEATURES,
-    LicenseTier.PRO: _ALL_FEATURES,
-    LicenseTier.BUSINESS: _ALL_FEATURES,
-}
-
-# Retained for the type-checker so the rest of the module still resolves
-# the same names; previously these were used to build up tiers.
-_LEGACY_PRO_FEATURES = {
-        Feature.MULTI_EXCHANGE,
-        Feature.MULTI_HOP_ROUTING,
-        Feature.CROSS_EXCHANGE_ALERTS,
-        Feature.MAKER_MODE,
-        Feature.DIP_OVERLAY,
-        Feature.VOLATILITY_WEIGHTED,
-        Feature.TIME_OF_DAY,
-        Feature.DRAWDOWN_SIZING,
-        Feature.LIGHTNING_WITHDRAW,
-        Feature.FUNDING_MONITOR,
-}
-_LEGACY_BUSINESS_FEATURES = {
-        Feature.BASIS_TRADE,
-        Feature.LN_MARKETS_YIELD,
-        Feature.MULTI_ASSET_DCA,
-        Feature.STABLECOIN_YIELD,
-        Feature.TAX_LOSS_HARVEST,
-        Feature.FAMILY_OFFICE,
+    LicenseTier.FREE: _FREE_FEATURES,
+    LicenseTier.PRO: _PRO_FEATURES,
+    LicenseTier.BUSINESS: _BUSINESS_FEATURES,
 }
 
 
