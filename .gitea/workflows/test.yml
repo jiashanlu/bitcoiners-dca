@@ -1,0 +1,29 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    # Run on the shared dockers-LXC runner. python:3.11 image has uv-free
+    # pip + venv tooling already.
+    runs-on: dockers-lxc
+    container:
+      image: python:3.11-slim
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OS deps (sqlite is in slim, but build-essential helps cffi)
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends build-essential >/dev/null
+
+      - name: Install Python deps
+        run: |
+          pip install --no-cache-dir -e .[dev] || pip install --no-cache-dir -e .
+          pip install --no-cache-dir pytest pytest-asyncio httpx
+
+      - name: Run tests
+        run: pytest -q
