@@ -73,14 +73,16 @@ if [[ -z "${dash_port}" ]]; then
 fi
 echo "    Dashboard port: ${dash_port}"
 
-# Issue a 1-year license token
+# Issue a 1-year license token. Use GNU `date -d` (Linux) with a BSD `date -v`
+# fallback for macOS dev environments.
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+expires_iso="$(date -u -d '+1 year' +%Y-%m-%d 2>/dev/null || date -u -v+1y +%Y-%m-%d)"
 token="$(
   python3 "${script_dir}/scripts/generate_license.py" issue \
     --private-key "${PROVISION_PRIVATE_KEY}" \
     --customer-id "${customer_email}" \
     --tier "${tier}" \
-    --expires "$(date -u -v+1y +%Y-%m-%d)" \
+    --expires "${expires_iso}" \
     --notes "provisioned by hosted/provision.sh" 2>/dev/null \
     | tail -1 | tr -d ' '
 )"
@@ -145,22 +147,27 @@ export TENANT_DASH_PORT="${dash_port}"
 export IMAGE_TAG="${PROVISION_IMAGE_TAG}"
 envsubst < "${script_dir}/hosted/docker-compose.tenant.yml" > "${tenant_dir}/docker-compose.yml"
 
-# Render nginx fragment (basic auth file is the customer's responsibility to set
-# with `htpasswd -c <file> <user>` before reloading nginx)
+# Render nginx fragment IF the target dir exists. In the bitcoiners-app
+# deployment, the per-tenant nginx routing is replaced by bitcoiners-app's
+# dynamic /dca/console/[...path] proxy — no nginx needed. We still write
+# the fragment if PROVISION_NGINX_DIR exists, for legacy nginx-fronted
+# setups (the bare hosted/ deployment without bitcoiners-app).
 auth_file="/etc/nginx/.htpasswd-bitcoiners-${tenant_id}"
 export TENANT_AUTH_FILE="${auth_file}"
-envsubst < "${script_dir}/hosted/nginx.conf.template" \
-  > "${PROVISION_NGINX_DIR}/bitcoiners-dca-${tenant_id}.conf"
+if [[ -d "${PROVISION_NGINX_DIR}" ]]; then
+  envsubst < "${script_dir}/hosted/nginx.conf.template" \
+    > "${PROVISION_NGINX_DIR}/bitcoiners-dca-${tenant_id}.conf"
+  echo "    nginx fragment: ${PROVISION_NGINX_DIR}/bitcoiners-dca-${tenant_id}.conf"
+else
+  echo "    nginx fragment: skipped (no ${PROVISION_NGINX_DIR}; bitcoiners-app handles proxying)"
+fi
 
 echo
 echo "==> Tenant '${tenant_id}' provisioned."
 echo
 echo "Next steps:"
 echo "  1. Customer fills in ${tenant_dir}/.env with their API secrets"
-echo "  2. Set their basic-auth password:"
-echo "       htpasswd -c ${auth_file} ${tenant_id}"
-echo "  3. cd ${tenant_dir} && docker compose up -d"
-echo "  4. nginx -t && systemctl reload nginx"
-echo "  5. Verify: curl -u ${tenant_id}:<pw> https://app.bitcoiners.ae/${tenant_id}/healthz"
+echo "  2. cd ${tenant_dir} && docker compose up -d  (provisioner does this for you)"
 echo
-echo "Dashboard URL: https://app.bitcoiners.ae/${tenant_id}/"
+echo "Container DNS name: bitcoiners-dca-${tenant_id}-dashboard:8000"
+echo "Local debug port:   127.0.0.1:${dash_port}"
