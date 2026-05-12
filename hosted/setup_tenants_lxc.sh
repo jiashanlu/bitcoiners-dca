@@ -19,7 +19,14 @@
 
 set -euo pipefail
 
-REPO_URL="${REPO_URL:-http://jiashanlu:508108b684b57110796c3e641d286e100695e25b@192.168.4.151:3005/jiashan-dev/bitcoiners-dca.git}"
+# Credentials come from env. Never hardcode tokens here — earlier revs
+# inlined the Gitea PAT and it ended up in git history. Run with:
+#   GITEA_USER=jiashanlu GITEA_TOKEN=<pat> ./setup_tenants_lxc.sh
+: "${GITEA_USER:?GITEA_USER required (e.g. jiashanlu)}"
+: "${GITEA_TOKEN:?GITEA_TOKEN required (Gitea PAT with repo:read)}"
+GITEA_HOST="${GITEA_HOST:-192.168.4.151:3005}"
+GITEA_REPO="${GITEA_REPO:-jiashan-dev/bitcoiners-dca}"
+REPO_URL="${REPO_URL:-http://${GITEA_USER}:${GITEA_TOKEN}@${GITEA_HOST}/${GITEA_REPO}.git}"
 INSTALL_DIR="/opt/bitcoiners-dca"
 KEYS_DIR="/etc/bitcoiners-dca/keys"
 ENV_FILE="/etc/bitcoiners-dca/provisioner.env"
