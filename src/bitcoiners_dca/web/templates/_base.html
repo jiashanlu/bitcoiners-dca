@@ -311,6 +311,13 @@ a { color: var(--accent); text-decoration: none; }
             <button type="submit" class="btn-primary-sm">Resume cycles</button>
           </form>
         {% else %}
+          {# Buy-now runs an immediate one-shot cycle so the user doesn't
+             wait up to an hour for the first scheduled tick. Confirm in
+             live mode since it places real orders. #}
+          <form method="post" action="{{ prefix }}/controls/buy-now" style="display:inline"
+                {% if bot_status.state == "live" %}onsubmit="return confirm('Place one real DCA buy right now? This will go through your exchange API key immediately.')"{% endif %}>
+            <button type="submit" class="btn-primary-sm" title="Run one DCA cycle right now (bypasses the cron schedule)">Buy now</button>
+          </form>
           <form method="post" action="{{ prefix }}/controls/pause" style="display:inline">
             <button type="submit" class="btn-secondary-sm">Pause</button>
           </form>

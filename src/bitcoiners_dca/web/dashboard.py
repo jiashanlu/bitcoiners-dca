@@ -380,8 +380,15 @@ def create_app(
             (per_page, (page - 1) * per_page),
         ).fetchall()
         last_page = max(1, (total + per_page - 1) // per_page)
+        # Surface a flash if we landed here from /controls/buy-now
+        flash = None
+        if request.query_params.get("ran"):
+            flash = {"kind": "ok", "message": "Buy-now cycle ran. The result should be at the top of the table below."}
+        elif request.query_params.get("error"):
+            flash = {"kind": "err",
+                     "message": f"Buy-now failed: {request.query_params['error']}"}
         return HTMLResponse(jinja.get_template("trades.html").render(_ctx(
-            request, active="trades",
+            request, active="trades", flash=flash,
             trades=rows, total=total, page=page,
             last_page=last_page, prev_page=max(1, page - 1),
             next_page=min(last_page, page + 1),
@@ -470,6 +477,22 @@ def create_app(
         """Flip dry_run=true. Cycles still tick but no real orders placed."""
         _apply_patch(state["config_path"], {"dry_run": True}, _refresh_config)
         return _redirect(request, "/")
+
+    @app.post("/controls/buy-now", response_class=HTMLResponse)
+    async def controls_buy_now(request: Request):
+        """Trigger an immediate one-shot DCA cycle, regardless of cron schedule.
+        Useful right after going live so the user doesn't wait up to an hour
+        for the first real trade. Bypasses RiskManager pause — this is an
+        explicit user override. Respects config.dry_run though, so if you're
+        in dry-run the cycle still simulates.
+        """
+        from bitcoiners_dca.cli import _buy_once
+        try:
+            await _buy_once(state["config_path"], dry=False)
+        except Exception as e:
+            # Surface the error via querystring so the next render shows it
+            return _redirect(request, f"/trades?error={str(e)[:200]}")
+        return _redirect(request, "/trades?ran=1")
 
     # === JSON endpoints (kept for backward compat + CLI/scripting use) ===
 
