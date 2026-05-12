@@ -121,6 +121,16 @@ def create_app(
         cfg = _config()
         return LicenseManager.from_config(cfg.license.tier, cfg.license.key)
 
+    def _prefix(request: Request) -> str:
+        """Strip trailing slash; "" if not behind a reverse proxy."""
+        return request.headers.get("x-forwarded-prefix", "").rstrip("/")
+
+    def _redirect(request: Request, path: str) -> RedirectResponse:
+        """303 redirect that honours the iframe-proxy prefix so the
+        browser navigates to /dca/console/<path> instead of escaping to
+        the parent app's root."""
+        return RedirectResponse(_prefix(request) + path, status_code=303)
+
     def _ctx(request: Request, **extra) -> dict:
         cfg = _config()
         # When proxied behind bitcoiners-app's /dca/console/[[...path]],
@@ -128,7 +138,7 @@ def create_app(
         # this to render all internal links + htmx URLs as
         # /dca/console/<path> so nav stays inside the iframe. Empty
         # string for direct LAN/Free-tier access — links resolve to /.
-        prefix = request.headers.get("x-forwarded-prefix", "").rstrip("/")
+        prefix = _prefix(request)
         return {
             "request": request,
             "user_email": _authenticated_user(request),
@@ -235,7 +245,7 @@ def create_app(
         flash = _apply_patch(_config(), {
             f"exchanges.{name}.enabled": enabled,
         }, _refresh_config)
-        return RedirectResponse("/exchanges", status_code=303)
+        return _redirect(request, "/exchanges")
 
     @app.post("/exchanges/{name}/credentials", response_class=HTMLResponse)
     async def exchange_credentials(request: Request, name: str):
@@ -256,7 +266,7 @@ def create_app(
             flash = {"kind": "ok", "message": f"Saved {updated} credential field(s) for {name}"}
             # Force exchange re-instantiation on next request
             state["exchanges"] = None
-        return RedirectResponse("/exchanges", status_code=303)
+        return _redirect(request, "/exchanges")
 
     @app.get("/balances", response_class=HTMLResponse)
     async def balances_page(request: Request):

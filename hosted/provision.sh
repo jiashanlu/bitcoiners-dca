@@ -127,9 +127,17 @@ risk:
 dry_run: true   # SAFETY — customer flips to false after their own audit
 YAML
 
-# Skeleton .env — customer fills in their API secrets
-cat > "${tenant_dir}/.env" <<'ENV'
+# Generate a fresh Fernet key for the dashboard's encrypted SecretStore
+# (where customer-typed API credentials live). One per tenant, never
+# leaves the tenant dir. Without this set, the Exchanges page returns
+# "Secret store unavailable" and credential paste forms don't render.
+fernet_key="$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")"
+
+# Skeleton .env — customer fills in their API secrets via the dashboard;
+# the env-var slots remain for self-hosters who prefer env-based config.
+cat > "${tenant_dir}/.env" <<ENV
 # Tenant API secrets. chmod 600. Never commit.
+DCA_SECRETS_KEY=${fernet_key}
 OKX_API_KEY=
 OKX_API_SECRET=
 OKX_API_PASSPHRASE=
