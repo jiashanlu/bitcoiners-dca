@@ -5,10 +5,13 @@ Used by both the strategy engine (trade confirmations, errors) and the
 arbitrage monitor (opportunity alerts).
 """
 from __future__ import annotations
+import logging
 import os
 from typing import Optional
 
 import httpx
+
+log = logging.getLogger(__name__)
 
 from bitcoiners_dca.core.models import ArbitrageOpportunity
 from bitcoiners_dca.core.strategy import ExecutionResult
@@ -85,16 +88,18 @@ class Notifier:
     async def _send(self, text: str) -> None:
         if self.config.telegram.enabled:
             await self._send_telegram(text)
-        # email backend TBD
+        if self.config.email.enabled:
+            await self._send_email(text)
 
     async def _send_telegram(self, text: str) -> None:
         token = os.environ.get(self.config.telegram.bot_token_env)
         chat_id = self.config.telegram.chat_id
         if not token or not chat_id:
+            log.debug("telegram notify skipped: token or chat_id missing")
             return
         async with httpx.AsyncClient(timeout=15.0) as client:
             try:
-                await client.post(
+                resp = await client.post(
                     f"https://api.telegram.org/bot{token}/sendMessage",
                     json={
                         "chat_id": chat_id,
@@ -103,6 +108,42 @@ class Notifier:
                         "disable_web_page_preview": True,
                     },
                 )
-            except Exception:
-                # Silently swallow — notifications should never break the bot
-                pass
+                if resp.status_code >= 300:
+                    log.warning(
+                        "telegram notify non-2xx status=%s body=%s",
+                        resp.status_code, resp.text[:200],
+                    )
+            except Exception as e:
+                # Notifications must never break trade execution. Log so the
+                # operator can see what's wrong, but swallow the exception.
+                log.warning("telegram notify failed: %s", e)
+
+    async def _send_email(self, text: str) -> None:
+        """Send via SMTP with STARTTLS. Runs in a thread — smtplib is sync."""
+        import asyncio
+        import smtplib
+        from email.message import EmailMessage
+
+        ec = self.config.email
+        host, sender, recipient = ec.smtp_host, ec.from_addr, ec.to_addr
+        password = os.environ.get(ec.password_env)
+        if not (host and sender and recipient and password):
+            log.debug("email notify skipped: host/from/to/password incomplete")
+            return
+
+        msg = EmailMessage()
+        msg["Subject"] = "Bitcoiners DCA — notification"
+        msg["From"] = sender
+        msg["To"] = recipient
+        msg.set_content(text)
+
+        def _send_sync() -> None:
+            with smtplib.SMTP(host, ec.smtp_port, timeout=15) as smtp:
+                smtp.starttls()
+                smtp.login(sender, password)
+                smtp.send_message(msg)
+
+        try:
+            await asyncio.to_thread(_send_sync)
+        except Exception as e:
+            log.warning("email notify failed: %s", e)
