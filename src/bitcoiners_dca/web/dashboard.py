@@ -588,17 +588,33 @@ def create_app(
 
     @app.post("/controls/buy-now", response_class=HTMLResponse)
     async def controls_buy_now(request: Request):
-        """Trigger an immediate one-shot DCA cycle, regardless of cron schedule.
-        Useful right after going live so the user doesn't wait up to an hour
-        for the first real trade. Bypasses RiskManager pause — this is an
-        explicit user override. Respects config.dry_run though, so if you're
-        in dry-run the cycle still simulates.
+        """Trigger an immediate one-shot DCA cycle, regardless of cron
+        schedule.
+
+        Respects RiskManager caps (daily + single-buy) and pause state.
+        Previously bypassed them entirely — a customer could blow through
+        their AED daily cap with rapid Buy-now clicks. Now if risk caps
+        would block the cycle, we redirect with a clear error.
         """
         from bitcoiners_dca.cli import _buy_once
+        from bitcoiners_dca.core.risk import RiskManager
+        cfg = _config()
+        rm = RiskManager(
+            _db(),
+            max_consecutive_failures=cfg.risk.max_consecutive_failures,
+            max_daily_aed=cfg.risk.max_daily_aed,
+            max_single_buy_aed=cfg.risk.max_single_buy_aed,
+        )
+        # Use the strategy's intended per-cycle amount for the check.
+        decision = rm.evaluate(Decimal(str(cfg.strategy.amount_aed)))
+        if not decision.allow:
+            return _redirect(
+                request,
+                f"/trades?error=Buy now blocked by risk caps: {'; '.join(decision.reasons)[:200]}",
+            )
         try:
             await _buy_once(state["config_path"], dry=False)
         except Exception as e:
-            # Surface the error via querystring so the next render shows it
             return _redirect(request, f"/trades?error={str(e)[:200]}")
         return _redirect(request, "/trades?ran=1")
 
