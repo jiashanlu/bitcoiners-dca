@@ -39,6 +39,8 @@ from typing import Optional
 
 from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp
 
 from bitcoiners_dca.core.license import LicenseManager
 from bitcoiners_dca.exchanges.base import Exchange
@@ -58,6 +60,64 @@ CF_USER_HEADER = "Cf-Access-Authenticated-User-Email"
 
 def _authenticated_user(request: Request) -> str:
     return request.headers.get(CF_USER_HEADER, "local-operator")
+
+
+class _OriginCSRFMiddleware(BaseHTTPMiddleware):
+    """Same-site enforcement for state-changing requests.
+
+    On every non-safe method (POST/PUT/PATCH/DELETE), require that either
+    `Origin` matches the request's host, OR `Referer` starts with the
+    request's origin. Refuses the request with 403 otherwise.
+
+    This is the simplest defense against browser-driven CSRF: an attacker
+    page on another domain can submit a form to us using the user's cookies
+    (CF Access JWT, etc.), but the browser will set `Origin` to the
+    attacker's domain on the cross-site POST. We block on mismatch.
+
+    Doesn't break direct API/scripting use because curl/wget don't send an
+    Origin header for cross-site contexts — only browsers do. If both
+    Origin and Referer are absent, we let it through (likely server-to-
+    server or a sanitized curl call).
+    """
+    SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
+
+    async def dispatch(self, request: Request, call_next):
+        if request.method in self.SAFE_METHODS:
+            return await call_next(request)
+
+        origin = request.headers.get("origin")
+        referer = request.headers.get("referer")
+        host = request.headers.get("host", "")
+        scheme = request.url.scheme
+        # The X-Forwarded-Prefix is set by the bitcoiners-app proxy; treat
+        # those requests as coming from the proxy host, not the upstream.
+        # We accept the proxy's forwarded values.
+        fwd_host = request.headers.get("x-forwarded-host")
+        fwd_proto = request.headers.get("x-forwarded-proto", scheme)
+        expected_origins = set()
+        if fwd_host:
+            expected_origins.add(f"{fwd_proto}://{fwd_host}")
+        if host:
+            expected_origins.add(f"{scheme}://{host}")
+
+        if origin:
+            if origin not in expected_origins:
+                return JSONResponse(
+                    {"error": "csrf",
+                     "detail": f"origin {origin!r} not in {expected_origins}"},
+                    status_code=403,
+                )
+            return await call_next(request)
+        if referer:
+            if not any(referer.startswith(o + "/") or referer == o for o in expected_origins):
+                return JSONResponse(
+                    {"error": "csrf",
+                     "detail": f"referer {referer!r} not under {expected_origins}"},
+                    status_code=403,
+                )
+            return await call_next(request)
+        # No Origin AND no Referer: likely server-to-server / curl. Allow.
+        return await call_next(request)
 
 
 def create_app(
@@ -85,6 +145,11 @@ def create_app(
         description="Self-service operations dashboard.",
         version="0.6.0",
     )
+    # CSRF protection: same-site origin check on all state-changing requests.
+    # Stops a malicious page on attacker.example from POSTing to /controls/*
+    # using the user's auto-sent CF Access cookie. Combined with the existing
+    # CF Access email-OTP layer this is adequate for the hosted threat model.
+    app.add_middleware(_OriginCSRFMiddleware)
     jinja = make_jinja()
     state: dict = {
         "config_path": str(config_path),
