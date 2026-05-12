@@ -1,0 +1,67 @@
+# Per-tenant Docker Compose template.
+#
+# This file is rendered into `tenants/<tenant_id>/docker-compose.yml` by
+# `hosted/provision.sh`. Each tenant gets:
+#   - their own daemon container (bound to tenant data dir)
+#   - their own dashboard container (exposed on a unique localhost port)
+#   - their own config.yaml + .env
+#   - their own SQLite DB at tenants/<tenant_id>/data/
+#
+# The fleet-level reverse proxy (nginx on the Mac mini or a dedicated host)
+# routes app.bitcoiners.ae/<tenant_id> → the right localhost port.
+#
+# Required substitutions (provision.sh does this with `envsubst`):
+#   TENANT_ID         — e.g. "ben-prod" — used in container names + volumes
+#   TENANT_DATA_DIR   — absolute path on host, e.g. /opt/bitcoiners-dca/tenants/ben-prod
+#   TENANT_DASH_PORT  — unique localhost port, e.g. 8101
+#   IMAGE_TAG         — e.g. "ghcr.io/jiashanlu/bitcoiners-dca:0.5.0"
+
+services:
+  daemon:
+    image: ${IMAGE_TAG}
+    container_name: bitcoiners-dca-${TENANT_ID}-daemon
+    restart: unless-stopped
+    command: ["run", "--config", "/app/config/config.yaml"]
+    volumes:
+      - ${TENANT_DATA_DIR}/config:/app/config:ro
+      - ${TENANT_DATA_DIR}/data:/app/data
+      - ${TENANT_DATA_DIR}/reports:/app/reports
+    env_file:
+      - ${TENANT_DATA_DIR}/.env
+    labels:
+      - "bitcoiners-dca.tenant=${TENANT_ID}"
+    healthcheck:
+      test: ["CMD", "test", "-f", "/app/data/dca.db"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+
+  dashboard:
+    image: ${IMAGE_TAG}
+    container_name: bitcoiners-dca-${TENANT_ID}-dashboard
+    restart: unless-stopped
+    command:
+      - "dashboard"
+      - "--config"
+      - "/app/config/config.yaml"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+    ports:
+      - "127.0.0.1:${TENANT_DASH_PORT}:8000"
+    volumes:
+      - ${TENANT_DATA_DIR}/config:/app/config:ro
+      - ${TENANT_DATA_DIR}/data:/app/data:ro
+      - ${TENANT_DATA_DIR}/reports:/app/reports:ro
+    env_file:
+      - ${TENANT_DATA_DIR}/.env
+    depends_on:
+      - daemon
+    labels:
+      - "bitcoiners-dca.tenant=${TENANT_ID}"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8000/healthz"]
+      interval: 60s
+      timeout: 5s
+      retries: 3

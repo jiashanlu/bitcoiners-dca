@@ -1,0 +1,48 @@
+[project]
+name = "bitcoiners-dca"
+version = "0.1.0"
+description = "Self-hostable multi-exchange DCA bot for UAE Bitcoiners — smart routing, arbitrage alerts, tax-ready reporting."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Ben", email = "ben@bitcoiners.ae" }]
+license = { text = "MIT" }
+
+dependencies = [
+  "ccxt>=4.4.0",              # Unified exchange API (OKX, Binance)
+  "httpx>=0.27.0",            # For BitOasis custom adapter + general HTTP
+  "PyYAML>=6.0",              # Config parsing
+  "pydantic>=2.6",            # Config validation + data models
+  "apscheduler>=3.10",        # Cron-style scheduling
+  "fastapi>=0.110",           # Optional web dashboard
+  "uvicorn>=0.27",            # ASGI server
+  "rich>=13.7",               # Pretty CLI output
+  "typer>=0.12",              # CLI framework
+  "python-telegram-bot>=21",  # Telegram notifications
+  "tenacity>=8.2",            # Retry logic for API calls
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "mypy>=1.8",
+  "ruff>=0.3",
+]
+
+[project.scripts]
+bitcoiners-dca = "bitcoiners_dca.cli:app"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

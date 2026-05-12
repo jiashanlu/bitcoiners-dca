@@ -1,0 +1,167 @@
+# bitcoiners-dca starter config — copy to config.yaml and edit.
+
+# ─── LICENSE ────────────────────────────────────────────────────────────────
+# Free tier = no key needed, single-exchange DCA + tax CSV + on-chain
+# auto-withdraw + risk circuit breakers. Pro / Business tiers unlock
+# multi-exchange routing, maker mode, advanced strategies, etc.
+# See docs/TIERS.md for the full feature matrix.
+license:
+  tier: free                  # free | pro | business
+  key: null                   # base64 token from https://bitcoiners.ae/dca-bot
+
+# ─── STRATEGY ───────────────────────────────────────────────────────────────
+strategy:
+  amount_aed: 500           # AED to spend per buy
+  frequency: weekly         # daily | weekly | monthly
+  day_of_week: monday       # only used if frequency=weekly
+  time: "09:00"             # HH:MM in your timezone
+  timezone: "Asia/Dubai"
+
+# ─── OVERLAYS ───────────────────────────────────────────────────────────────
+# Pluggable amount modifiers applied to the base DCA buy. Multipliers compound
+# across enabled overlays. See docs/STRATEGIES.md for math + recommendations.
+overlays:
+  # Multiply buy size when BTC has dropped > threshold in lookback window.
+  buy_the_dip:
+    enabled: true
+    threshold_pct: -10      # buy multiplier kicks in if price down ≥10% in lookback
+    lookback_days: 7
+    multiplier: 2.0         # 2x buys when triggered
+
+  # Reduce buy size when realized volatility is high, increase when low.
+  # Smooths spending across vol regimes. Pro/Business tier only.
+  volatility_weighted:
+    enabled: false
+    target_vol_pct: 50      # BTC's rough long-run norm
+    slope: 0.02             # sensitivity per pct-point of vol delta
+    min_factor: 0.25
+    max_factor: 2.0
+
+  # Avoid the wide-spread overnight hours. Two modes:
+  #   skip_if_not_best: skip cycles not in preferred_hours
+  #   scale_by_spread:  scale buy size by hour-of-day median spread
+  # Pro/Business tier only.
+  time_of_day:
+    enabled: false
+    mode: skip_if_not_best
+    preferred_hours: [9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+    spread_scale_min: 0.5
+    spread_scale_max: 1.5
+
+  # Extra buys at significant drawdowns from ATH. Bear-market accumulation tool.
+  # Pro/Business tier only.
+  drawdown_aware:
+    enabled: false
+    tiers:
+      - {threshold_pct: -20, multiplier: 1.5}
+      - {threshold_pct: -40, multiplier: 2.5}
+      - {threshold_pct: -60, multiplier: 4.0}
+
+# ─── EXECUTION ──────────────────────────────────────────────────────────────
+# How each buy is placed. See docs/EXECUTION_MODES.md for a deep dive.
+execution:
+  mode: taker                       # taker | maker_only | maker_fallback
+  maker:
+    limit_at: bid                   # bid | midpoint | ask_minus_bps
+    spread_bps_below_market: 5      # only used when limit_at=ask_minus_bps
+    timeout_seconds: 600            # how long to wait for a limit fill
+
+# ─── ROUTING ────────────────────────────────────────────────────────────────
+# Smart routing decides which exchange + path to buy through.
+# See docs/ROUTING.md for the math and trade-offs.
+routing:
+  mode: best_price
+  exclude_if_spread_pct_above: 2.0  # skip pair if its bid/ask gap >2%
+  preferred_exchange: null           # set to an exchange name to bias toward it
+  preferred_bonus_pct: 0.5           # how much "discount" to give the preferred
+
+  # Two-hop routing (AED → USDT → BTC on the same exchange) — beats direct
+  # BTC/AED on OKX by ~0.09% at current pricing. Audit with `routes` first.
+  enable_two_hop: false
+  intermediates: [USDT]              # could add USDC later
+
+  # Cross-exchange routes (Telegram alert only, never auto-executed).
+  enable_cross_exchange_alerts: false
+  cross_exchange_min_size_aed: 25000
+  cross_exchange_withdrawal_costs:
+    USDT: 1.5                        # OKX TRC20 USDT fee
+
+# ─── EXCHANGES ──────────────────────────────────────────────────────────────
+# Enable per exchange; set credentials via environment variables.
+exchanges:
+  okx:
+    enabled: true
+    api_key_env: OKX_API_KEY
+    api_secret_env: OKX_API_SECRET
+    passphrase_env: OKX_API_PASSPHRASE
+
+  binance:
+    # Binance does NOT list BTC/AED. UAE users access binance.com via ADGM-
+    # licensed entities (since Jan 2026). Only enable Binance if you want to
+    # DCA BTC/USDT — and remember to set `strategy.pair: BTC/USDT` below.
+    enabled: false
+    api_key_env: BINANCE_API_KEY
+    api_secret_env: BINANCE_API_SECRET
+
+  bitoasis:
+    enabled: false
+    # BitOasis uses Bearer-token auth. Generate at Settings → API Token Management.
+    token_env: BITOASIS_API_TOKEN
+
+# ─── AUTO-WITHDRAW ──────────────────────────────────────────────────────────
+# After each successful buy, withdraw to your hardware wallet if threshold met.
+auto_withdraw:
+  enabled: false
+  destination_address: null   # YOUR Bitcoin hardware wallet address (bc1q…/bc1p…)
+  threshold_btc: 0.01         # don't withdraw until BTC balance ≥ this
+
+# ─── RISK / CIRCUIT BREAKERS ────────────────────────────────────────────────
+# Protect against runaway spend and exchange outages. The bot will auto-pause
+# itself after N consecutive failed cycles — resume with `bitcoiners-dca risk resume`.
+risk:
+  max_daily_aed: null          # e.g. 1000 — hard cap on total AED spent per UTC day
+  max_single_buy_aed: null     # e.g. 2000 — clamps even dip-multiplier buys
+  max_consecutive_failures: 5  # auto-pause after this many back-to-back failures
+
+# ─── ARBITRAGE ──────────────────────────────────────────────────────────────
+# Detect cross-exchange spot price gaps. Telegram alert, no auto-execution.
+arbitrage:
+  enabled: true
+  min_spread_pct: 1.5         # alert when gross spread ≥ this
+  slippage_buffer_pct: 0.3    # subtracted from net profit estimate
+  poll_interval_seconds: 300  # 5 min
+
+# ─── FUNDING-RATE MONITOR ───────────────────────────────────────────────────
+# Watch BTC perpetual funding for basis-trade signals (long spot + short
+# perp). Detection only — bot never places derivatives orders.
+# See docs/FUNDING_MONITOR.md.
+funding_monitor:
+  enabled: false
+  poll_interval_seconds: 3600
+  alert_threshold_pct: 15.0           # alert when ann ≥ this %
+  alert_negative_threshold_pct: -10.0
+  alert_cooldown_hours: 24
+  instruments:
+    - {exchange: okx, symbol: BTC-USDT-SWAP}
+
+# ─── NOTIFICATIONS ──────────────────────────────────────────────────────────
+notifications:
+  telegram:
+    enabled: false
+    bot_token_env: TG_BOT_TOKEN
+    chat_id: null              # your Telegram chat ID
+  email:
+    enabled: false             # not yet implemented
+
+# ─── PERSISTENCE + REPORTS ──────────────────────────────────────────────────
+persistence:
+  db_path: "./data/dca.db"
+reports:
+  uae_tax_csv_path: "./reports"
+
+# ─── MASTER FLAGS ───────────────────────────────────────────────────────────
+# SAFETY DEFAULT: dry_run starts ON. When true, every buy + withdrawal is
+# simulated; no real orders are placed. After you've run `bitcoiners-dca
+# validate`, watched a few dry cycles via `buy-once`, and confirmed your
+# auto-withdraw address + strategy are correct, set this to false.
+dry_run: true

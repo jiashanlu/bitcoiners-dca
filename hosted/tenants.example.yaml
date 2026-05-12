@@ -1,0 +1,34 @@
+# Tenant registry — example layout for tracking who's hosted on the fleet.
+#
+# This file is NOT consumed by the bot. It's a human-readable inventory that
+# Ben maintains by hand (or via a future admin UI). Each entry mirrors what
+# `hosted/provision.sh` created on disk.
+#
+# Field meanings:
+#   tenant_id        — short identifier used in container names + URL paths
+#   customer_email   — billing + license attribution
+#   tier             — pro | business
+#   provisioned_at   — when provision.sh ran
+#   expires_at       — license expiry (must be renewed by issuing a new token)
+#   dashboard_port   — localhost port the dashboard binds to
+#   status           — active | suspended | deleted
+#   notes            — anything noteworthy (custom domain, special config)
+
+tenants:
+  - tenant_id: example-pro
+    customer_email: customer@example.com
+    tier: pro
+    provisioned_at: 2026-05-12
+    expires_at: 2027-05-12
+    dashboard_port: 8101
+    status: active
+    notes: "Example entry — delete before production"
+
+  - tenant_id: example-business
+    customer_email: enterprise@example.com
+    tier: business
+    provisioned_at: 2026-05-12
+    expires_at: 2027-05-12
+    dashboard_port: 8102
+    status: active
+    notes: "Family-office tier; weekly check-in scheduled"

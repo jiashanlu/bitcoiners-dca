@@ -1,0 +1,54 @@
+# bitcoiners-dca — production deployment
+#
+# Two services:
+#   - dca: long-running scheduler daemon
+#   - dashboard: read-only web UI (port 8000)
+#
+# Both mount the same data + reports + config volumes so they see the same state.
+#
+# Quick start:
+#   1. cp config.example.yaml config.yaml
+#   2. edit config.yaml (set strategy + exchanges + auto_withdraw)
+#   3. cp .env.example .env
+#   4. edit .env (set OKX_API_KEY etc.)
+#   5. docker compose up -d
+#   6. open http://localhost:8000
+
+services:
+  dca:
+    build: .
+    container_name: bitcoiners-dca-daemon
+    restart: unless-stopped
+    command: ["run", "--config", "/app/config/config.yaml"]
+    volumes:
+      - ./config.yaml:/app/config/config.yaml:ro
+      - ./data:/app/data
+      - ./reports:/app/reports
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD", "test", "-f", "/app/data/dca.db"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+
+  dashboard:
+    build: .
+    container_name: bitcoiners-dca-dashboard
+    restart: unless-stopped
+    command: ["dashboard", "--config", "/app/config/config.yaml", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "0.0.0.0:8000:8000"   # localhost only by default; expose to network if you want
+    volumes:
+      - ./config.yaml:/app/config/config.yaml:ro
+      - ./data:/app/data:ro
+      - ./reports:/app/reports:ro
+    env_file:
+      - .env
+    depends_on:
+      - dca
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8000/healthz"]
+      interval: 60s
+      timeout: 5s
+      retries: 3

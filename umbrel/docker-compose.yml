@@ -1,0 +1,59 @@
+# bitcoiners-dca — Umbrel community-app deployment
+#
+# Two services share a volume:
+#   - daemon: long-running scheduler (cron buys + arbitrage poll + health checks)
+#   - dashboard: read-only web UI exposed on APP_PORT via Umbrel's proxy
+#
+# Configuration:
+#   - Edit config.yaml at ${APP_DATA_DIR}/config.yaml after first run
+#   - Set API secrets in ${APP_DATA_DIR}/.env (chmod 600)
+#   - Restart the app from the Umbrel UI after editing
+
+version: "3.7"
+
+services:
+  app_proxy:
+    environment:
+      APP_HOST: bitcoiners-dca_web_1
+      APP_PORT: 8000
+
+  daemon:
+    image: ghcr.io/jiashanlu/bitcoiners-dca:0.3.0
+    restart: on-failure
+    command: ["run", "--config", "/app/config/config.yaml"]
+    volumes:
+      - ${APP_DATA_DIR}/config:/app/config:ro
+      - ${APP_DATA_DIR}/data:/app/data
+      - ${APP_DATA_DIR}/reports:/app/reports
+    env_file:
+      - ${APP_DATA_DIR}/.env
+    healthcheck:
+      test: ["CMD", "test", "-f", "/app/data/dca.db"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+
+  web:
+    image: ghcr.io/jiashanlu/bitcoiners-dca:0.3.0
+    restart: on-failure
+    command:
+      - "dashboard"
+      - "--config"
+      - "/app/config/config.yaml"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+    volumes:
+      - ${APP_DATA_DIR}/config:/app/config:ro
+      - ${APP_DATA_DIR}/data:/app/data:ro
+      - ${APP_DATA_DIR}/reports:/app/reports:ro
+    env_file:
+      - ${APP_DATA_DIR}/.env
+    depends_on:
+      - daemon
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8000/healthz"]
+      interval: 60s
+      timeout: 5s
+      retries: 3

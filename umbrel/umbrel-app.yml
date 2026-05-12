@@ -1,0 +1,43 @@
+manifestVersion: 1
+id: bitcoiners-dca
+category: finance
+name: bitcoiners-dca
+version: "0.3.0"
+tagline: Self-hosted Bitcoin DCA for UAE Bitcoiners
+description: >-
+  Automate your dollar-cost-averaging into Bitcoin from BitOasis, OKX, and
+  Binance — running on your own home node, with your own keys, with no
+  intermediary holding your sats.
+
+
+  Features:
+  • Multi-exchange smart routing — every buy picks the cheapest after-fee price
+  • Buy-the-dip overlay — multiplies the buy when BTC drops by your threshold
+  • Lightning withdrawal — auto-withdraw to a Lightning invoice via OKX
+  • On-chain auto-withdraw — sweep accumulated BTC to your hardware wallet
+  • Arbitrage detection — Telegram alerts on cross-exchange spreads
+  • Risk circuit breakers — daily spend cap, single-buy cap, auto-pause
+  • UAE-format tax CSV — for record-keeping
+  • Backtest engine — replay any strategy against 365 days of history
+  • Read-only web dashboard
+
+
+  Built for UAE residents using VARA-licensed exchanges (BitOasis, OKX UAE)
+  plus Binance via its ADGM-licensed entity. Your API keys never leave your
+  Umbrel.
+developer: Bitcoiners.ae
+website: https://bitcoiners.ae/dca-bot
+dependencies: []
+repo: https://github.com/jiashanlu/bitcoiners-dca
+support: https://bitcoiners.ae/dca-bot
+port: 8000
+gallery:
+  - 1.png
+  - 2.png
+  - 3.png
+releaseNotes: >-
+  v0.3 — first Umbrel release. BitOasis adapter verified against the live
+  public API. OKX Lightning withdrawal. Validate-config + risk-management
+  CLIs. Backtest engine. Read-only dashboard.
+submitter: Bitcoiners.ae
+submission: https://github.com/getumbrel/umbrel-apps/pull/PENDING
