@@ -1,0 +1,41 @@
+# Provisioner microservice — runs on the same `bitcoiners-app` Docker
+# network as bitcoiners-app + Postgres + per-tenant DCA containers, so
+# bitcoiners-app can call it at `http://provisioner:8500/...` via Docker DNS.
+#
+# Reachable only inside the network. NOT exposed to the host network.
+#
+# Requires:
+#   /var/run/docker.sock         — to start tenant compose stacks
+#   /opt/bitcoiners-dca          — the cloned repo (provision.sh, templates)
+#   /etc/bitcoiners-dca/keys     — license-signing private key (PEM)
+#   /etc/bitcoiners-dca/provisioner.env — PROVISIONER_SHARED_SECRET=...
+
+services:
+  provisioner:
+    image: bitcoiners-provisioner:latest
+    container_name: bitcoiners-provisioner
+    restart: unless-stopped
+    networks:
+      - bitcoiners-app
+    env_file:
+      - /etc/bitcoiners-dca/provisioner.env
+    environment:
+      PROVISIONER_HOSTED_DIR: /opt/bitcoiners-dca/hosted
+      PROVISION_BASE_DIR: /opt/bitcoiners-dca
+      PROVISION_NGINX_DIR: /etc/nginx/conf.d
+      PROVISION_PRIVATE_KEY: /etc/bitcoiners-dca/keys/license_signing.pem
+      PROVISION_IMAGE_TAG: bitcoiners-dca:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /opt/bitcoiners-dca:/opt/bitcoiners-dca
+      - /etc/bitcoiners-dca:/etc/bitcoiners-dca:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8500/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  bitcoiners-app:
+    external: true
+    name: bitcoiners-app

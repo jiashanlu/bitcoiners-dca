@@ -3,17 +3,20 @@
 # This file is rendered into `tenants/<tenant_id>/docker-compose.yml` by
 # `hosted/provision.sh`. Each tenant gets:
 #   - their own daemon container (bound to tenant data dir)
-#   - their own dashboard container (exposed on a unique localhost port)
+#   - their own dashboard container (on the shared `bitcoiners-app` network)
 #   - their own config.yaml + .env
 #   - their own SQLite DB at tenants/<tenant_id>/data/
 #
-# The fleet-level reverse proxy (nginx on the Mac mini or a dedicated host)
-# routes app.bitcoiners.ae/<tenant_id> → the right localhost port.
+# Routing model:
+#   - The dashboard is reachable inside the Docker network as
+#     `bitcoiners-dca-<tenant_id>-dashboard:8000` — bitcoiners-app proxies
+#     to that hostname via Docker DNS.
+#   - For local admin/debug access, we ALSO bind to 127.0.0.1:<TENANT_DASH_PORT>.
 #
 # Required substitutions (provision.sh does this with `envsubst`):
 #   TENANT_ID         — e.g. "ben-prod" — used in container names + volumes
 #   TENANT_DATA_DIR   — absolute path on host, e.g. /opt/bitcoiners-dca/tenants/ben-prod
-#   TENANT_DASH_PORT  — unique localhost port, e.g. 8101
+#   TENANT_DASH_PORT  — unique localhost debug port, e.g. 8101
 #   IMAGE_TAG         — e.g. "ghcr.io/jiashanlu/bitcoiners-dca:0.5.0"
 
 services:
@@ -28,6 +31,8 @@ services:
       - ${TENANT_DATA_DIR}/reports:/app/reports
     env_file:
       - ${TENANT_DATA_DIR}/.env
+    networks:
+      - bitcoiners-app
     labels:
       - "bitcoiners-dca.tenant=${TENANT_ID}"
     healthcheck:
@@ -49,6 +54,8 @@ services:
       - "--port"
       - "8000"
     ports:
+      # Local admin/debug only — bitcoiners-app reaches the dashboard via
+      # Docker DNS (`bitcoiners-dca-${TENANT_ID}-dashboard:8000`).
       - "127.0.0.1:${TENANT_DASH_PORT}:8000"
     volumes:
       - ${TENANT_DATA_DIR}/config:/app/config:ro
@@ -58,6 +65,8 @@ services:
       - ${TENANT_DATA_DIR}/.env
     depends_on:
       - daemon
+    networks:
+      - bitcoiners-app
     labels:
       - "bitcoiners-dca.tenant=${TENANT_ID}"
     healthcheck:
@@ -65,3 +74,11 @@ services:
       interval: 60s
       timeout: 5s
       retries: 3
+
+# Reuses the same `bitcoiners-app` network as the main app + Postgres so
+# bitcoiners-app can reach the tenant dashboard via Docker DNS:
+#   http://bitcoiners-dca-<tenant_id>-dashboard:8000
+networks:
+  bitcoiners-app:
+    external: true
+    name: bitcoiners-app
