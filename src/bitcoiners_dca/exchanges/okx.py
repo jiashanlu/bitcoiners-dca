@@ -6,12 +6,15 @@ OKX UAE-licensed entity (VARA registration) is the canonical OKX endpoint
 for UAE residents. AED pairs are direct (BTC/AED is supported).
 """
 from __future__ import annotations
+import logging
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
 import ccxt.async_support as ccxt_async
 from tenacity import retry, stop_after_attempt, wait_exponential
+
+logger = logging.getLogger(__name__)
 
 from bitcoiners_dca.core.lightning import WithdrawalNetwork, detect_network
 from bitcoiners_dca.core.models import (
@@ -168,6 +171,10 @@ class OKXExchange(Exchange):
             )
         try:
             base_amount = quote_amount / limit_price
+            logger.info(
+                "OKX place_limit_buy: pair=%s quote_amount=%s limit_price=%s → base_amount=%s",
+                pair, quote_amount, limit_price, base_amount,
+            )
             raw = await self._client.create_limit_buy_order(
                 symbol=pair, amount=float(base_amount), price=float(limit_price),
             )
