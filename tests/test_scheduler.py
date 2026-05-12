@@ -59,7 +59,9 @@ def test_monthly_pins_day_one():
 
 def test_invalid_frequency_raises():
     import pytest
-    with pytest.raises(ValueError, match="Invalid frequency"):
+    # Pydantic Literal-validates at config-load time now (earlier failure
+    # path than the cron-builder branch). Either layer rejects "yearly".
+    with pytest.raises((ValueError, Exception), match="(Invalid frequency|frequency|literal_error)"):
         _build_cron_trigger(_cfg("yearly"))
 
 

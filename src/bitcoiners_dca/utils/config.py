@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
+from typing import Literal
+
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -91,11 +93,13 @@ class StrategyYamlConfig(BaseModel):
     # in `core/strategy.py`.
     amount_aed: Decimal = Decimal("500")
     budget_amount: Optional[Decimal] = None
-    budget_period: str = "cycle"  # cycle | daily | weekly | monthly | yearly
+    budget_period: Literal["cycle", "daily", "weekly", "monthly", "yearly"] = "cycle"
 
-    frequency: str = "weekly"     # hourly | daily | weekly | monthly
-    every_n_hours: int = 1        # used when frequency=hourly. 1 = every hour, 2 = every 2h, etc.
-    day_of_week: str = "monday"
+    frequency: Literal["hourly", "daily", "weekly", "monthly"] = "weekly"
+    every_n_hours: int = 1  # 1..24; scheduler clamps and snaps to a divisor of 24
+    day_of_week: Literal[
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"
+    ] = "monday"
     time: str = "09:00"
     timezone: str = "Asia/Dubai"
 
@@ -128,7 +132,7 @@ class VolatilityWeightedOverlayConfig(BaseModel):
 class TimeOfDayOverlayConfig(BaseModel):
     """Skip cycles outside the cheapest hours, or scale by hour-of-day spreads."""
     enabled: bool = False
-    mode: str = "skip_if_not_best"      # skip_if_not_best | scale_by_spread
+    mode: Literal["skip_if_not_best", "scale_by_spread"] = "skip_if_not_best"
     preferred_hours: list[int] = Field(default_factory=lambda: list(range(9, 19)))
     spread_scale_min: Decimal = Decimal("0.5")
     spread_scale_max: Decimal = Decimal("1.5")
@@ -166,7 +170,7 @@ class MakerConfig(BaseModel):
       - "ask_minus_bps": ask × (1 - spread_bps_below_market / 10000) — sits
         inside the spread, lower fill probability, lowest cost
     """
-    limit_at: str = "bid"
+    limit_at: Literal["bid", "midpoint", "ask_minus_bps"] = "bid"
     spread_bps_below_market: int = 5
     timeout_seconds: int = 600
 
@@ -181,7 +185,7 @@ class ExecutionConfig(BaseModel):
 
     See `docs/EXECUTION_MODES.md` for trade-offs and per-exchange tuning.
     """
-    mode: str = "taker"
+    mode: Literal["taker", "maker_only", "maker_fallback"] = "taker"
     maker: MakerConfig = Field(default_factory=MakerConfig)
 
 
