@@ -51,6 +51,13 @@ services:
       - "0.0.0.0"
       - "--port"
       - "8000"
+    environment:
+      # Refuse any request missing the CF Access proxy header. The only
+      # path that reaches the dashboard is bitcoiners-app's per-user proxy
+      # at /dca/console/, which sets cf-access-authenticated-user-email.
+      # Belt-and-suspenders on top of the ufw allow-list — if either layer
+      # is misconfigured, requests fail closed.
+      DCA_REQUIRE_CF_HEADER: "1"
     ports:
       # Bind to the LAN. bitcoiners-app (on a different LXC) reaches the
       # dashboard at http://<tenants-lxc-lan-ip>:${TENANT_DASH_PORT}/.

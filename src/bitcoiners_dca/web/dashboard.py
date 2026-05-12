@@ -59,7 +59,39 @@ CF_USER_HEADER = "Cf-Access-Authenticated-User-Email"
 
 
 def _authenticated_user(request: Request) -> str:
+    """Read the authenticated user from the CF Access / proxy header.
+
+    In production (DCA_REQUIRE_CF_HEADER=1), the absence of this header is
+    a security failure: it means the request reached the dashboard without
+    going through the bitcoiners-app proxy or Cloudflare Access. We refuse
+    the request via _enforce_auth_gate() before any handler runs; this
+    function only ever sees an authenticated request.
+
+    In dev/self-host (the default), we fall back to "local-operator" so
+    Free-tier users running on their own machine don't need to set up
+    Cloudflare Access at all.
+    """
     return request.headers.get(CF_USER_HEADER, "local-operator")
+
+
+def _require_cf_header() -> bool:
+    return os.environ.get("DCA_REQUIRE_CF_HEADER", "").strip().lower() in ("1", "true", "yes")
+
+
+class _CFGateMiddleware(BaseHTTPMiddleware):
+    """Refuse any request missing the CF Access user header when the env
+    flag DCA_REQUIRE_CF_HEADER=1 is set (production hosted mode).
+
+    Skips /healthz so the container healthcheck still works internally.
+    """
+
+    async def dispatch(self, request, call_next):
+        if request.url.path == "/healthz":
+            return await call_next(request)
+        if _require_cf_header() and not request.headers.get(CF_USER_HEADER):
+            from starlette.responses import PlainTextResponse
+            return PlainTextResponse("Unauthorized: missing proxy header", status_code=401)
+        return await call_next(request)
 
 
 class _OriginCSRFMiddleware(BaseHTTPMiddleware):
@@ -150,6 +182,11 @@ def create_app(
     # using the user's auto-sent CF Access cookie. Combined with the existing
     # CF Access email-OTP layer this is adequate for the hosted threat model.
     app.add_middleware(_OriginCSRFMiddleware)
+    # Outer gate: when running in the hosted multi-tenant setup, refuse any
+    # request that didn't come through the bitcoiners-app proxy (which sets
+    # Cf-Access-Authenticated-User-Email). Opt-in via env so self-host /
+    # Free tier still works without it.
+    app.add_middleware(_CFGateMiddleware)
     jinja = make_jinja()
     state: dict = {
         "config_path": str(config_path),
