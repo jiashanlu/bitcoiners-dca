@@ -353,6 +353,25 @@ a { color: var(--accent); text-decoration: none; }
     </div>
     {% endif %}
 
+    {# Multi-hop orphan — funds stuck in an intermediate currency on an
+       exchange because a hop failed after the previous hop settled. The
+       operator needs to either complete the conversion manually (sell
+       USDT → BTC by hand) or withdraw the stuck balance. We surface
+       persistently until acknowledged. #}
+    {% if orphan %}
+    <div class="flash error" style="line-height:1.6">
+      <strong>⚠️ Stuck funds detected.</strong>
+      A multi-hop route failed mid-flight on {{ orphan.ts[:16] | replace("T", " ") }}.
+      Likely leftover stablecoin or intermediate balance on the exchange.
+      <ul style="margin:8px 0 0 1.4em; font-size:13px">
+        {% for e in orphan.errors %}<li>{{ e }}</li>{% endfor %}
+      </ul>
+      <form method="post" action="{{ prefix }}/orphan/acknowledge" style="margin-top:10px">
+        <button type="submit" class="btn-secondary-sm">I've cleaned up the stuck funds — dismiss</button>
+      </form>
+    </div>
+    {% endif %}
+
     {% block content %}{% endblock %}
   </main>
 </div>

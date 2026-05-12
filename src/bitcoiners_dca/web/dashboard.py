@@ -311,6 +311,19 @@ def create_app(
                 welcome = (cnt == 0)
         except Exception:
             welcome = False
+        # Orphan funds banner: cleared once user clicks Acknowledge.
+        orphan = None
+        try:
+            import json as _json
+            raw = _db().get_meta("multi_hop.last_orphan")
+            ack = _db().get_meta("multi_hop.orphan_acknowledged_at")
+            if raw:
+                parsed = _json.loads(raw)
+                if not ack or ack < parsed.get("ts", ""):
+                    orphan = parsed
+        except Exception:
+            orphan = None
+
         return {
             "request": request,
             "user_email": _authenticated_user(request),
@@ -319,10 +332,23 @@ def create_app(
             "prefix": prefix,
             "bot_status": _bot_status(),
             "welcome": welcome,
+            "orphan": orphan,
             "flash": extra.pop("flash", None),
             "active": extra.pop("active", ""),
             **extra,
         }
+
+    @app.post("/orphan/acknowledge", response_class=HTMLResponse)
+    async def orphan_acknowledge(request: Request):
+        """Clear the orphan banner once the operator has cleaned up the
+        stuck intermediate-currency funds. Writes an acknowledged-at
+        timestamp; _ctx hides the banner when ack >= last_orphan.ts."""
+        from datetime import datetime, timezone
+        _db().set_meta(
+            "multi_hop.orphan_acknowledged_at",
+            datetime.now(timezone.utc).isoformat(),
+        )
+        return _redirect(request, "/")
 
     # === PAGES ===
 

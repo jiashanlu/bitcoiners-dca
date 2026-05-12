@@ -254,6 +254,11 @@ class DCAScheduler:
             await self.notifier.notify_cycle(result)
             success = bool(result.order) and not result.errors
             self.risk.record_cycle_result(success=success)
+            # Multi-hop orphan detection: any error mentioning "Orphan"
+            # means a hop succeeded then the next failed, leaving funds
+            # stuck on the exchange in an intermediate currency. Surface
+            # for manual cleanup via the dashboard.
+            self._record_orphan_if_any(result)
             logger.info(
                 "DCA cycle complete: order=%s errors=%d",
                 result.order.order_id if result.order else "none",
@@ -277,9 +282,31 @@ class DCAScheduler:
                     errors=[str(e)[:500]],
                 )
                 self.db.record_cycle(fail_result)
+                self._record_orphan_if_any(fail_result)
             except Exception:
                 logger.exception("failed to record cycle failure")
             await self.notifier.notify_error("DCA cycle failed", str(e))
+
+    def _record_orphan_if_any(self, result) -> None:
+        """If any error mentions orphaned funds, stash the latest one as a
+        dashboard-visible meta entry so the operator can act on it.
+        Cleared via db.set_meta('multi_hop.orphan_acknowledged_at', ...)."""
+        import json as _json
+        from datetime import datetime, timezone
+        orphan_errors = [e for e in (result.errors or []) if "Orphan" in e or "orphan" in e]
+        if not orphan_errors:
+            return
+        try:
+            self.db.set_meta(
+                "multi_hop.last_orphan",
+                _json.dumps({
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "errors": orphan_errors[:3],
+                    "notes": (result.notes or [])[:5],
+                }),
+            )
+        except Exception:
+            logger.exception("failed to persist orphan meta")
 
     async def _run_arbitrage_check(self) -> None:
         """Poll for arbitrage. Alerts only on net-positive opportunities."""

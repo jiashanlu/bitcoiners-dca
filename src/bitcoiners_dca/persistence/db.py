@@ -182,8 +182,13 @@ class Database:
                 json.dumps(result.errors),
             ),
         )
-        if result.order:
-            self.record_trade(result.order)
+        # Persist EVERY hop, not just the final BTC-receiving one. For a
+        # two-hop AED→USDT→BTC route, this writes 2 rows so the AED leg
+        # (the actual stablecoin fee+price) is auditable + reflected in
+        # totals. The order_id is the primary key so INSERT OR REPLACE
+        # is naturally idempotent per leg.
+        for o in result.orders:
+            self.record_trade(o)
         self._conn.commit()
 
     def get_meta(self, key: str) -> Optional[str]:
