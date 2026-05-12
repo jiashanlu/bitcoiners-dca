@@ -61,7 +61,7 @@ window.addEventListener('load', async () => {
   Chart.defaults.color = '#888';
   Chart.defaults.borderColor = '#222';
   try {
-    const cum = await fetch('/api/cumulative-btc').then(r => r.json());
+    const cum = await fetch('{{ prefix }}/api/cumulative-btc').then(r => r.json());
     new Chart(document.getElementById('cumChart'), {
       type: 'line',
       data: { labels: cum.points.map(p => p.date),
@@ -76,7 +76,7 @@ window.addEventListener('load', async () => {
     });
   } catch (e) {}
   try {
-    const cost = await fetch('/api/cost-basis-vs-market').then(r => r.json());
+    const cost = await fetch('{{ prefix }}/api/cost-basis-vs-market').then(r => r.json());
     const datasets = [{
       label: 'Avg cost basis',
       data: cost.points.map(p => parseFloat(p.avg_cost_aed_per_btc)),

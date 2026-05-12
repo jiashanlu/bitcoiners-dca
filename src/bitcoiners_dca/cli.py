@@ -539,10 +539,15 @@ def dashboard(
     host: str = "127.0.0.1",
     port: int = 8000,
 ):
-    """Run the read-only web dashboard. Open http://localhost:8000 after starting."""
+    """Run the web dashboard. Open http://localhost:8000 after starting."""
+    import os
     import uvicorn
     console.print(f"[green]Starting dashboard at http://{host}:{port}/[/green]")
-    console.print("[dim]Read-only. No mutations possible from the UI.[/dim]")
+    # uvicorn imports `bitcoiners_dca.web.dashboard:app` (module-level
+    # factory call) — we can't pass kwargs through the import string, so
+    # we ferry the config path via env var. dashboard.create_app() reads
+    # DCA_DASHBOARD_CONFIG when no explicit arg is given.
+    os.environ["DCA_DASHBOARD_CONFIG"] = config_path
     uvicorn.run(
         "bitcoiners_dca.web.dashboard:app",
         host=host, port=port, log_level="info",

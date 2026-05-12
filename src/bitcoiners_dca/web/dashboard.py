@@ -61,14 +61,25 @@ def _authenticated_user(request: Request) -> str:
 
 
 def create_app(
-    config_path: str | Path = "./config.yaml",
+    config_path: str | Path | None = None,
     config: Optional[AppConfig] = None,
     db: Optional[Database] = None,
     exchanges: Optional[list[Exchange]] = None,
 ) -> FastAPI:
     """Build a FastAPI app. Dependencies are lazily loaded on first request
     when not passed explicitly — supports both standalone uvicorn launch and
-    in-process embedding (tests, scheduler co-host)."""
+    in-process embedding (tests, scheduler co-host).
+
+    Path resolution order for `config_path`:
+      1. Explicit argument (tests / programmatic use)
+      2. `DCA_DASHBOARD_CONFIG` env var (set by the `dashboard` CLI command
+         when launching uvicorn from an import string — uvicorn can't pass
+         kwargs through to the module-level factory)
+      3. Default ./config.yaml
+    """
+    if config_path is None:
+        config_path = os.environ.get("DCA_DASHBOARD_CONFIG", "./config.yaml")
+
     app = FastAPI(
         title="bitcoiners-dca dashboard",
         description="Self-service operations dashboard.",
@@ -229,7 +240,7 @@ def create_app(
             "risk.max_single_buy_aed":
                 str(form["max_single_buy_aed"]) if form.get("max_single_buy_aed") else None,
         }
-        flash = _apply_patch(_config(), patch, _refresh_config)
+        flash = _apply_patch(state["config_path"], patch, _refresh_config)
         return HTMLResponse(jinja.get_template("strategy.html").render(_ctx(
             request, active="strategy", flash=flash,
         )))
@@ -258,7 +269,7 @@ def create_app(
             raise HTTPException(404)
         form = await request.form()
         enabled = form.get("enabled") == "on"
-        flash = _apply_patch(_config(), {
+        flash = _apply_patch(state["config_path"], {
             f"exchanges.{name}.enabled": enabled,
         }, _refresh_config)
         return _redirect(request, "/exchanges")
@@ -305,7 +316,7 @@ def create_app(
                 if b.get("free", 0) or b.get("total", 0):
                     rows.append({"exchange": name, **b})
         return HTMLResponse(jinja.get_template("partials/balances_table.html").render(
-            balances=rows, now=datetime.utcnow(),
+            balances=rows, now=datetime.utcnow(), prefix=_prefix(request),
         ))
 
     @app.get("/prices", response_class=HTMLResponse)
@@ -329,7 +340,7 @@ def create_app(
             name, t = r
             rows.append({"exchange": name, **t})
         return HTMLResponse(jinja.get_template("partials/prices_table.html").render(
-            prices=rows, pair=pair, now=datetime.utcnow(),
+            prices=rows, pair=pair, now=datetime.utcnow(), prefix=_prefix(request),
         ))
 
     @app.get("/trades", response_class=HTMLResponse)
@@ -400,7 +411,7 @@ def create_app(
                 str(form.get("funding_threshold", "15.0")),
             "dry_run": form.get("dry_run") == "on",
         }
-        flash = _apply_patch(_config(), patch, _refresh_config)
+        flash = _apply_patch(state["config_path"], patch, _refresh_config)
         return HTMLResponse(jinja.get_template("settings.html").render(_ctx(
             request, active="settings", flash=flash,
             license_features=[f.value for f in _license().enabled_features],
@@ -496,11 +507,16 @@ def create_app(
 
 # === Helpers ===
 
-def _apply_patch(cfg: AppConfig, patch: dict, refresh) -> dict:
-    """Apply config patch + refresh in-memory state. Returns a flash dict."""
-    cfg_path = Path("./config.yaml")
-    # Allow override via the existing cfg state (production path uses load_config)
-    writer = ConfigWriter(cfg_path)
+def _apply_patch(cfg_path: str | Path, patch: dict, refresh) -> dict:
+    """Apply config patch + refresh in-memory state. Returns a flash dict.
+
+    `cfg_path` is the path to the tenant's config.yaml — provided by the
+    caller so the writer touches the right file. Hardcoding `./config.yaml`
+    here used to silently write to /app/config.yaml inside the tenant
+    container, which doesn't exist (per-tenant config is at /app/config/
+    config.yaml), and every Save returned a misleading error.
+    """
+    writer = ConfigWriter(Path(cfg_path))
     try:
         result = writer.patch_and_save(patch)
         refresh()
