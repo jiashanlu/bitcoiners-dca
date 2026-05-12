@@ -2,7 +2,7 @@ manifestVersion: 1
 id: bitcoiners-dca
 category: finance
 name: bitcoiners-dca
-version: "0.3.0"
+version: "0.6.0"
 tagline: Self-hosted Bitcoin DCA for UAE Bitcoiners
 description: >-
   Automate your dollar-cost-averaging into Bitcoin from BitOasis, OKX, and
@@ -36,8 +36,12 @@ gallery:
   - 2.png
   - 3.png
 releaseNotes: >-
-  v0.3 — first Umbrel release. BitOasis adapter verified against the live
-  public API. OKX Lightning withdrawal. Validate-config + risk-management
-  CLIs. Backtest engine. Read-only dashboard.
+  v0.6 — customer-facing dashboard with self-service strategy editing,
+  encrypted credential storage (Fernet at rest), hot config reload, and
+  per-tier feature gating via offline-verifiable Ed25519 license tokens.
+  Multi-hop smart routing (AED→USDT→BTC), maker-mode execution, funding-rate
+  monitor, four composable strategy overlays (buy-the-dip, volatility-
+  weighted, time-of-day, drawdown-aware). BitOasis + OKX UAE adapter verified
+  live; Binance via ADGM (BTC/USDT path). 165 unit tests passing.
 submitter: Bitcoiners.ae
 submission: https://github.com/getumbrel/umbrel-apps/pull/PENDING

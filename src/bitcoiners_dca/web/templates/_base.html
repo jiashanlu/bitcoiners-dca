@@ -155,6 +155,36 @@ td { padding: 10px 12px; border-bottom: 1px solid #181818; }
   color: var(--text-muted);
   font-size: 12px;
 }
+/* Pro-locked overlay rows on the strategy page (Free tier). */
+.form-row.locked label,
+.form-row.locked small {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.pro-lock {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
+.upgrade-pitch {
+  margin-top: 16px;
+  padding: 12px 16px;
+  background: var(--accent-soft);
+  border: 1px solid rgba(247, 147, 26, 0.3);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.55;
+}
+.upgrade-pitch a { color: var(--accent); font-weight: 600; }
 button, .btn {
   background: var(--accent);
   color: #000;

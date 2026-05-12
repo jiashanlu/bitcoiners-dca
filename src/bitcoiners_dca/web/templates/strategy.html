@@ -110,23 +110,56 @@
     <input type="number" min="1" max="60" name="dip_lookback" value="{{ config.overlays.buy_the_dip.lookback_days }}">
   </div>
 
-  <h3 style="margin-top:24px;font-size:14px;color:var(--text);">Volatility-weighted</h3>
-  <div class="form-row">
-    <label><input type="checkbox" name="vol_enabled" {% if config.overlays.volatility_weighted.enabled %}checked{% endif %}> Enabled</label>
+  {% set pro_locked = license_tier == "free" %}
+
+  <h3 style="margin-top:24px;font-size:14px;color:var(--text);">
+    Volatility-weighted
+    {% if pro_locked %}<span class="pro-lock">🔒 Pro</span>{% endif %}
+  </h3>
+  <div class="form-row{% if pro_locked %} locked{% endif %}">
+    <label>
+      <input type="checkbox" name="vol_enabled"
+        {% if config.overlays.volatility_weighted.enabled and not pro_locked %}checked{% endif %}
+        {% if pro_locked %}disabled{% endif %}>
+      Enabled
+    </label>
     <small>Reduce buys when 30d realized vol is high; increase when low. Target {{ config.overlays.volatility_weighted.target_vol_pct }}% annualized.</small>
   </div>
 
-  <h3 style="margin-top:24px;font-size:14px;color:var(--text);">Time of day</h3>
-  <div class="form-row">
-    <label><input type="checkbox" name="tod_enabled" {% if config.overlays.time_of_day.enabled %}checked{% endif %}> Enabled</label>
+  <h3 style="margin-top:24px;font-size:14px;color:var(--text);">
+    Time of day
+    {% if pro_locked %}<span class="pro-lock">🔒 Pro</span>{% endif %}
+  </h3>
+  <div class="form-row{% if pro_locked %} locked{% endif %}">
+    <label>
+      <input type="checkbox" name="tod_enabled"
+        {% if config.overlays.time_of_day.enabled and not pro_locked %}checked{% endif %}
+        {% if pro_locked %}disabled{% endif %}>
+      Enabled
+    </label>
     <small>Skip cycles outside the cheapest hours (mode = skip_if_not_best by default).</small>
   </div>
 
-  <h3 style="margin-top:24px;font-size:14px;color:var(--text);">Drawdown-aware</h3>
-  <div class="form-row">
-    <label><input type="checkbox" name="dd_enabled" {% if config.overlays.drawdown_aware.enabled %}checked{% endif %}> Enabled</label>
+  <h3 style="margin-top:24px;font-size:14px;color:var(--text);">
+    Drawdown-aware
+    {% if pro_locked %}<span class="pro-lock">🔒 Pro</span>{% endif %}
+  </h3>
+  <div class="form-row{% if pro_locked %} locked{% endif %}">
+    <label>
+      <input type="checkbox" name="dd_enabled"
+        {% if config.overlays.drawdown_aware.enabled and not pro_locked %}checked{% endif %}
+        {% if pro_locked %}disabled{% endif %}>
+      Enabled
+    </label>
     <small>Multiply buys when BTC is meaningfully below ATH (default tiers: -20% / -40% / -60%).</small>
   </div>
+
+  {% if pro_locked %}
+  <p class="upgrade-pitch">
+    Volatility-weighted, time-of-day, and drawdown-aware overlays are part of the Pro tier.
+    <a href="https://bitcoiners.ae/dca-bot" target="_blank" rel="noopener">Upgrade →</a>
+  </p>
+  {% endif %}
 </div>
 
 <div class="card">
