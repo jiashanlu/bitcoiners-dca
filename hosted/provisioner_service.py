@@ -35,6 +35,9 @@ SHARED_SECRET = os.environ.get("PROVISIONER_SHARED_SECRET", "")
 HOSTED_DIR = Path(os.environ.get("PROVISIONER_HOSTED_DIR", "/opt/bitcoiners-dca/hosted"))
 PROVISION_SCRIPT = HOSTED_DIR / "provision.sh"
 TENANTS_DIR = Path(os.environ.get("PROVISION_BASE_DIR", "/opt/bitcoiners-dca")) / "tenants"
+# IP/hostname bitcoiners-app should reach the tenant dashboard on. On a
+# dedicated tenants-LXC this is the LXC's LAN IP. Required.
+TENANT_HOSTNAME = os.environ.get("PROVISIONER_TENANT_HOSTNAME", "")
 
 TENANT_ID_RE = re.compile(r"^[a-z0-9-]{3,40}$")
 
@@ -142,11 +145,17 @@ def provision(
         log.error(f"docker compose up failed: {e.stderr}")
         raise HTTPException(500, f"compose up failed: {e.stderr.strip()[:500]}")
 
+    if not TENANT_HOSTNAME:
+        raise HTTPException(500, "PROVISIONER_TENANT_HOSTNAME not configured")
+
     return ProvisionResponse(
         tenant_id=body.tenant_id,
         container_name=f"bitcoiners-dca-{body.tenant_id}-dashboard",
-        internal_host=f"bitcoiners-dca-{body.tenant_id}-dashboard",
-        internal_port=8000,
+        # internal_host is the address bitcoiners-app uses to reach the
+        # dashboard. On a dedicated tenants-LXC, that's the LXC's LAN IP +
+        # the host-bound TENANT_DASH_PORT (not the container's port 8000).
+        internal_host=TENANT_HOSTNAME,
+        internal_port=dash_port,
         license_token=license_token,
     )
 

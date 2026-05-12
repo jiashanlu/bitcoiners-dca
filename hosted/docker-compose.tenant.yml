@@ -31,8 +31,6 @@ services:
       - ${TENANT_DATA_DIR}/reports:/app/reports
     env_file:
       - ${TENANT_DATA_DIR}/.env
-    networks:
-      - bitcoiners-app
     labels:
       - "bitcoiners-dca.tenant=${TENANT_ID}"
     healthcheck:
@@ -54,9 +52,11 @@ services:
       - "--port"
       - "8000"
     ports:
-      # Local admin/debug only — bitcoiners-app reaches the dashboard via
-      # Docker DNS (`bitcoiners-dca-${TENANT_ID}-dashboard:8000`).
-      - "127.0.0.1:${TENANT_DASH_PORT}:8000"
+      # Bind to the LAN. bitcoiners-app (on a different LXC) reaches the
+      # dashboard at http://<tenants-lxc-lan-ip>:${TENANT_DASH_PORT}/.
+      # The tenants-LXC firewall (ufw) restricts this port to the source IP
+      # of bitcoiners-app — nobody else on the LAN can reach it.
+      - "0.0.0.0:${TENANT_DASH_PORT}:8000"
     volumes:
       - ${TENANT_DATA_DIR}/config:/app/config:ro
       - ${TENANT_DATA_DIR}/data:/app/data:ro
@@ -65,8 +65,6 @@ services:
       - ${TENANT_DATA_DIR}/.env
     depends_on:
       - daemon
-    networks:
-      - bitcoiners-app
     labels:
       - "bitcoiners-dca.tenant=${TENANT_ID}"
     healthcheck:
@@ -74,11 +72,3 @@ services:
       interval: 60s
       timeout: 5s
       retries: 3
-
-# Reuses the same `bitcoiners-app` network as the main app + Postgres so
-# bitcoiners-app can reach the tenant dashboard via Docker DNS:
-#   http://bitcoiners-dca-<tenant_id>-dashboard:8000
-networks:
-  bitcoiners-app:
-    external: true
-    name: bitcoiners-app

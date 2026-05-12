@@ -1,22 +1,22 @@
-# Provisioner microservice — runs on the same `bitcoiners-app` Docker
-# network as bitcoiners-app + Postgres + per-tenant DCA containers, so
-# bitcoiners-app can call it at `http://provisioner:8500/...` via Docker DNS.
+# Provisioner microservice — runs on the tenants-LXC, binds 0.0.0.0:8500
+# on the host. bitcoiners-app (on a different LXC) reaches it via the LAN
+# IP. The tenants-LXC firewall restricts port 8500 to the bitcoiners-app
+# source IP only.
 #
-# Reachable only inside the network. NOT exposed to the host network.
-#
-# Requires:
+# Requires on the host:
 #   /var/run/docker.sock         — to start tenant compose stacks
 #   /opt/bitcoiners-dca          — the cloned repo (provision.sh, templates)
 #   /etc/bitcoiners-dca/keys     — license-signing private key (PEM)
-#   /etc/bitcoiners-dca/provisioner.env — PROVISIONER_SHARED_SECRET=...
+#   /etc/bitcoiners-dca/provisioner.env — PROVISIONER_SHARED_SECRET=...,
+#                                          PROVISIONER_TENANT_HOSTNAME=<lan-ip>
 
 services:
   provisioner:
     image: bitcoiners-provisioner:latest
     container_name: bitcoiners-provisioner
     restart: unless-stopped
-    networks:
-      - bitcoiners-app
+    ports:
+      - "0.0.0.0:8500:8500"
     env_file:
       - /etc/bitcoiners-dca/provisioner.env
     environment:
@@ -34,8 +34,3 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-
-networks:
-  bitcoiners-app:
-    external: true
-    name: bitcoiners-app
