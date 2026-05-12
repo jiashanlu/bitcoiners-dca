@@ -14,7 +14,7 @@
 </form>
 
 <div class="card" id="prices-card"
-     hx-get="/htmx/prices?pair={{ pair }}"
+     hx-get="{{ prefix }}/htmx/prices?pair={{ pair }}"
      hx-trigger="load, every 10s"
      hx-swap="innerHTML">
   <div class="empty">Loading…</div>

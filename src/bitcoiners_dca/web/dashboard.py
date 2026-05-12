@@ -123,11 +123,18 @@ def create_app(
 
     def _ctx(request: Request, **extra) -> dict:
         cfg = _config()
+        # When proxied behind bitcoiners-app's /dca/console/[[...path]],
+        # the proxy sets X-Forwarded-Prefix=/dca/console. Templates use
+        # this to render all internal links + htmx URLs as
+        # /dca/console/<path> so nav stays inside the iframe. Empty
+        # string for direct LAN/Free-tier access — links resolve to /.
+        prefix = request.headers.get("x-forwarded-prefix", "").rstrip("/")
         return {
             "request": request,
             "user_email": _authenticated_user(request),
             "license_tier": _license().tier.value,
             "config": cfg,
+            "prefix": prefix,
             "flash": extra.pop("flash", None),
             "active": extra.pop("active", ""),
             **extra,

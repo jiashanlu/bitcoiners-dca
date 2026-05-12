@@ -240,14 +240,14 @@ a { color: var(--accent); text-decoration: none; }
   <aside class="sidebar">
     <div class="brand">🟧 bitcoiners-dca</div>
     <nav>
-      <a href="/" {% if active == "overview" %}class="active"{% endif %}>Overview</a>
-      <a href="/strategy" {% if active == "strategy" %}class="active"{% endif %}>Strategy</a>
-      <a href="/exchanges" {% if active == "exchanges" %}class="active"{% endif %}>Exchanges</a>
-      <a href="/balances" {% if active == "balances" %}class="active"{% endif %}>Balances</a>
-      <a href="/prices" {% if active == "prices" %}class="active"{% endif %}>Prices</a>
-      <a href="/trades" {% if active == "trades" %}class="active"{% endif %}>Trades</a>
-      <a href="/routes-audit" {% if active == "routes" %}class="active"{% endif %}>Routes</a>
-      <a href="/settings" {% if active == "settings" %}class="active"{% endif %}>Settings</a>
+      <a href="{{ prefix }}/" {% if active == "overview" %}class="active"{% endif %}>Overview</a>
+      <a href="{{ prefix }}/strategy" {% if active == "strategy" %}class="active"{% endif %}>Strategy</a>
+      <a href="{{ prefix }}/exchanges" {% if active == "exchanges" %}class="active"{% endif %}>Exchanges</a>
+      <a href="{{ prefix }}/balances" {% if active == "balances" %}class="active"{% endif %}>Balances</a>
+      <a href="{{ prefix }}/prices" {% if active == "prices" %}class="active"{% endif %}>Prices</a>
+      <a href="{{ prefix }}/trades" {% if active == "trades" %}class="active"{% endif %}>Trades</a>
+      <a href="{{ prefix }}/routes-audit" {% if active == "routes" %}class="active"{% endif %}>Routes</a>
+      <a href="{{ prefix }}/settings" {% if active == "settings" %}class="active"{% endif %}>Settings</a>
     </nav>
     <div class="user">
       <div>Signed in as</div>

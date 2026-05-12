@@ -26,14 +26,14 @@
   </h2>
   <p class="help">Pairs: {{ meta.pairs }} · Required key scope: {{ meta.scope }}</p>
 
-  <form method="post" action="/exchanges/{{ ex }}/toggle" style="margin-bottom:20px">
+  <form method="post" action="{{ prefix }}/exchanges/{{ ex }}/toggle" style="margin-bottom:20px">
     <label style="display:flex;align-items:center;gap:10px;font-size:14px">
       <input type="checkbox" name="enabled" {% if ex_cfg.enabled %}checked{% endif %} onchange="this.form.submit()">
       Enable {{ ex }} in routing
     </label>
   </form>
 
-  <form method="post" action="/exchanges/{{ ex }}/credentials">
+  <form method="post" action="{{ prefix }}/exchanges/{{ ex }}/credentials">
     <p class="help">Paste new credentials below. Leave a field blank to keep the current value.</p>
     {% for field in required_fields(ex) %}
     <div class="form-row">
