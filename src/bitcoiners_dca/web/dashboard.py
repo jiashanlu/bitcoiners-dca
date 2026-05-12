@@ -216,20 +216,46 @@ def create_app(
           - "dry_run" — running normally but config.dry_run=true; no real
                         orders placed even when cron fires
           - "live"   — running normally with real orders
+
+        `heartbeat_age_seconds` is the time since the daemon last wrote
+        `daemon.last_heartbeat_at` (refreshed every 5 minutes by the
+        health-check job). None means "no heartbeat yet" — usually the
+        daemon hasn't started. `heartbeat_stale` is True when the last
+        heartbeat is older than 15 minutes (3× the cron interval).
         """
+        from datetime import datetime, timezone
         try:
             from bitcoiners_dca.core.risk import RiskManager, META_PAUSED_REASON
             db = _db()
             paused = db.get_meta("risk.paused") == "true"
             reason = db.get_meta(META_PAUSED_REASON) or None
+            hb_raw = db.get_meta("daemon.last_heartbeat_at")
         except Exception:
             paused = False
             reason = None
+            hb_raw = None
+
+        hb_age = None
+        hb_stale = False
+        if hb_raw:
+            try:
+                hb_dt = datetime.fromisoformat(hb_raw)
+                if hb_dt.tzinfo is None:
+                    hb_dt = hb_dt.replace(tzinfo=timezone.utc)
+                hb_age = int((datetime.now(timezone.utc) - hb_dt).total_seconds())
+                hb_stale = hb_age > 900
+            except Exception:
+                pass
+
+        base = {
+            "heartbeat_age_seconds": hb_age,
+            "heartbeat_stale": hb_stale,
+        }
         if paused:
-            return {"state": "paused", "reason": reason}
+            return {"state": "paused", "reason": reason, **base}
         if _config().dry_run:
-            return {"state": "dry_run", "reason": None}
-        return {"state": "live", "reason": None}
+            return {"state": "dry_run", "reason": None, **base}
+        return {"state": "live", "reason": None, **base}
 
     def _ctx(request: Request, **extra) -> dict:
         cfg = _config()

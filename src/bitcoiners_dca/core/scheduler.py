@@ -310,7 +310,13 @@ class DCAScheduler:
             logger.warning("Funding monitor poll failed: %s", e)
 
     async def _run_health_check(self) -> None:
-        """Verify each exchange is reachable + authenticated."""
+        """Verify each exchange is reachable + authenticated.
+
+        Also writes a heartbeat row to db.meta so external monitoring can
+        detect a stalled daemon ("last heartbeat > N minutes ago" → alert).
+        """
+        from datetime import datetime, timezone
+
         for ex in self.exchanges:
             try:
                 await ex.health_check()
@@ -319,6 +325,14 @@ class DCAScheduler:
                 await self.notifier.notify_error(
                     f"{ex.name} health check failed", str(e)
                 )
+
+        try:
+            self.db.set_meta(
+                "daemon.last_heartbeat_at",
+                datetime.now(timezone.utc).isoformat(),
+            )
+        except Exception as e:
+            logger.warning("Failed to write daemon heartbeat: %s", e)
 
     def _install_jobs(self) -> None:
         # DCA cycle on cron schedule
