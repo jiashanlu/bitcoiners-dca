@@ -2,25 +2,18 @@
 {% block title %}Overview · bitcoiners-dca{% endblock %}
 {% block content %}
 <h1>Overview</h1>
-<p class="subtitle">Lifetime totals + recent activity. Live data refreshes on the
-<a href="{{ prefix }}/balances">balances</a> and <a href="{{ prefix }}/prices">prices</a> pages.</p>
+<p class="subtitle">Lifetime totals + recent activity. Stats auto-refresh every 20s.</p>
 
-<div class="stats">
-  <div class="stat"><div class="label">Total BTC</div>
-    <div class="val">{{ total_btc|btc }}<span class="unit">BTC</span></div></div>
-  <div class="stat"><div class="label">Total AED spent</div>
-    <div class="val">{{ total_aed|money(0) }}<span class="unit">AED</span></div></div>
-  <div class="stat"><div class="label">Avg cost basis</div>
-    <div class="val">{{ avg_price|money(0) }}<span class="unit">AED/BTC</span></div></div>
-  <div class="stat"><div class="label">Cycles</div>
-    <div class="val">{{ cycle_count }}</div></div>
-  <div class="stat"><div class="label">Arb alerts</div>
-    <div class="val">{{ arb_count }}</div></div>
-  <div class="stat"><div class="label">Dry run</div>
-    <div class="val">{% if config.dry_run %}<span class="pill warn">ON</span>{% else %}<span class="pill ok">OFF (live)</span>{% endif %}</div></div>
+{# Stats + recent trades — polled every 20s so a new cycle landing in
+   the DB shows up without a manual page reload. #}
+<div id="overview-stats"
+     hx-get="{{ prefix }}/htmx/overview-stats"
+     hx-trigger="every 20s"
+     hx-swap="innerHTML">
+  {% include "partials/overview_stats.html" %}
 </div>
 
-<div class="card">
+<div class="card" style="margin-top:24px">
   <h2>BTC accumulation</h2>
   <canvas id="cumChart" height="90"></canvas>
 </div>
@@ -28,31 +21,6 @@
 <div class="card">
   <h2>Avg cost basis vs market</h2>
   <canvas id="costChart" height="90"></canvas>
-</div>
-
-<div class="card">
-  <h2>Recent trades</h2>
-  {% if recent %}
-  <table>
-    <thead><tr>
-      <th>Date</th><th>Exchange</th><th>Pair</th><th>AED</th><th>BTC</th><th>Price</th>
-    </tr></thead>
-    <tbody>
-    {% for r in recent %}
-      <tr>
-        <td>{{ r['timestamp'].split('T')[0] }}</td>
-        <td>{{ r['exchange'] }}</td>
-        <td>{{ r['pair'] }}</td>
-        <td>{{ r['amount_quote']|money }}</td>
-        <td class="mono">{{ r['amount_base']|btc }}</td>
-        <td>{{ r['price_avg']|money }}</td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <div class="empty">No trades yet — run <code>bitcoiners-dca buy-once</code> to dry-run a cycle.</div>
-  {% endif %}
 </div>
 
 <script defer>

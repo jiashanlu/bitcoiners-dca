@@ -372,32 +372,129 @@ def create_app(
 
     # === PAGES ===
 
-    @app.get("/", response_class=HTMLResponse)
-    async def overview(request: Request):
+    def _overview_data():
+        """Shared between full /overview page and the /htmx/overview-stats
+        partial, so they always render with the same shape."""
         db = _db()
-        cfg = _config()
         total_btc = db.total_btc_bought()
         total_aed = db.total_aed_spent()
         avg_price = total_aed / total_btc if total_btc > 0 else Decimal(0)
-        cur = db._conn.execute(
+        recent = db._conn.execute(
             """SELECT timestamp, exchange, pair, amount_quote, amount_base,
                       price_avg, order_id
                FROM trades
                WHERE side='buy' AND status='filled'
                ORDER BY timestamp DESC LIMIT 8"""
-        )
-        recent = cur.fetchall()
+        ).fetchall()
         arb_count = db._conn.execute(
             "SELECT COUNT(*) FROM arbitrage_log WHERE alerted=1"
         ).fetchone()[0]
         cycle_count = db._conn.execute(
             "SELECT COUNT(*) FROM cycle_log"
         ).fetchone()[0]
+        return {
+            "total_btc": total_btc,
+            "total_aed": total_aed,
+            "avg_price": avg_price,
+            "recent": recent,
+            "arb_count": arb_count,
+            "cycle_count": cycle_count,
+        }
+
+    @app.get("/", response_class=HTMLResponse)
+    async def overview(request: Request):
         return HTMLResponse(jinja.get_template("overview.html").render(_ctx(
-            request, active="overview",
-            total_btc=total_btc, total_aed=total_aed, avg_price=avg_price,
-            recent=recent, arb_count=arb_count, cycle_count=cycle_count,
+            request, active="overview", **_overview_data(),
         )))
+
+    @app.get("/htmx/overview-stats", response_class=HTMLResponse)
+    async def htmx_overview_stats(request: Request):
+        """Stats grid + recent trades, polled every 20s by the overview page
+        so totals + the recent-trades table update without a full reload."""
+        cfg = _config()
+        return HTMLResponse(jinja.get_template("partials/overview_stats.html").render(
+            config=cfg, prefix=_prefix(request), **_overview_data(),
+        ))
+
+    @app.get("/htmx/status-banner", response_class=HTMLResponse)
+    async def htmx_status_banner(request: Request):
+        """Status banner partial — polled every 20s so pause/dry-run/live
+        toggles and heartbeat-staleness surface without a full reload."""
+        return HTMLResponse(jinja.get_template("partials/status_banner.html").render(
+            bot_status=_bot_status(), prefix=_prefix(request),
+        ))
+
+    @app.get("/htmx/trades-list", response_class=HTMLResponse)
+    async def htmx_trades_list(request: Request, page: int = Query(1, ge=1)):
+        """Trades table partial — same shape as the full /trades page body
+        but without the surrounding layout, for in-place htmx refresh."""
+        # Delegate to trades_page's logic by calling it directly would
+        # require building a fake _ctx; cheaper to inline.
+        per_page = 50
+        db = _db()
+        cfg = _config()
+        user_tz = cfg.strategy.timezone or "Asia/Dubai"
+        total = db._conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+        rows = db._conn.execute(
+            """SELECT timestamp, exchange, pair, side, amount_quote,
+                      amount_base, price_avg, status, order_id
+               FROM trades ORDER BY timestamp DESC LIMIT ? OFFSET ?""",
+            (per_page, (page - 1) * per_page),
+        ).fetchall()
+        from datetime import datetime, timezone as _tz
+        from zoneinfo import ZoneInfo
+        try:
+            tz = ZoneInfo(user_tz)
+        except Exception:
+            tz = ZoneInfo("Asia/Dubai")
+        sorted_asc = sorted([dict(r) for r in rows], key=lambda r: r["timestamp"])
+        decorated: list[dict] = []
+        cur_group: list[dict] = []
+
+        def _parse(ts: str):
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=_tz.utc)
+            return dt
+
+        def _close_group(group):
+            if not group:
+                return
+            currencies: list[str] = []
+            for p in [g["pair"] for g in group]:
+                base, quote = (p.split("/") + [""])[:2]
+                if not currencies:
+                    currencies.append(quote)
+                currencies.append(base)
+            route = " → ".join(currencies) if len(currencies) > 1 else None
+            for g in group:
+                g["route"] = route if len(group) > 1 else None
+                g["is_leg"] = len(group) > 1
+            decorated.extend(group)
+
+        for r in sorted_asc:
+            dt = _parse(r["timestamp"])
+            r["local_ts"] = dt.astimezone(tz).strftime("%Y-%m-%d %H:%M")
+            r["ts_dt"] = dt
+            if (
+                cur_group
+                and r["exchange"] == cur_group[-1]["exchange"]
+                and (dt - cur_group[-1]["ts_dt"]).total_seconds() <= 10
+            ):
+                cur_group.append(r)
+            else:
+                _close_group(cur_group)
+                cur_group = [r]
+        _close_group(cur_group)
+        for r in decorated:
+            r.pop("ts_dt", None)
+        decorated.reverse()
+        last_page = max(1, (total + per_page - 1) // per_page)
+        return HTMLResponse(jinja.get_template("partials/trades_list.html").render(
+            trades=decorated, total=total, page=page, user_tz=user_tz,
+            last_page=last_page, prev_page=max(1, page - 1),
+            next_page=min(last_page, page + 1), prefix=_prefix(request),
+        ))
 
     @app.get("/strategy", response_class=HTMLResponse)
     async def strategy_page(request: Request):
@@ -902,6 +999,21 @@ def create_app(
             await _buy_once(state["config_path"], dry=False)
         except Exception as e:
             return _redirect(request, f"/trades?error={str(e)[:200]}")
+        # _buy_once swallows cycle-internal errors and records them in
+        # cycle_log. If the most recent cycle has errors and no order,
+        # report that to the user instead of pretending success.
+        try:
+            row = _db()._conn.execute(
+                "SELECT success, errors FROM cycle_log "
+                "ORDER BY timestamp DESC LIMIT 1"
+            ).fetchone()
+            if row and not row["success"]:
+                import json as _json
+                errs = _json.loads(row["errors"] or "[]")
+                err_msg = "; ".join(errs)[:300] or "cycle returned no order"
+                return _redirect(request, f"/trades?error=Buy now did not execute: {err_msg}")
+        except Exception:
+            pass
         return _redirect(request, "/trades?ran=1")
 
     # === JSON endpoints (kept for backward compat + CLI/scripting use) ===

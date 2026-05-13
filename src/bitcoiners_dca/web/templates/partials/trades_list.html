@@ -1,0 +1,42 @@
+<p class="subtitle">{{ total }} total · page {{ page }} of {{ last_page }} · times in {{ user_tz }}</p>
+
+<div class="card">
+{% if trades %}
+<table>
+  <thead><tr>
+    <th>Date · Time</th><th>Exchange</th><th>Pair · Route</th><th>Side</th>
+    <th>Spent</th><th>Received</th><th>Price</th><th>Status</th><th>Order ID</th>
+  </tr></thead>
+  <tbody>
+  {% for t in trades %}
+    <tr {% if t.is_leg %}style="background:rgba(247,147,26,0.025)"{% endif %}>
+      <td class="mono" style="font-size:12px">{{ t['local_ts'] }}</td>
+      <td>{{ t['exchange'] }}</td>
+      <td>
+        {{ t['pair'] }}
+        {% if t.route %}
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px">↳ {{ t.route }}</div>
+        {% endif %}
+      </td>
+      <td>{{ t['side'] }}</td>
+      <td class="mono">{{ t['amount_quote']|money }}</td>
+      <td class="mono">{{ t['amount_base']|btc }}</td>
+      <td class="mono">{{ t['price_avg']|money }}</td>
+      <td><span class="pill {% if t['status'] == 'filled' %}ok{% elif t['status'] == 'cancelled' %}muted{% else %}warn{% endif %}">{{ t['status'] }}</span></td>
+      <td class="mono" style="font-size:11px">{{ t['order_id'] }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<div style="margin-top:16px;display:flex;gap:10px;align-items:center">
+  {% if page > 1 %}<a class="btn secondary" href="?page={{ prev_page }}">← Prev</a>{% endif %}
+  <span class="muted">page {{ page }} of {{ last_page }}</span>
+  {% if page < last_page %}<a class="btn secondary" href="?page={{ next_page }}">Next →</a>{% endif %}
+</div>
+<p style="margin-top:14px;font-size:12px;color:var(--text-muted)">
+  Highlighted rows are legs of a multi-hop route. Table auto-refreshes every 30 seconds.
+</p>
+{% else %}
+<div class="empty">No trades yet.</div>
+{% endif %}
+</div>
