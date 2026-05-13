@@ -1,0 +1,130 @@
+{% extends "_base.html" %}
+{% block title %}Backtest · bitcoiners-dca{% endblock %}
+{% block content %}
+<h1>Backtest</h1>
+<p class="subtitle">Replay a DCA strategy against the last 365 days of BTC/AED prices. See what would have happened if you'd been running this exact configuration.</p>
+
+{% if error %}
+<div class="card" style="border-color: var(--err); background: rgba(232,99,99,0.08)">
+  <strong>Backtest failed</strong>
+  <p style="margin-top:6px">{{ error }}</p>
+</div>
+{% endif %}
+
+<form method="post" action="{{ prefix }}/backtest">
+  <div class="card">
+    <h2>Parameters</h2>
+    <div class="form-row">
+      <label>Days of history</label>
+      <input type="number" name="days" min="1" max="365" value="{{ form.days }}" required>
+      <small>CoinGecko's free tier maxes at 365 days of daily granularity.</small>
+    </div>
+    <div class="form-row">
+      <label>Amount per cycle (AED)</label>
+      <input type="number" name="amount_aed" min="1" step="1" value="{{ form.amount_aed }}" required>
+    </div>
+    <div class="form-row">
+      <label>Frequency</label>
+      <select name="frequency">
+        {% for f in ["daily", "weekly", "monthly"] %}
+        <option value="{{ f }}" {% if form.frequency == f %}selected{% endif %}>{{ f }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="form-row">
+      <label>Day of week (weekly only)</label>
+      <select name="day_of_week">
+        {% for label, val in [("Monday",0),("Tuesday",1),("Wednesday",2),("Thursday",3),("Friday",4),("Saturday",5),("Sunday",6)] %}
+        <option value="{{ val }}" {% if form.day_of_week == val %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="form-row">
+      <label>Taker fee % (decimal)</label>
+      <input type="text" name="taker_fee_pct" value="{{ form.taker_fee_pct }}" pattern="0\.[0-9]+|0">
+      <small>0.005 = 0.5%. Use 0.001 for OKX maker-mode estimate.</small>
+    </div>
+    <div class="form-row">
+      <label><input type="checkbox" name="dip_overlay" {% if form.dip_overlay %}checked{% endif %}> Enable buy-the-dip overlay</label>
+    </div>
+    <div class="form-row">
+      <label>Dip threshold % (negative)</label>
+      <input type="text" name="dip_threshold_pct" value="{{ form.dip_threshold_pct }}">
+      <small>e.g. -10 means trigger when price drops 10% from rolling baseline.</small>
+    </div>
+    <div class="form-row">
+      <label>Dip multiplier</label>
+      <input type="text" name="dip_multiplier" value="{{ form.dip_multiplier }}">
+      <small>Buy-size multiplier when overlay triggers. 2.0 = double the base amount.</small>
+    </div>
+  </div>
+  <button type="submit">Run backtest</button>
+</form>
+
+{% if result %}
+<div class="card" style="margin-top:24px">
+  <h2>Result</h2>
+  <p class="help">Period: <strong>{{ result.start_day }}</strong> → <strong>{{ result.end_day }}</strong> · {{ result.cycle_count }} cycles</p>
+  <table style="width:100%; margin-top:12px">
+    <tr>
+      <th style="text-align:left">Metric</th>
+      <th style="text-align:right">Strategy</th>
+      {% if baseline %}<th style="text-align:right">Naive (no overlay)</th>{% endif %}
+    </tr>
+    <tr>
+      <td>Total AED spent</td>
+      <td style="text-align:right">{{ "%.2f"|format(result.total_aed_spent) }}</td>
+      {% if baseline %}<td style="text-align:right">{{ "%.2f"|format(baseline.total_aed_spent) }}</td>{% endif %}
+    </tr>
+    <tr>
+      <td>Total BTC bought</td>
+      <td style="text-align:right">{{ "%.8f"|format(result.total_btc_bought) }}</td>
+      {% if baseline %}<td style="text-align:right">{{ "%.8f"|format(baseline.total_btc_bought) }}</td>{% endif %}
+    </tr>
+    <tr>
+      <td>Average cost per BTC (AED)</td>
+      <td style="text-align:right">{{ "%.0f"|format(result.average_cost_per_btc) }}</td>
+      {% if baseline %}<td style="text-align:right">{{ "%.0f"|format(baseline.average_cost_per_btc) }}</td>{% endif %}
+    </tr>
+    {% if baseline %}
+    <tr>
+      <td>Overlay edge</td>
+      <td style="text-align:right" colspan="2">
+        {% set delta_btc = result.total_btc_bought - baseline.total_btc_bought %}
+        {% set pct = ((delta_btc / baseline.total_btc_bought) * 100) if baseline.total_btc_bought else 0 %}
+        <strong>{{ "%+.8f"|format(delta_btc) }} BTC ({{ "%+.2f"|format(pct) }}%)</strong> vs running the same cadence without buy-the-dip
+      </td>
+    </tr>
+    {% endif %}
+  </table>
+</div>
+
+{% if recent_cycles %}
+<div class="card" style="margin-top:24px">
+  <h2>Last {{ recent_cycles|length }} cycles</h2>
+  <table style="width:100%">
+    <tr>
+      <th style="text-align:left">Date</th>
+      <th style="text-align:right">Price (AED)</th>
+      <th style="text-align:right">AED spent</th>
+      <th style="text-align:right">BTC bought</th>
+      <th>Overlay</th>
+    </tr>
+    {% for c in recent_cycles %}
+    <tr>
+      <td>{{ c.day }}</td>
+      <td style="text-align:right">{{ "{:,.0f}"|format(c.price_aed) }}</td>
+      <td style="text-align:right">{{ "%.2f"|format(c.aed_spent) }}</td>
+      <td style="text-align:right">{{ "%.8f"|format(c.btc_bought) }}</td>
+      <td>{% if c.overlay_applied %}✓ dip{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+{% endif %}
+
+<p class="help" style="margin-top:24px">
+  Historical prices are fetched from CoinGecko (cached locally per (currency, days) for one hour). Numbers reflect the strategy's <em>theoretical</em> performance — actual results depend on fee tiers, slippage, and which exchanges fill which cycles. Use this to compare strategies, not to predict returns.
+</p>
+{% endblock %}

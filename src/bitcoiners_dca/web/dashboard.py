@@ -1059,6 +1059,100 @@ def create_app(
             request, active="withdrawals", flash=flash, **_withdrawals_ctx_extra(),
         )))
 
+    def _backtest_default_form(cfg) -> dict:
+        # Pre-fill from live strategy config. Falls through to plain defaults
+        # when fields are missing (e.g. very-new tenant with budget unset).
+        from bitcoiners_dca.core.strategy import derive_per_cycle
+        try:
+            per_cycle = derive_per_cycle(
+                Decimal(str(cfg.strategy.budget_amount or 500)),
+                cfg.strategy.budget_period or "monthly",
+                cfg.strategy.frequency or "weekly",
+                getattr(cfg.strategy, "every_n_hours", None) or 1,
+            )
+        except Exception:
+            per_cycle = Decimal("500")
+        return {
+            "days": 365,
+            "amount_aed": str(int(per_cycle)),
+            "frequency": cfg.strategy.frequency if cfg.strategy.frequency in ("daily","weekly","monthly") else "weekly",
+            "day_of_week": (cfg.strategy.day_of_week if isinstance(cfg.strategy.day_of_week, int) else 0),
+            "taker_fee_pct": "0.005",
+            "dip_overlay": bool(getattr(cfg.overlays.buy_the_dip, "enabled", False)),
+            "dip_threshold_pct": str(getattr(cfg.overlays.buy_the_dip, "threshold_pct", "-10")),
+            "dip_multiplier": str(getattr(cfg.overlays.buy_the_dip, "multiplier", "2.0")),
+        }
+
+    @app.get("/backtest", response_class=HTMLResponse)
+    async def backtest_page(request: Request):
+        cfg = _config()
+        return HTMLResponse(jinja.get_template("backtest.html").render(_ctx(
+            request, active="backtest",
+            form=_backtest_default_form(cfg),
+            result=None, baseline=None, recent_cycles=None, error=None,
+        )))
+
+    @app.post("/backtest", response_class=HTMLResponse)
+    async def backtest_run(request: Request):
+        # Backtest is read-only — fetch historical prices, simulate, render.
+        # No DB writes, no exchange calls. Safe to run repeatedly.
+        from bitcoiners_dca.core.backtest import (
+            BacktestConfig, naive_baseline, run_backtest,
+        )
+        from bitcoiners_dca.core.historical_prices import (
+            HistoricalPriceSource, HistoricalPricesError,
+        )
+        form_raw = await request.form()
+        # Coerce; surface any parse error to the user instead of 500ing.
+        try:
+            form = {
+                "days": max(1, min(365, int(form_raw.get("days", "365")))),
+                "amount_aed": str(form_raw.get("amount_aed", "500")),
+                "frequency": str(form_raw.get("frequency", "weekly")),
+                "day_of_week": int(form_raw.get("day_of_week", "0")),
+                "taker_fee_pct": str(form_raw.get("taker_fee_pct", "0.005")),
+                "dip_overlay": form_raw.get("dip_overlay") in ("on", "true", "1"),
+                "dip_threshold_pct": str(form_raw.get("dip_threshold_pct", "-10")),
+                "dip_multiplier": str(form_raw.get("dip_multiplier", "2.0")),
+            }
+            cfg = BacktestConfig(
+                base_amount_aed=Decimal(form["amount_aed"]),
+                frequency=form["frequency"],
+                day_of_week=form["day_of_week"],
+                taker_fee_pct=Decimal(form["taker_fee_pct"]),
+                dip_overlay_enabled=form["dip_overlay"],
+                dip_threshold_pct=Decimal(form["dip_threshold_pct"]),
+                dip_multiplier=Decimal(form["dip_multiplier"]),
+            )
+        except (ValueError, InvalidOperation) as e:
+            return HTMLResponse(jinja.get_template("backtest.html").render(_ctx(
+                request, active="backtest",
+                form=_backtest_default_form(_config()),
+                result=None, baseline=None, recent_cycles=None,
+                error=f"Invalid input: {e}",
+            )))
+
+        try:
+            source = HistoricalPriceSource()
+            points = source.fetch(vs_currency="aed", days=form["days"])
+        except HistoricalPricesError as e:
+            return HTMLResponse(jinja.get_template("backtest.html").render(_ctx(
+                request, active="backtest", form=form,
+                result=None, baseline=None, recent_cycles=None,
+                error=str(e),
+            )))
+
+        result = run_backtest(cfg, points)
+        baseline = naive_baseline(cfg, points) if form["dip_overlay"] else None
+        # Show last 30 cycles in the recent table; full history available
+        # via the CLI's --show-cycles flag.
+        recent = result.cycles[-30:] if result.cycles else []
+
+        return HTMLResponse(jinja.get_template("backtest.html").render(_ctx(
+            request, active="backtest", form=form,
+            result=result, baseline=baseline, recent_cycles=recent, error=None,
+        )))
+
     @app.get("/settings", response_class=HTMLResponse)
     async def settings_page(request: Request):
         return HTMLResponse(jinja.get_template("settings.html").render(_ctx(
