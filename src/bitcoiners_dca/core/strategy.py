@@ -176,6 +176,29 @@ class DCAStrategy:
             routing_decision=None,
         )
 
+        # Pre-cycle sweep: cancel any open BUY orders on the pairs the bot
+        # uses, on every connected exchange. Without this, a previous
+        # maker_only/maker_fallback run that didn't reach its cancel step
+        # (container restart, network blip, retry exhaustion) leaves stale
+        # orders that lock up AED and cause every subsequent cycle to fail
+        # with "available AED insufficient". Idempotent: 0 open orders is
+        # the common case and finishes in milliseconds.
+        sweep_pairs = {"BTC/AED", "USDT/AED", "BTC/USDT"}
+        for ex in exchanges:
+            for pair in sweep_pairs:
+                try:
+                    canceled = await ex.cancel_all_open_orders(pair)
+                    if canceled:
+                        result.notes.append(
+                            f"pre-cycle: canceled {canceled} stale order(s) "
+                            f"on {ex.name} {pair}"
+                        )
+                except NotImplementedError:
+                    pass
+                except Exception as e:
+                    # Don't fail the cycle just because the sweep had a hiccup.
+                    result.notes.append(f"pre-cycle sweep on {ex.name} {pair} skipped: {e}")
+
         # Apply overlays in config-defined order; multipliers compound.
         amount = self.config.base_amount_aed
         current_price = None
@@ -229,6 +252,29 @@ class DCAStrategy:
         except Exception as e:
             result.errors.append(f"Routing failed: {e}")
             return result
+
+        # Balance clamp: if the user configured a per-cycle amount larger
+        # than what the chosen route's quote balance can fund, clamp down
+        # to 99% of available so OKX/Binance/etc don't reject with
+        # "insufficient AED" on a 15000-AED config + 3700-AED balance.
+        # 99% leaves headroom for any maker-rebate / taker-fee accounting
+        # the exchange does at order-validation time. Only clamp when the
+        # balance is positive AND strictly less than amount — a reported
+        # balance of 0 usually means "balance check not supported", not
+        # "underfunded" (test stubs default to 0).
+        chosen_balance = decision.chosen.quote_balance
+        if (
+            chosen_balance is not None
+            and chosen_balance > 0
+            and chosen_balance < amount
+        ):
+            new_amount = (chosen_balance * Decimal("0.99")).quantize(Decimal("0.01"))
+            result.notes.append(
+                f"balance clamp: {amount} → {new_amount} "
+                f"({chosen_balance} {decision.chosen.route.input_ccy} available on {decision.chosen.route.hops[0].exchange})"
+            )
+            amount = new_amount
+            result.intended_amount_aed = amount
 
         # 3. Execute the route hop-by-hop
         exchange_map = {ex.name: ex for ex in exchanges}

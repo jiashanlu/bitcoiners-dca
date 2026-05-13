@@ -98,6 +98,34 @@ class Exchange(ABC):
         """
         raise NotImplementedError(f"{self.name} adapter does not implement cancel_order")
 
+    async def cancel_all_open_orders(self, pair: str) -> int:
+        """Cancel every open order on `pair`. Returns the number cancelled.
+
+        Default implementation uses fetch_open_orders + cancel_order in a
+        loop. Adapters can override with a bulk endpoint if the exchange
+        offers one (cheaper, single API call).
+        """
+        try:
+            client = getattr(self, "_client", None)
+            if client is None:
+                return 0
+            open_orders = await client.fetch_open_orders(pair)
+        except Exception:
+            return 0
+        n = 0
+        for o in open_orders or []:
+            oid = o.get("id")
+            if not oid:
+                continue
+            try:
+                await self.cancel_order(pair, str(oid))
+                n += 1
+            except Exception:
+                # Individual cancel failures shouldn't abort the sweep — log
+                # but continue. A re-running cycle picks up whatever's left.
+                continue
+        return n
+
     async def wait_for_fill(
         self,
         pair: str,

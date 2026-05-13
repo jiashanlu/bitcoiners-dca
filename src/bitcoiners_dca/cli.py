@@ -345,6 +345,7 @@ def buy_once(
 
 async def _buy_once(config_path: str, dry: bool):
     from bitcoiners_dca.core.market_data import MarketDataProvider
+    from bitcoiners_dca.core.risk import RiskManager
     cfg = _load_runtime_config(config_path)
     if dry:
         cfg.dry_run = True
@@ -356,11 +357,32 @@ async def _buy_once(config_path: str, dry: bool):
     market_data = MarketDataProvider(db=db)
     snap = market_data.snapshot()
 
+    # Apply the same risk cap as the scheduled path. Without this, Buy-now
+    # tries to spend the raw strategy.amount_aed (e.g. 15000) in one shot
+    # — which fails on any account that doesn't actually hold that much
+    # AED, even though scheduled cycles work fine via per-cycle clamping.
+    rm = RiskManager(
+        db,
+        max_daily_aed=cfg.risk.max_daily_aed,
+        max_single_buy_aed=cfg.risk.max_single_buy_aed,
+        max_consecutive_failures=cfg.risk.max_consecutive_failures,
+    )
+    decision = rm.evaluate(Decimal(str(cfg.strategy.amount_aed)))
+    if not decision.allow:
+        console.print(f"[red]Risk caps blocked the cycle: {'; '.join(decision.reasons)}[/red]")
+        for ex in exchanges:
+            await ex.close()
+        db.close()
+        return
+
     result = await strategy.execute(
         exchanges,
         historical_price_7d_ago=snap.price_7d_ago_aed,
+        risk_cap_aed=decision.amount_aed,
         market_context=snap.to_context_dict(),
     )
+    if decision.reasons:
+        result.notes.extend(decision.reasons)
     db.record_cycle(result)
     await notifier.notify_cycle(result)
 
