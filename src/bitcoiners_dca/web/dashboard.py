@@ -516,20 +516,55 @@ def create_app(
             request, active="balances",
         )))
 
+    # Process-local TTL cache for the live exchange fetches that drag
+    # /htmx/balances and /htmx/prices to ~15s. Both pages auto-refresh
+    # via htmx every ~60s and the underlying balance/ticker doesn't move
+    # meaningfully on a second-by-second basis, so a 45s TTL keeps the
+    # UX feeling live but cuts wait time on cached hits to near-zero.
+    # Cache is invalidated by `?fresh=1` for explicit refresh buttons.
+    _live_cache: dict[str, tuple[float, object]] = {}
+    _LIVE_CACHE_TTL = 45.0
+
+    def _cache_get(key: str):
+        import time
+        entry = _live_cache.get(key)
+        if not entry:
+            return None
+        ts, val = entry
+        if time.time() - ts > _LIVE_CACHE_TTL:
+            return None
+        return val
+
+    def _cache_set(key: str, val):
+        import time
+        _live_cache[key] = (time.time(), val)
+
     @app.get("/htmx/balances", response_class=HTMLResponse)
     async def htmx_balances(request: Request):
-        results = await asyncio.gather(
-            *[_safe_get_balances(ex) for ex in _exchanges()],
-            return_exceptions=True,
-        )
-        rows = []
-        for r in results:
-            if isinstance(r, Exception):
-                continue
-            name, bals = r
-            for b in bals if isinstance(bals, list) else []:
-                if b.get("free", 0) or b.get("total", 0):
-                    rows.append({"exchange": name, **b})
+        rows = None
+        cached_at = None
+        if request.query_params.get("fresh") != "1":
+            entry = _live_cache.get("balances")
+            if entry:
+                ts, val = entry
+                import time as _t
+                if _t.time() - ts <= _LIVE_CACHE_TTL:
+                    rows = val
+                    cached_at = ts
+        if rows is None:
+            results = await asyncio.gather(
+                *[_safe_get_balances(ex) for ex in _exchanges()],
+                return_exceptions=True,
+            )
+            rows = []
+            for r in results:
+                if isinstance(r, Exception):
+                    continue
+                name, bals = r
+                for b in bals if isinstance(bals, list) else []:
+                    if b.get("free", 0) or b.get("total", 0):
+                        rows.append({"exchange": name, **b})
+            _cache_set("balances", rows)
         return HTMLResponse(jinja.get_template("partials/balances_table.html").render(
             balances=rows, now=datetime.utcnow(), prefix=_prefix(request),
         ))
@@ -544,6 +579,16 @@ def create_app(
     @app.get("/htmx/prices", response_class=HTMLResponse)
     async def htmx_prices(request: Request):
         pair = request.query_params.get("pair", "BTC/AED")
+        rows = None
+        if request.query_params.get("fresh") != "1":
+            import time as _t
+            entry = _live_cache.get(f"prices:{pair}")
+            if entry and _t.time() - entry[0] <= _LIVE_CACHE_TTL:
+                rows = entry[1]
+        if rows is not None:
+            return HTMLResponse(jinja.get_template("partials/prices_table.html").render(
+                prices=rows, pair=pair, now=datetime.utcnow(), prefix=_prefix(request),
+            ))
         results = await asyncio.gather(
             *[_safe_get_ticker(ex, pair) for ex in _exchanges()],
             return_exceptions=True,
@@ -554,6 +599,7 @@ def create_app(
                 continue
             name, t = r
             rows.append({"exchange": name, **t})
+        _cache_set(f"prices:{pair}", rows)
         return HTMLResponse(jinja.get_template("partials/prices_table.html").render(
             prices=rows, pair=pair, now=datetime.utcnow(), prefix=_prefix(request),
         ))
