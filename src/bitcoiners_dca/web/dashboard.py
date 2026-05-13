@@ -735,7 +735,10 @@ def create_app(
 
     def _withdrawals_ctx_extra():
         cfg = _config()
-        ex_names = list(cfg.exchanges.exchanges.keys()) if cfg.exchanges and cfg.exchanges.exchanges else []
+        # ExchangesConfig is a Pydantic model with one field per supported
+        # exchange ({okx, binance, bitoasis}). Iterate model fields rather
+        # than treating it as a dict.
+        ex_names = list(cfg.exchanges.model_fields.keys()) if cfg.exchanges else []
         # Surface each known exchange — even ones without saved policy —
         # so the user can opt in. Existing policies render with their
         # stored values; unconfigured exchanges show defaults.
@@ -763,7 +766,7 @@ def create_app(
     async def withdrawals_save(request: Request):
         form = await request.form()
         cfg = _config()
-        ex_names = list(cfg.exchanges.exchanges.keys()) if cfg.exchanges and cfg.exchanges.exchanges else []
+        ex_names = list(cfg.exchanges.model_fields.keys()) if cfg.exchanges else []
 
         # Auto-detect Lightning from the destination so a user who pastes
         # an `lnbc...` invoice doesn't have to also toggle the network.
