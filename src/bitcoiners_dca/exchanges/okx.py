@@ -133,8 +133,18 @@ class OKXExchange(Exchange):
             )
 
         try:
-            # OKX market-buy: pass `quoteOrderQty` for AED-based market buys
-            params = {"quoteOrderQty": float(quote_amount), "tgtCcy": "quote_ccy"}
+            # OKX market-buy: pass `quoteOrderQty` for AED-based market buys.
+            # `tdMode=cash` forces SPOT settlement — without it, accounts in
+            # cross-margin or unified-account mode have OKX route the order
+            # through the margin engine, which fails with 51008 "available
+            # AED is insufficient, available margin (in USD) is too low for
+            # borrowing" even when spot AED balance is plenty. Cash mode
+            # only checks the spot wallet, which is what we want for DCA.
+            params = {
+                "quoteOrderQty": float(quote_amount),
+                "tgtCcy": "quote_ccy",
+                "tdMode": "cash",
+            }
             logger.info(
                 "OKX place_market_buy: pair=%s amount=%s params=%s",
                 pair, float(quote_amount), params,
@@ -185,6 +195,10 @@ class OKXExchange(Exchange):
             )
             raw = await self._client.create_limit_buy_order(
                 symbol=pair, amount=float(base_amount), price=float(limit_price),
+                # See place_market_buy: cash mode forces spot settlement so
+                # OKX doesn't route through margin and reject for borrow-side
+                # liquidity that DCA accounts don't have.
+                params={"tdMode": "cash"},
             )
             return self._normalize_order(raw, pair, quote_amount)
         except ccxt_async.InsufficientFunds as e:
