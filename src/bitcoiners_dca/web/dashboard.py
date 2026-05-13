@@ -373,9 +373,23 @@ def create_app(
     # === PAGES ===
 
     def _decorate_trades(rows, user_tz: str) -> list[dict]:
-        """Group adjacent trade rows that belong to the same multi-hop cycle
-        and tag each with a localized timestamp + a human route label."""
+        """Collapse multi-hop legs into one row per cycle.
+
+        A two-hop AED→USDT→BTC cycle persists two trade rows (USDT/AED
+        then BTC/USDT). We show those as a SINGLE row:
+          - timestamp = first leg
+          - route     = "AED → USDT → BTC"
+          - spent     = amount_quote of the first leg (e.g. 54.79 AED)
+          - received  = amount_base of the LAST leg (e.g. 0.000184 BTC)
+          - price     = spent / received (effective AED/BTC)
+          - status    = worst-of group ('filled' only if every leg filled)
+          - order_id  = comma-joined for traceability
+
+        Direct BTC/AED or USDT-direct BTC/USDT cycles render as-is. Group
+        boundary: adjacent rows on the same exchange within 10 seconds.
+        """
         from datetime import datetime, timezone as _tz
+        from decimal import Decimal as _D
         from zoneinfo import ZoneInfo
         try:
             tz = ZoneInfo(user_tz)
@@ -392,20 +406,55 @@ def create_app(
                 dt = dt.replace(tzinfo=_tz.utc)
             return dt
 
+        def _dec(v) -> _D:
+            try:
+                return _D(str(v)) if v not in (None, "") else _D(0)
+            except Exception:
+                return _D(0)
+
         def _close_group(group):
             if not group:
                 return
+            first = group[0]
+            last = group[-1]
+            # Build route currencies from the chain of pairs. Each pair
+            # is "BASE/QUOTE"; first pair gives us the starting quote
+            # (the currency we spent), each base is the next received.
             currencies: list[str] = []
             for p in [g["pair"] for g in group]:
                 base, quote = (p.split("/") + [""])[:2]
                 if not currencies:
                     currencies.append(quote)
                 currencies.append(base)
-            route = " → ".join(currencies) if len(currencies) > 1 else None
-            for g in group:
-                g["route"] = route if len(group) > 1 else None
-                g["is_leg"] = len(group) > 1
-            decorated.extend(group)
+            route_label = " → ".join(currencies)
+            spent = _dec(first["amount_quote"])
+            received = _dec(last["amount_base"])
+            spent_ccy = (first["pair"].split("/") + [""])[1]
+            recv_ccy = (last["pair"].split("/") + [""])[0]
+            effective_price = (spent / received) if received > 0 else _D(0)
+            # Status: filled iff every leg filled; otherwise show the
+            # worst non-filled status (e.g. one leg cancelled).
+            statuses = {g.get("status") for g in group}
+            if statuses == {"filled"}:
+                merged_status = "filled"
+            elif "cancelled" in statuses:
+                merged_status = "cancelled"
+            else:
+                merged_status = next(iter(statuses - {"filled"}), "filled")
+            decorated.append({
+                "local_ts": first["local_ts"],
+                "exchange": first["exchange"],
+                "route": route_label,
+                "is_multi_hop": len(group) > 1,
+                "spent": spent,
+                "spent_ccy": spent_ccy,
+                "received": received,
+                "received_ccy": recv_ccy,
+                "effective_price": effective_price,
+                "price_pair": f"{spent_ccy}/{recv_ccy}",
+                "status": merged_status,
+                "order_id": ", ".join(str(g.get("order_id") or "") for g in group),
+            })
 
         for r in sorted_asc:
             dt = _parse(r["timestamp"])
@@ -421,8 +470,6 @@ def create_app(
                 _close_group(cur_group)
                 cur_group = [r]
         _close_group(cur_group)
-        for r in decorated:
-            r.pop("ts_dt", None)
         decorated.reverse()
         return decorated
 
@@ -435,14 +482,16 @@ def create_app(
         total_btc = db.total_btc_bought()
         total_aed = db.total_aed_spent()
         avg_price = total_aed / total_btc if total_btc > 0 else Decimal(0)
+        # Pull 24 rows so multi-hop cycles (2 rows each) still surface
+        # ~10 distinct cycles after merging.
         rows = db._conn.execute(
             """SELECT timestamp, exchange, pair, side, amount_quote,
                       amount_base, price_avg, status, order_id
                FROM trades
                WHERE side='buy' AND status='filled'
-               ORDER BY timestamp DESC LIMIT 12"""
+               ORDER BY timestamp DESC LIMIT 24"""
         ).fetchall()
-        recent = _decorate_trades(rows, user_tz)
+        recent = _decorate_trades(rows, user_tz)[:12]
         arb_count = db._conn.execute(
             "SELECT COUNT(*) FROM arbitrage_log WHERE alerted=1"
         ).fetchone()[0]

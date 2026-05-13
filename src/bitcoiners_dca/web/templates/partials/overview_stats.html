@@ -18,28 +18,26 @@
   {% if recent %}
   <table>
     <thead><tr>
-      <th>Date · Time</th><th>Exchange</th><th>Pair · Route</th><th>Spent</th><th>Received</th><th>Price</th>
+      <th>Date · Time</th><th>Exchange</th><th>Route</th><th>Spent</th><th>Received</th><th>Effective price</th>
     </tr></thead>
     <tbody>
     {% for r in recent %}
-      <tr {% if r.is_leg %}style="background:rgba(247,147,26,0.025)"{% endif %}>
-        <td class="mono" style="font-size:12px">{{ r['local_ts'] }}</td>
-        <td>{{ r['exchange'] }}</td>
+      <tr>
+        <td class="mono" style="font-size:12px">{{ r.local_ts }}</td>
+        <td>{{ r.exchange }}</td>
         <td>
-          {{ r['pair'] }}
-          {% if r.route %}
-            <div style="font-size:11px;color:var(--text-muted);margin-top:2px">↳ {{ r.route }}</div>
-          {% endif %}
+          {{ r.route }}
+          {% if r.is_multi_hop %}<span class="pill muted" style="font-size:10px;margin-left:6px">multi-hop</span>{% endif %}
         </td>
-        <td class="mono">{{ r['amount_quote']|money }}</td>
-        <td class="mono">{{ r['amount_base']|btc }}</td>
-        <td class="mono">{{ r['price_avg']|money }}</td>
+        <td class="mono">{{ r.spent|round(4) }} {{ r.spent_ccy }}</td>
+        <td class="mono">{{ r.received|round(8) }} {{ r.received_ccy }}</td>
+        <td class="mono">{{ r.effective_price|round(2) }} {{ r.price_pair }}</td>
       </tr>
     {% endfor %}
     </tbody>
   </table>
   <p style="margin-top:12px;font-size:11px;color:var(--text-muted)">
-    Auto-refreshes every 20s. Highlighted rows are legs of a multi-hop cycle.
+    One row per cycle (multi-hop legs are merged). Auto-refreshes every 20s.
     Full history on <a href="{{ prefix }}/trades">/trades</a>.
   </p>
   {% else %}

@@ -205,14 +205,26 @@ class Database:
         self._conn.commit()
 
     def total_btc_bought(self) -> Decimal:
+        # Only count BTC-receiving trades. Multi-hop AED→USDT→BTC routes
+        # persist two rows: USDT/AED (amount_base = USDT) and BTC/USDT
+        # (amount_base = BTC). Summing both would treat USDT amounts as
+        # BTC and produce nonsense totals (1003 "BTC" from 12 cycles).
         cur = self._conn.execute(
-            "SELECT COALESCE(SUM(CAST(amount_base AS REAL)), 0) FROM trades WHERE side='buy' AND status='filled'"
+            "SELECT COALESCE(SUM(CAST(amount_base AS REAL)), 0) "
+            "FROM trades WHERE side='buy' AND status='filled' "
+            "AND pair LIKE 'BTC/%'"
         )
         return Decimal(str(cur.fetchone()[0]))
 
     def total_aed_spent(self) -> Decimal:
+        # Only count the AED-spending leg of each cycle: either a direct
+        # BTC/AED trade or the USDT/AED hop of a multi-hop route. Without
+        # this filter, two-hop cycles double-count (AED spent on USDT,
+        # then USDT spent on BTC — both denominated and summed).
         cur = self._conn.execute(
-            "SELECT COALESCE(SUM(CAST(amount_quote AS REAL)), 0) FROM trades WHERE side='buy' AND status='filled'"
+            "SELECT COALESCE(SUM(CAST(amount_quote AS REAL)), 0) "
+            "FROM trades WHERE side='buy' AND status='filled' "
+            "AND pair LIKE '%/AED'"
         )
         return Decimal(str(cur.fetchone()[0]))
 
