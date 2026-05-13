@@ -290,12 +290,14 @@ class SmartRouter:
                     # skip leg-1 entirely and just BTC/USDT. The
                     # quote_balance is reported in the intermediate's
                     # units; balance-clamp in strategy.execute handles the
-                    # conversion. Only emit when the intermediate balance
-                    # is non-trivial — sub-1 unit is noise.
+                    # conversion. Threshold = 10 units of intermediate —
+                    # below this it's noise (OKX BTC/USDT minimum is ~5
+                    # USDT). A 2-USDT dust balance wouldn't ever fund a
+                    # trade so emitting the route pollutes the audit UI.
                     inter_balance = md.balances.get(inter, Decimal(0))
                     direct_pair_via_inter = f"{target_asset}/{inter}"
                     if (
-                        inter_balance > Decimal("1")
+                        inter_balance >= Decimal("10")
                         and direct_pair_via_inter in md.tickers
                     ):
                         hop = TradeHop(

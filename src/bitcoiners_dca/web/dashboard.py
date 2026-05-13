@@ -810,6 +810,19 @@ def create_app(
                 _exchanges(), pair="BTC/AED",
                 required_quote_amount=amount,
             )
+            # Audit shows only routes that start from AED. Intermediate-
+            # direct routes (e.g. BTC/USDT when there's idle USDT) are an
+            # execution optimization, not an AED→BTC alternative the user
+            # is comparing here — they pollute the table with rows in the
+            # wrong unit ("balance 2.18 AED" was really 2.18 USDT).
+            if decision:
+                aed_routes = [
+                    c for c in [decision.chosen] + decision.alternatives
+                    if c.route.hops and c.route.hops[0].pair.endswith("/AED")
+                ]
+                if aed_routes:
+                    decision.chosen = aed_routes[0]
+                    decision.alternatives = aed_routes[1:]
         except Exception as e:
             error = str(e)[:200]
         return HTMLResponse(jinja.get_template("routes.html").render(_ctx(
