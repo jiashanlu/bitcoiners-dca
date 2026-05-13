@@ -93,10 +93,16 @@ class StrategyConfig:
     dip_lookback_days: int = 7
     dip_multiplier: Decimal = Decimal("2.0")
 
-    # Auto-withdraw to hardware wallet at threshold
+    # Auto-withdraw to hardware wallet at threshold (legacy single-dest).
+    # When auto_withdraw_exchanges is non-empty, those per-exchange entries
+    # take precedence and the legacy single fields are ignored. The Pydantic
+    # config layer in utils.config.AutoWithdrawConfig wires both into here.
     auto_withdraw_enabled: bool = False
     auto_withdraw_address: Optional[str] = None
     auto_withdraw_threshold_btc: Decimal = Decimal("0.01")
+    # exchange_name -> {"destination": str, "network": "bitcoin"|"lightning",
+    #                   "threshold_btc": Decimal, "enabled": bool}
+    auto_withdraw_exchanges: dict = field(default_factory=dict)
 
     # Execution mode: "taker" | "maker_only" | "maker_fallback"
     execution_mode: str = "taker"
@@ -257,13 +263,56 @@ class DCAStrategy:
             result.errors.append(f"Route execution failed: {e}")
             return result
 
-        # 4. Auto-withdraw if threshold reached (only when output is BTC)
-        if (
+        # 4. Auto-withdraw: sweep BTC off each configured exchange to the
+        # user's self-custody destination(s). Two policy sources:
+        #   (a) Per-exchange map `auto_withdraw_exchanges` — preferred. Each
+        #       entry is independent: different destination/network/threshold
+        #       per exchange, supports Lightning where the exchange does.
+        #   (b) Legacy single-destination fields — only used when (a) is
+        #       empty AND only fires on the cycle's final exchange.
+        # Non-fatal: any failure logs to result.errors and continues.
+        if self.config.auto_withdraw_exchanges and self.config.auto_withdraw_enabled:
+            for ex in exchanges:
+                policy = self.config.auto_withdraw_exchanges.get(ex.name)
+                if not policy or not policy.get("enabled") or not policy.get("destination"):
+                    continue
+                threshold = Decimal(str(policy.get("threshold_btc", "0.001")))
+                network = policy.get("network", "bitcoin")
+                destination = policy["destination"]
+                try:
+                    btc_balance = await ex.get_balance("BTC")
+                    if not btc_balance or btc_balance.free < threshold:
+                        continue
+                    fees = await ex.get_fee_schedule(self.config.pair)
+                    # On-chain has a withdrawal fee that comes off our balance;
+                    # Lightning is effectively zero on OKX so don't subtract.
+                    withdraw_fee = (
+                        Decimal("0") if network == "lightning"
+                        else fees.withdrawal_fee_btc
+                    )
+                    withdraw_amount = btc_balance.free - withdraw_fee
+                    if withdraw_amount <= 0:
+                        continue
+                    wd = await ex.withdraw_btc(
+                        amount_btc=withdraw_amount,
+                        address=destination,
+                        network=network,
+                    )
+                    result.withdrew_btc = (result.withdrew_btc or Decimal(0)) + withdraw_amount
+                    result.withdrew_to_address = destination
+                    result.notes.append(
+                        f"Auto-withdrew {withdraw_amount} BTC from {ex.name} "
+                        f"via {network} (withdrawal_id={wd.withdrawal_id})"
+                    )
+                except Exception as e:
+                    result.errors.append(f"Auto-withdraw from {ex.name} skipped: {e}")
+        elif (
             self.config.auto_withdraw_enabled
             and self.config.auto_withdraw_address
             and chosen_route.output_ccy == "BTC"
             and result.orders
         ):
+            # Legacy path: single destination, fires only on final exchange.
             final_ex = exchange_map[result.orders[-1].exchange]
             try:
                 btc_balance = await final_ex.get_balance("BTC")

@@ -210,10 +210,38 @@ class RoutingConfig(BaseModel):
     )
 
 
-class AutoWithdrawConfig(BaseModel):
+class PerExchangeAutoWithdraw(BaseModel):
+    """Per-exchange auto-withdraw policy.
+
+    `destination` accepts:
+      - On-chain BTC address (bc1.../1.../3.../bc1p...)
+      - Lightning BOLT11 invoice (`lnbc...`) — only valid for `network=lightning`
+      - LNURL / Lightning Address (`name@host`) — for some Lightning-capable
+        exchanges; depends on adapter support
+    Network defaults to on-chain and auto-flips to lightning if the address
+    is an LN invoice.
+    """
     enabled: bool = False
+    destination: Optional[str] = None
+    network: str = "bitcoin"     # "bitcoin" | "lightning"
+    threshold_btc: Decimal = Decimal("0.001")
+
+
+class AutoWithdrawConfig(BaseModel):
+    """Sweep BTC out of exchanges into self-custody.
+
+    `exchanges` is the source of truth — one policy per exchange the user
+    holds. The legacy top-level `destination_address` + `threshold_btc` are
+    kept for backwards-compat reads of older config.yaml files; on save,
+    they're migrated into a default 'okx' entry by the dashboard.
+    """
+    enabled: bool = False
+    # Legacy single-destination fields. Kept for read-only back-compat;
+    # the per-exchange `exchanges` map is the new source of truth.
     destination_address: Optional[str] = None
     threshold_btc: Decimal = Decimal("0.01")
+
+    exchanges: dict[str, PerExchangeAutoWithdraw] = Field(default_factory=dict)
 
 
 class ArbitrageConfig(BaseModel):

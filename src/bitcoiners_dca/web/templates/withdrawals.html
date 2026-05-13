@@ -2,40 +2,70 @@
 {% block title %}Auto-withdraw · bitcoiners-dca{% endblock %}
 {% block content %}
 <h1>Auto-withdraw</h1>
-<p class="subtitle">Once your exchange BTC balance crosses the threshold, the bot sweeps it to a hardcoded destination address. Exchange-as-custodian risk → near-zero.</p>
+<p class="subtitle">Each exchange sweeps BTC into its own destination once the balance crosses a threshold. Configure one row per exchange you want to evacuate.</p>
 
 <form method="post" action="{{ prefix }}/withdrawals">
 
-<div class="card">
-  <h2>Destination</h2>
-  <p class="help">Hardcode YOUR hardware-wallet address. The bot has no UI to change it later — that's the point. Generate the address on your hardware wallet, verify on-device, paste here.</p>
-  <div class="form-row">
-    <label><input type="checkbox" name="enabled" {% if config.auto_withdraw.enabled %}checked{% endif %}> Enable auto-withdraw</label>
+{% if not policies %}
+  <div class="card">
+    <p>No exchanges configured yet. Add an exchange on the <a href="{{ prefix }}/exchanges">Exchanges</a> page first.</p>
   </div>
-  <div class="form-row">
-    <label>BTC address</label>
-    <input type="text" name="destination_address"
-      value="{{ config.auto_withdraw.destination_address or '' }}"
-      placeholder="bc1q… or bc1p…"
-      pattern="^(bc1|[13])[a-zA-HJ-NP-Z0-9]{25,87}$"
-      title="A valid mainnet BTC address (bech32 bc1… or legacy 1…/3…)">
-    <small>Re-verify on your hardware wallet before saving. Once enabled the bot withdraws automatically.</small>
+{% endif %}
+
+{% for p in policies %}
+  <div class="card">
+    <h2 style="display:flex;align-items:center;gap:10px">
+      {{ p.exchange|capitalize }}
+      {% if p.supports_lightning %}
+        <span class="pill ok" style="font-size:11px">Lightning supported</span>
+      {% else %}
+        <span class="pill muted" style="font-size:11px">On-chain only</span>
+      {% endif %}
+    </h2>
+    <div class="form-row">
+      <label>
+        <input type="checkbox" name="ex_{{ p.exchange }}_enabled" {% if p.enabled %}checked{% endif %}>
+        Enable auto-withdraw from {{ p.exchange|capitalize }}
+      </label>
+    </div>
+
+    {% if p.supports_lightning %}
+      <div class="form-row">
+        <label>Network</label>
+        <select name="ex_{{ p.exchange }}_network">
+          <option value="bitcoin" {% if p.network == "bitcoin" %}selected{% endif %}>Bitcoin on-chain</option>
+          <option value="lightning" {% if p.network == "lightning" %}selected{% endif %}>Lightning</option>
+        </select>
+        <small>Pasting an <code>lnbc…</code> invoice or an LN address auto-switches to Lightning. Lightning is cheaper but a one-shot invoice expires — use a static LN address like <code>you@getalby.com</code> if you want it to keep working over time.</small>
+      </div>
+    {% else %}
+      <input type="hidden" name="ex_{{ p.exchange }}_network" value="bitcoin">
+    {% endif %}
+
+    <div class="form-row">
+      <label>Destination {% if p.supports_lightning %}(BTC address OR LN invoice / address){% else %}(BTC address){% endif %}</label>
+      <input type="text" name="ex_{{ p.exchange }}_destination"
+        value="{{ p.destination }}"
+        placeholder="{% if p.supports_lightning %}bc1q… / lnbc… / you@getalby.com{% else %}bc1q… or bc1p…{% endif %}">
+      <small>Generate the address on your hardware wallet (or LN wallet) and verify on-device before saving.</small>
+    </div>
+    <div class="form-row">
+      <label>Threshold (BTC)</label>
+      <input type="number" step="0.00000001" min="0.0001"
+        name="ex_{{ p.exchange }}_threshold_btc"
+        value="{{ p.threshold_btc }}">
+      <small>Once BTC balance on {{ p.exchange|capitalize }} ≥ this, the bot withdraws automatically. Lower = more frequent withdrawals = more fees.</small>
+    </div>
   </div>
-  <div class="form-row">
-    <label>Threshold (BTC)</label>
-    <input type="number" step="0.00000001" min="0.0001" name="threshold_btc"
-      value="{{ config.auto_withdraw.threshold_btc }}">
-    <small>Withdrawals fire when exchange BTC balance ≥ this. Typical: 0.001-0.01 BTC. Lower threshold = more withdrawals = more on-chain fees.</small>
-  </div>
-</div>
+{% endfor %}
 
 <div class="card">
   <h2>Safety</h2>
   <ul style="margin-left:1.2em; color:var(--text-muted); line-height:1.7">
-    <li>Use a <strong>fresh address</strong> from your hardware wallet, not a previously-used one.</li>
+    <li>Use a <strong>fresh address per exchange</strong> from your hardware wallet, not the same one twice.</li>
     <li><strong>Trade-only API key</strong> is enough — the exchange's withdraw whitelist authorizes the address, not the bot.</li>
-    <li>Set the exchange's <strong>withdraw address whitelist</strong> to ONLY this address before turning auto-withdraw on. Even if the bot is compromised, the most an attacker can do is trigger your already-whitelisted withdraw.</li>
-    <li>For Lightning withdrawals (Pro tier, OKX only): leave the address field as a BTC on-chain address and use the CLI <code>bitcoiners-dca withdraw lnbc1…</code> path for one-shot Lightning invoices.</li>
+    <li>Set each exchange's <strong>withdraw whitelist</strong> to ONLY the destination here before turning auto-withdraw on. Belt + braces.</li>
+    <li>Lightning withdrawals are only supported by OKX (BitOasis and Binance UAE are on-chain only).</li>
   </ul>
 </div>
 

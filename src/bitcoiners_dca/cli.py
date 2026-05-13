@@ -267,6 +267,15 @@ def _build_strategy(cfg: AppConfig, router: SmartRouter) -> DCAStrategy:
             auto_withdraw_enabled=cfg.auto_withdraw.enabled,
             auto_withdraw_address=cfg.auto_withdraw.destination_address,
             auto_withdraw_threshold_btc=cfg.auto_withdraw.threshold_btc,
+            auto_withdraw_exchanges={
+                name: {
+                    "enabled": p.enabled,
+                    "destination": p.destination,
+                    "network": p.network,
+                    "threshold_btc": p.threshold_btc,
+                }
+                for name, p in (cfg.auto_withdraw.exchanges or {}).items()
+            },
             execution_mode=cfg.execution.mode,
             maker_limit_at=cfg.execution.maker.limit_at,
             maker_spread_bps_below_market=cfg.execution.maker.spread_bps_below_market,

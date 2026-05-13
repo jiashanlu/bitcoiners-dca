@@ -724,31 +724,93 @@ def create_app(
             amount=amount, decision=decision, error=error,
         )))
 
+    # Lightning capability per exchange — drives whether the network
+    # selector + LN destination is offered. Aligned with what each
+    # adapter's withdraw_btc() will actually accept.
+    _LIGHTNING_SUPPORT = {
+        "okx": True,
+        "binance": False,
+        "bitoasis": False,
+    }
+
+    def _withdrawals_ctx_extra():
+        cfg = _config()
+        ex_names = list(cfg.exchanges.exchanges.keys()) if cfg.exchanges and cfg.exchanges.exchanges else []
+        # Surface each known exchange — even ones without saved policy —
+        # so the user can opt in. Existing policies render with their
+        # stored values; unconfigured exchanges show defaults.
+        policies = []
+        existing = (cfg.auto_withdraw.exchanges or {})
+        for name in ex_names:
+            p = existing.get(name)
+            policies.append({
+                "exchange": name,
+                "supports_lightning": _LIGHTNING_SUPPORT.get(name, False),
+                "enabled": (p.enabled if p else False),
+                "destination": (p.destination if p else "") or "",
+                "network": (p.network if p else "bitcoin"),
+                "threshold_btc": str(p.threshold_btc if p else Decimal("0.001")),
+            })
+        return {"policies": policies}
+
     @app.get("/withdrawals", response_class=HTMLResponse)
     async def withdrawals_page(request: Request):
         return HTMLResponse(jinja.get_template("withdrawals.html").render(_ctx(
-            request, active="withdrawals",
+            request, active="withdrawals", **_withdrawals_ctx_extra(),
         )))
 
     @app.post("/withdrawals", response_class=HTMLResponse)
     async def withdrawals_save(request: Request):
         form = await request.form()
-        # Address validation: empty if disabled is fine; otherwise require
-        # something that looks like a BTC address. Light client-side regex
-        # is the form's job; here we just bound the field shape.
-        addr = (form.get("destination_address") or "").strip() or None
-        try:
-            thr = Decimal(str(form.get("threshold_btc", "0.01")).strip() or "0.01")
-        except InvalidOperation:
-            thr = Decimal("0.01")
+        cfg = _config()
+        ex_names = list(cfg.exchanges.exchanges.keys()) if cfg.exchanges and cfg.exchanges.exchanges else []
+
+        # Auto-detect Lightning from the destination so a user who pastes
+        # an `lnbc...` invoice doesn't have to also toggle the network.
+        from bitcoiners_dca.core.lightning import is_lightning as _is_ln
+
+        per_exchange: dict[str, dict] = {}
+        any_enabled = False
+        for name in ex_names:
+            prefix = f"ex_{name}_"
+            enabled = form.get(prefix + "enabled") == "on"
+            destination = (form.get(prefix + "destination") or "").strip() or None
+            requested_network = (form.get(prefix + "network") or "bitcoin").strip()
+            try:
+                threshold = Decimal(str(form.get(prefix + "threshold_btc", "0.001")).strip() or "0.001")
+            except InvalidOperation:
+                threshold = Decimal("0.001")
+            # Auto-flip to lightning if the address is clearly an LN invoice.
+            if destination and _is_ln(destination):
+                requested_network = "lightning"
+            # Refuse LN on an exchange that doesn't support it — fail loudly
+            # in the dashboard rather than silently dropping to on-chain.
+            if (
+                enabled
+                and requested_network == "lightning"
+                and not _LIGHTNING_SUPPORT.get(name, False)
+            ):
+                ctx_extra = _withdrawals_ctx_extra()
+                return HTMLResponse(jinja.get_template("withdrawals.html").render(_ctx(
+                    request, active="withdrawals", **ctx_extra,
+                    flash={"kind": "err",
+                           "message": f"{name} doesn't support Lightning withdrawals. Use an on-chain BTC address or pick a different exchange."},
+                )))
+            per_exchange[name] = {
+                "enabled": enabled,
+                "destination": destination,
+                "network": requested_network,
+                "threshold_btc": str(threshold),
+            }
+            any_enabled = any_enabled or enabled
+
         patch = {
-            "auto_withdraw.enabled": form.get("enabled") == "on",
-            "auto_withdraw.destination_address": addr,
-            "auto_withdraw.threshold_btc": str(thr),
+            "auto_withdraw.enabled": any_enabled,
+            "auto_withdraw.exchanges": per_exchange,
         }
         flash = _apply_patch(state["config_path"], patch, _refresh_config)
         return HTMLResponse(jinja.get_template("withdrawals.html").render(_ctx(
-            request, active="withdrawals", flash=flash,
+            request, active="withdrawals", flash=flash, **_withdrawals_ctx_extra(),
         )))
 
     @app.get("/settings", response_class=HTMLResponse)
