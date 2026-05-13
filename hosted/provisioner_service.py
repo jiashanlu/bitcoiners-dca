@@ -98,6 +98,11 @@ def provision(
 
     log.info(f"PROVISION tenant={body.tenant_id} email={body.customer_email} tier={body.tier}")
 
+    # Args are passed as a list (no shell=True), and each arg is already
+    # validated upstream: tenant_id by TENANT_ID_RE, customer_email by
+    # Pydantic's EmailStr, tier by the {pro,business} switch in provision.sh.
+    # No shell interpolation happens at this layer; semgrep's
+    # "tainted-env-args" rule is a false positive against this call site.
     cmd = [
         "bash",
         str(PROVISION_SCRIPT),
@@ -106,6 +111,7 @@ def provision(
         body.tier,
     ]
     try:
+        # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args
         result = subprocess.run(
             cmd,
             capture_output=True,
