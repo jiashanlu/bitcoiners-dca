@@ -38,6 +38,7 @@ from bitcoiners_dca.core.models import (
 )
 from bitcoiners_dca.exchanges.base import (
     Exchange, ExchangeError, InsufficientBalanceError, WithdrawalDeniedError,
+    make_bot_client_order_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -129,7 +130,11 @@ class BinanceExchange(Exchange):
         try:
             raw = await self._client.create_market_buy_order(
                 symbol=pair, amount=float(quote_amount),
-                params={"quoteOrderQty": float(quote_amount)},
+                params={
+                    "quoteOrderQty": float(quote_amount),
+                    # Tag for cancel_all_open_orders selectivity.
+                    "newClientOrderId": make_bot_client_order_id(),
+                },
             )
             order = self._normalize_order(raw, pair, quote_amount)
             # Same fill-race as OKX: ccxt returns before raw["filled"] is
@@ -157,6 +162,7 @@ class BinanceExchange(Exchange):
             base_amount = quote_amount / limit_price
             raw = await self._client.create_limit_buy_order(
                 symbol=pair, amount=float(base_amount), price=float(limit_price),
+                params={"newClientOrderId": make_bot_client_order_id()},
             )
             return self._normalize_order(raw, pair, quote_amount)
         except ccxt_async.InsufficientFunds as e:

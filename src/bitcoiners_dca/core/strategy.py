@@ -135,6 +135,22 @@ class ExecutionResult:
     withdrew_to_address: Optional[str] = None
     errors: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # Distinguishes "the strategy chose not to buy" (overlay skip,
+    # maker_only timeout, dip-not-deep-enough) from "the strategy tried
+    # to buy and an error blocked it". The scheduler uses this to decide
+    # whether to increment consecutive_failures — a 0-order skip that the
+    # strategy made on purpose must NOT count as a failure, otherwise
+    # time-of-day skips during overnight hours auto-pause the bot after
+    # 5 cycles.
+    deliberate_skip: bool = False
+    # Set when a multi-hop cycle landed in an intermediate currency
+    # because hop K-1 succeeded but hop K failed. Lets the scheduler
+    # surface a dashboard banner that fires reliably, instead of
+    # string-matching error messages for "orphan" (which most paths
+    # don't include).
+    orphan_amount: Optional[Decimal] = None
+    orphan_ccy: Optional[str] = None
+    orphan_exchange: Optional[str] = None
 
     @property
     def order(self) -> Optional[Order]:
@@ -227,8 +243,12 @@ class DCAStrategy:
             for overlay in self.overlays:
                 ov = overlay.apply(ctx)
                 if ov.skip:
-                    # Short-circuit: this overlay says skip the cycle entirely
+                    # Short-circuit: this overlay says skip the cycle entirely.
+                    # Mark as deliberate so the scheduler doesn't treat it as
+                    # a failure (no order ≠ broken). The 5-consecutive-failure
+                    # auto-pause threshold should only fire on REAL errors.
                     result.notes.append(ov.note or f"{overlay.name} skipped cycle")
+                    result.deliberate_skip = True
                     return result
                 if ov.multiplier != Decimal(1):
                     amount = amount * ov.multiplier
@@ -445,17 +465,26 @@ class DCAStrategy:
             except InsufficientBalanceError:
                 if i == 0:
                     raise
+                # Hop K-1 succeeded but hop K can't be funded. Record an
+                # explicit orphan signal so the dashboard banner reliably
+                # fires — don't depend on the error string saying "orphan".
+                result.orphan_amount = current_amount
+                result.orphan_ccy = hop.input_ccy
+                result.orphan_exchange = hop.exchange
                 raise ExchangeError(
                     f"Hop {i+1} failed with insufficient balance. "
                     f"Orphaned ~{current_amount} {hop.input_ccy} on "
                     f"{hop.exchange} (output of hop {i} of {len(route.hops)})"
                 )
             if order is None:
-                # maker_only that didn't fill → cycle skipped, not failed
+                # maker_only that didn't fill → cycle skipped, not failed.
+                # Flag deliberate_skip so scheduler doesn't count this
+                # toward consecutive_failures.
                 result.notes.append(
                     f"Hop {i+1}/{len(route.hops)}: maker_only limit timed out, "
                     f"cycle skipped"
                 )
+                result.deliberate_skip = True
                 return orders
             orders.append(order)
             # Defensive: refuse to thread a non-filled amount to the next hop.
@@ -466,6 +495,13 @@ class DCAStrategy:
             # before the OKX fill-poll fix.
             from bitcoiners_dca.core.models import OrderStatus as _OS
             if order.status != _OS.FILLED or not order.amount_base or order.amount_base <= 0:
+                if i > 0:
+                    # Hops 1..N-1 settled into the intermediate currency on
+                    # this exchange; record it explicitly so the orphan
+                    # banner fires without string-matching the error.
+                    result.orphan_amount = current_amount
+                    result.orphan_ccy = hop.input_ccy
+                    result.orphan_exchange = hop.exchange
                 raise ExchangeError(
                     f"Hop {i+1}/{len(route.hops)} on {hop.exchange} {hop.pair} "
                     f"returned status={order.status} amount_base={order.amount_base!r}; "

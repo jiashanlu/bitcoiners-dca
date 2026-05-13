@@ -367,6 +367,7 @@ async def _buy_once(config_path: str, dry: bool):
         max_daily_aed=cfg.risk.max_daily_aed,
         max_single_buy_aed=cfg.risk.max_single_buy_aed,
         max_consecutive_failures=cfg.risk.max_consecutive_failures,
+        timezone_str=cfg.strategy.timezone or "Asia/Dubai",
     )
     decision = rm.evaluate(Decimal(str(cfg.strategy.amount_aed)))
     if not decision.allow:
@@ -386,6 +387,16 @@ async def _buy_once(config_path: str, dry: bool):
         result.notes.extend(decision.reasons)
     db.record_cycle(result)
     await notifier.notify_cycle(result)
+    # Mirror scheduler's risk-result reporting so Buy-now successes
+    # reset the failure counter and Buy-now failures count toward the
+    # auto-pause threshold (W3.4). Deliberate skips don't move the
+    # counter (W3.2).
+    if result.order and not result.errors:
+        rm.record_cycle_result(success=True)
+    elif result.deliberate_skip and not result.errors:
+        pass
+    else:
+        rm.record_cycle_result(success=False)
 
     if result.order:
         console.print(f"[green]✓ Bought {result.order.amount_base} BTC on {result.order.exchange} for AED {result.intended_amount_aed}[/green]")
@@ -1084,6 +1095,7 @@ def risk(
         max_daily_aed=cfg.risk.max_daily_aed,
         max_single_buy_aed=cfg.risk.max_single_buy_aed,
         max_consecutive_failures=cfg.risk.max_consecutive_failures,
+        timezone_str=cfg.strategy.timezone or "Asia/Dubai",
     )
 
     act = action.lower()

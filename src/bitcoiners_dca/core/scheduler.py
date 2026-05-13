@@ -144,6 +144,7 @@ class DCAScheduler:
             max_daily_aed=config.risk.max_daily_aed,
             max_single_buy_aed=config.risk.max_single_buy_aed,
             max_consecutive_failures=config.risk.max_consecutive_failures,
+            timezone_str=config.strategy.timezone or "Asia/Dubai",
         )
         self._rebuild_dependencies = rebuild_dependencies
         self.market_data = MarketDataProvider(db=db)
@@ -252,8 +253,20 @@ class DCAScheduler:
                 result.notes.extend(decision.reasons)
             self.db.record_cycle(result)
             await self.notifier.notify_cycle(result)
-            success = bool(result.order) and not result.errors
-            self.risk.record_cycle_result(success=success)
+            # Differentiate three outcomes for the risk-manager streak:
+            #   real success    → reset counter
+            #   deliberate skip → leave counter unchanged (overlay said no,
+            #                     maker_only timed out, etc.)
+            #   real failure    → increment counter
+            # Previously every 0-order cycle counted as failure → hourly
+            # frequency + time_of_day [9..18] auto-paused after 5 night cycles.
+            if result.order and not result.errors:
+                self.risk.record_cycle_result(success=True)
+            elif result.deliberate_skip and not result.errors:
+                # Skip — don't touch the counter
+                pass
+            else:
+                self.risk.record_cycle_result(success=False)
             # Multi-hop orphan detection: any error mentioning "Orphan"
             # means a hop succeeded then the next failed, leaving funds
             # stuck on the exchange in an intermediate currency. Surface
@@ -288,23 +301,34 @@ class DCAScheduler:
             await self.notifier.notify_error("DCA cycle failed", str(e))
 
     def _record_orphan_if_any(self, result) -> None:
-        """If any error mentions orphaned funds, stash the latest one as a
-        dashboard-visible meta entry so the operator can act on it.
-        Cleared via db.set_meta('multi_hop.orphan_acknowledged_at', ...)."""
+        """Stash a dashboard-visible orphan-funds banner if this cycle
+        ended with funds parked in an intermediate currency.
+
+        Two trigger signals (in order of preference):
+          1. Explicit `result.orphan_*` fields set by strategy when hop
+             K-1 succeeded but hop K failed (preferred — reliable).
+          2. Error-string fallback for "orphan" (legacy paths that
+             didn't set the explicit fields).
+
+        Cleared from the UI via db.set_meta('multi_hop.orphan_acknowledged_at', ...).
+        """
         import json as _json
         from datetime import datetime, timezone
+        explicit_orphan = bool(getattr(result, "orphan_amount", None))
         orphan_errors = [e for e in (result.errors or []) if "Orphan" in e or "orphan" in e]
-        if not orphan_errors:
+        if not explicit_orphan and not orphan_errors:
             return
+        payload: dict = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "errors": orphan_errors[:3],
+            "notes": (result.notes or [])[:5],
+        }
+        if explicit_orphan:
+            payload["amount"] = str(result.orphan_amount)
+            payload["ccy"] = result.orphan_ccy
+            payload["exchange"] = result.orphan_exchange
         try:
-            self.db.set_meta(
-                "multi_hop.last_orphan",
-                _json.dumps({
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                    "errors": orphan_errors[:3],
-                    "notes": (result.notes or [])[:5],
-                }),
-            )
+            self.db.set_meta("multi_hop.last_orphan", _json.dumps(payload))
         except Exception:
             logger.exception("failed to persist orphan meta")
 

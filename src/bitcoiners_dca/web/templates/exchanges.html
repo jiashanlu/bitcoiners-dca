@@ -11,6 +11,20 @@
 </div>
 {% endif %}
 
+{% if outbound_ip %}
+<div class="card" style="margin-bottom:24px">
+  <h2 style="font-size:16px;margin-bottom:6px">Bot outbound IP — whitelist this on every exchange</h2>
+  <p class="help" style="margin-bottom:12px">
+    Most exchanges let you restrict an API key to a specific IP. Set the whitelist to <strong>only</strong> this address so a leaked
+    key from anywhere else can't be used to trade your account.
+  </p>
+  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <code id="bot-ip" style="padding:8px 14px;background:rgba(255,255,255,0.06);border-radius:8px;font-size:15px">{{ outbound_ip }}</code>
+    <button type="button" onclick="navigator.clipboard.writeText('{{ outbound_ip }}'); this.textContent='Copied ✓'" style="font-size:12px;padding:6px 12px">Copy</button>
+  </div>
+</div>
+{% endif %}
+
 {% set exchange_meta = {
   "okx":      {"name": "OKX UAE",     "pairs": "BTC/AED · BTC/USDT · USDT/AED", "scope": "Read + Trade (Withdraw optional for auto-withdraw)"},
   "binance":  {"name": "Binance UAE", "pairs": "BTC/USDT only (no BTC/AED)",    "scope": "Read + Trade"},
@@ -41,8 +55,18 @@
       <input type="password" name="{{ field }}" placeholder="{% if credentials.get(ex, {}).get(field) %}{{ credentials[ex][field] }}{% else %}(not set){% endif %}">
     </div>
     {% endfor %}
-    <button type="submit">Save credentials</button>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      <button type="submit">Save credentials</button>
+    </div>
   </form>
+  {% if ex_cfg.enabled and credentials.get(ex) %}
+  <form method="post" action="{{ prefix }}/exchanges/{{ ex }}/test" style="margin-top:14px">
+    <button type="submit" style="background:transparent;border:1px solid var(--border);color:var(--text);padding:8px 14px;border-radius:8px;font-size:13px;cursor:pointer">
+      Test connection
+    </button>
+    <small style="margin-left:10px">Calls the read-only balance endpoint — no orders placed. Tells you immediately if the key is valid + scoped correctly.</small>
+  </form>
+  {% endif %}
 </div>
 {% endfor %}
 

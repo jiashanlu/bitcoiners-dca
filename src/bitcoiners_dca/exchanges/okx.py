@@ -37,6 +37,7 @@ from bitcoiners_dca.core.models import (
 )
 from bitcoiners_dca.exchanges.base import (
     Exchange, ExchangeError, InsufficientBalanceError, WithdrawalDeniedError,
+    make_bot_client_order_id,
 )
 
 
@@ -163,6 +164,9 @@ class OKXExchange(Exchange):
                 "quoteOrderQty": float(quote_amount),
                 "tgtCcy": "quote_ccy",
                 "tdMode": "cash",
+                # Tag so cancel_all_open_orders can recognise bot orders
+                # and leave the user's manual orders alone.
+                "clOrdId": make_bot_client_order_id(),
             }
             logger.info(
                 "OKX place_market_buy: pair=%s amount=%s params=%s",
@@ -221,8 +225,12 @@ class OKXExchange(Exchange):
                 symbol=pair, amount=float(base_amount), price=float(limit_price),
                 # See place_market_buy: cash mode forces spot settlement so
                 # OKX doesn't route through margin and reject for borrow-side
-                # liquidity that DCA accounts don't have.
-                params={"tdMode": "cash"},
+                # liquidity that DCA accounts don't have. Tag clOrdId so
+                # cancel_all_open_orders only cleans up bot-placed orders.
+                params={
+                    "tdMode": "cash",
+                    "clOrdId": make_bot_client_order_id(),
+                },
             )
             return self._normalize_order(raw, pair, quote_amount)
         except ccxt_async.InsufficientFunds as e:

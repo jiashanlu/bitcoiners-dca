@@ -16,6 +16,23 @@ from bitcoiners_dca.core.models import (
 )
 
 
+# Prefix every order's clientOrderId with this so the pre-cycle sweep can
+# distinguish bot orders from orders the customer placed manually on the
+# exchange's own UI. Keep short (OKX clOrdId max 32 chars, alphanumeric).
+BOT_CLORD_PREFIX = "bdca"
+
+
+def make_bot_client_order_id() -> str:
+    """Generate a clientOrderId for a bot-placed order.
+
+    Shape: `bdca` + 28 hex chars from a uuid4. Total 32, fits OKX +
+    Binance limits. Identifiable in `cancel_all_open_orders` so we
+    don't touch orders the user placed manually.
+    """
+    from uuid import uuid4
+    return BOT_CLORD_PREFIX + uuid4().hex[:28]
+
+
 class ExchangeError(Exception):
     """Base for exchange-specific failures (wraps underlying API errors)."""
 
@@ -99,11 +116,16 @@ class Exchange(ABC):
         raise NotImplementedError(f"{self.name} adapter does not implement cancel_order")
 
     async def cancel_all_open_orders(self, pair: str) -> int:
-        """Cancel every open order on `pair`. Returns the number cancelled.
+        """Cancel every BOT-PLACED open order on `pair`. Returns count.
 
-        Default implementation uses fetch_open_orders + cancel_order in a
-        loop. Adapters can override with a bulk endpoint if the exchange
-        offers one (cheaper, single API call).
+        Critical: this is called at the start of every cycle to clean up
+        stale maker_fallback leftovers. It must NOT cancel orders the
+        customer placed manually through the exchange's own UI alongside
+        the bot. We distinguish by `clientOrderId` — bot orders are
+        tagged with `BOT_CLORD_PREFIX`; manual orders have an exchange-
+        generated id without the prefix.
+
+        Adapters can override with a bulk-cancel endpoint if available.
         """
         try:
             client = getattr(self, "_client", None)
@@ -116,6 +138,10 @@ class Exchange(ABC):
         for o in open_orders or []:
             oid = o.get("id")
             if not oid:
+                continue
+            cid = (o.get("clientOrderId") or "") or (o.get("info", {}).get("clOrdId", ""))
+            if not str(cid).startswith(BOT_CLORD_PREFIX):
+                # Manual / pre-existing order — leave it alone.
                 continue
             try:
                 await self.cancel_order(pair, str(oid))

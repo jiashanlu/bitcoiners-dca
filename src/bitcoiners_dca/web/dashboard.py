@@ -667,10 +667,34 @@ def create_app(
                     field: _redact(value)
                     for field, value in stored.items()
                 }
+        # Surface results of the "Test connection" button.
+        test_ok = request.query_params.get("ok")
+        test_err = request.query_params.get("err")
+        flash = None
+        if test_ok:
+            flash = {"kind": "ok", "message": f"{test_ok}: connection OK — API key is valid and scoped correctly."}
+        elif test_err:
+            ex_name, _, msg = test_err.partition(":")
+            flash = {"kind": "err", "message": f"{ex_name} connection failed: {msg or 'unknown error'}"}
+        # The bot's outbound IP — customer needs this to whitelist the
+        # bot host on their exchange API key. Fetch once and cache; on
+        # error fall through silently (worst case the customer sees
+        # "—" and has to ask support).
+        outbound_ip = state.get("_outbound_ip")
+        if not outbound_ip:
+            try:
+                import httpx as _httpx
+                async with _httpx.AsyncClient(timeout=4.0) as client:
+                    r = await client.get("https://api.ipify.org")
+                    outbound_ip = r.text.strip()
+                    state["_outbound_ip"] = outbound_ip
+            except Exception:
+                outbound_ip = None
         return HTMLResponse(jinja.get_template("exchanges.html").render(_ctx(
-            request, active="exchanges",
+            request, active="exchanges", flash=flash,
             credentials=creds, secrets_available=sec is not None,
             required_fields=required_fields,
+            outbound_ip=outbound_ip,
         )))
 
     @app.post("/exchanges/{name}/toggle", response_class=HTMLResponse)
@@ -683,6 +707,35 @@ def create_app(
             f"exchanges.{name}.enabled": enabled,
         }, _refresh_config)
         return _redirect(request, "/exchanges")
+
+    @app.post("/exchanges/{name}/test", response_class=HTMLResponse)
+    async def exchange_test_connection(request: Request, name: str):
+        """Verify the saved API key works without placing any orders.
+
+        Calls the adapter's health_check() which reads /account or
+        /balances — read-only. Surfaces success or the exchange's
+        error message so the customer knows immediately whether their
+        key is valid + scoped correctly, instead of waiting for the
+        next failed cycle.
+        """
+        if name not in ("okx", "binance", "bitoasis"):
+            raise HTTPException(404)
+        # Find this adapter in the cached exchange list (re-instantiated
+        # after credentials save).
+        target = None
+        for ex in _exchanges():
+            if ex.name == name:
+                target = ex
+                break
+        if target is None:
+            flash = {"kind": "err",
+                     "message": f"{name} is not enabled or has no credentials yet. Save credentials first."}
+            return _redirect(request, f"/exchanges?flash={flash['kind']}:{flash['message'][:140]}")
+        try:
+            await target.health_check()
+            return _redirect(request, f"/exchanges?ok={name}")
+        except Exception as e:
+            return _redirect(request, f"/exchanges?err={name}:{str(e)[:160]}")
 
     @app.post("/exchanges/{name}/credentials", response_class=HTMLResponse)
     async def exchange_credentials(request: Request, name: str):
@@ -1036,6 +1089,7 @@ def create_app(
             max_consecutive_failures=cfg.risk.max_consecutive_failures,
             max_daily_aed=cfg.risk.max_daily_aed,
             max_single_buy_aed=cfg.risk.max_single_buy_aed,
+            timezone_str=cfg.strategy.timezone or "Asia/Dubai",
         )
         # Use the strategy's intended per-cycle amount for the check.
         decision = rm.evaluate(Decimal(str(cfg.strategy.amount_aed)))

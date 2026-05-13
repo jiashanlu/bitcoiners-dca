@@ -56,11 +56,18 @@ class RiskManager:
         max_daily_aed: Optional[Decimal] = None,
         max_single_buy_aed: Optional[Decimal] = None,
         max_consecutive_failures: int = 5,
+        # User timezone for daily-cap window boundaries. Defaults to UTC
+        # so existing tests / callers behave identically; callers that
+        # know the strategy timezone (cli._build_strategy, scheduler)
+        # should pass it in so a Dubai customer's "daily" cap resets at
+        # local midnight, not 04:00 local (UTC midnight).
+        timezone_str: str = "UTC",
     ):
         self.db = db
         self.max_daily_aed = max_daily_aed
         self.max_single_buy_aed = max_single_buy_aed
         self.max_consecutive_failures = max_consecutive_failures
+        self.timezone_str = timezone_str
 
     # === STATE QUERIES ===
 
@@ -75,14 +82,39 @@ class RiskManager:
         return int(raw) if raw and raw.isdigit() else 0
 
     def daily_spend_aed(self, today_utc: Optional[datetime] = None) -> Decimal:
-        """Sum of filled buys in `amount_quote` for today (UTC)."""
-        day = (today_utc or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
+        """Sum of filled BTC-receiving buys in `amount_quote` for today.
+
+        The "today" boundary is computed in the strategy's timezone (e.g.
+        Asia/Dubai → resets at local midnight) by:
+          1. taking `now` in user tz
+          2. floor to local midnight
+          3. converting BOTH bounds back to UTC for the SQL range filter
+        Trade timestamps are stored as UTC ISO8601, so a UTC range filter
+        is the right comparison even when the user-tz "day" straddles UTC.
+
+        Only counts the AED-spending leg (pair LIKE '%/AED') — same logic
+        as Database.total_aed_spent so we don't double-count two-hop
+        cycles that persist both legs.
+        """
+        from zoneinfo import ZoneInfo
+        from datetime import timedelta
+        try:
+            tz = ZoneInfo(self.timezone_str)
+        except Exception:
+            tz = ZoneInfo("UTC")
+        now_local = (today_utc or datetime.now(timezone.utc)).astimezone(tz)
+        local_midnight = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        next_local_midnight = local_midnight + timedelta(days=1)
+        # ISO8601 of UTC equivalents — SQL compares as strings, fine.
+        start_iso = local_midnight.astimezone(timezone.utc).isoformat()
+        end_iso = next_local_midnight.astimezone(timezone.utc).isoformat()
         cur = self.db._conn.execute(
             """SELECT COALESCE(SUM(CAST(amount_quote AS REAL)), 0)
                FROM trades
                WHERE side='buy' AND status='filled'
-                 AND substr(timestamp, 1, 10) = ?""",
-            (day,),
+                 AND pair LIKE '%/AED'
+                 AND timestamp >= ? AND timestamp < ?""",
+            (start_iso, end_iso),
         )
         return Decimal(str(cur.fetchone()[0]))
 
