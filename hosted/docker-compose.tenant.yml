@@ -25,10 +25,15 @@ services:
     container_name: bitcoiners-dca-${TENANT_ID}-daemon
     restart: unless-stopped
     # Hard limits so a single misbehaving tenant can't OOM the LXC.
-    # Daemon's a thin scheduler + a few HTTP polls — 256MB is generous.
-    # CPU cap of 0.5 lets ~30 tenants comfortably share a 16-CPU box.
-    mem_limit: 256m
-    memswap_limit: 256m
+    # 256MB was too tight: the daemon idles at ~110MB but spikes well past
+    # 256MB during simultaneous health checks across 3 exchanges (ccxt
+    # connection pools + httpx + asyncio). Phase 1 testing showed
+    # reproducible OOM kills every ~75s (exitCode 137, "container oom"
+    # in docker events — note Docker's State.OOMKilled flag is lossy and
+    # reports false even when the kernel oom-kills). Raised to 512MB.
+    # ~20 tenants per LXC still well within budget on a 16GB host.
+    mem_limit: 512m
+    memswap_limit: 512m
     cpus: 0.5
     pids_limit: 200
     command: ["run", "--config", "/app/config/config.yaml"]
@@ -51,9 +56,11 @@ services:
     container_name: bitcoiners-dca-${TENANT_ID}-dashboard
     restart: unless-stopped
     # Dashboard handles a single operator's session; uvicorn + jinja
-    # stays well under 256MB.
-    mem_limit: 256m
-    memswap_limit: 256m
+    # stays well under 256MB at idle but the route-audit page can spike
+    # while loading multi-exchange tickers. 384MB gives headroom without
+    # eating the daemon's budget.
+    mem_limit: 384m
+    memswap_limit: 384m
     cpus: 0.5
     pids_limit: 200
     command:
