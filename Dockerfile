@@ -17,7 +17,12 @@ COPY pyproject.toml ./
 COPY src/ ./src/
 COPY config.example.yaml ./
 
-RUN pip install --no-cache-dir -e .
+# Upgrade pip + setuptools + wheel BEFORE installing the app — the base
+# python:3.11-slim ships older versions with HIGH-severity CVEs
+# (jaraco.context path-traversal, wheel privilege-escalation). Pinning
+# floors keeps the upgrade reproducible.
+RUN pip install --no-cache-dir --upgrade 'pip>=24.3' 'setuptools>=78.0' 'wheel>=0.46.2' \
+    && pip install --no-cache-dir -e .
 
 # Mount points: /app/config holds config.yaml (read-only); /app/data holds the
 # SQLite event log; /app/reports holds generated tax CSVs.
