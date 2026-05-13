@@ -400,6 +400,7 @@ class SmartRouter:
             usable = candidates[:]  # all wide; fall back to all candidates
 
         # Balance filter (None = trust user; treat 0 as "underfunded")
+        underfunded_fallback = False
         if required_amount is not None:
             funded = [
                 c for c in usable
@@ -407,6 +408,15 @@ class SmartRouter:
             ]
             if funded:
                 usable = funded
+            else:
+                # No exchange holds enough quote currency to fund the full
+                # ask. Don't drop all routes — the bot still wants to make
+                # progress on whatever balance IS available. Mark this
+                # case so scoring (below) preferes the route with the
+                # MOST usable balance, not just the cheapest. Otherwise a
+                # near-empty exchange wins on price-per-coin while a
+                # well-funded one sits idle.
+                underfunded_fallback = True
 
         # Preference bonus — applies to candidates whose FIRST hop is on the
         # preferred exchange. For two-hop, that's the AED-spending leg.
@@ -420,5 +430,13 @@ class SmartRouter:
             else:
                 c.score = c.effective_price
 
-        usable.sort(key=lambda c: c.score)
+        if underfunded_fallback:
+            # Sort by quote_balance DESC (most usable balance first), then
+            # by score (cheapest among the well-funded). Routes with no
+            # reported balance sort last via the `or 0` fallback. This
+            # makes the bot route to the exchange that can actually pay,
+            # not the one with the prettiest theoretical price.
+            usable.sort(key=lambda c: (-(c.quote_balance or Decimal(0)), c.score))
+        else:
+            usable.sort(key=lambda c: c.score)
         return usable

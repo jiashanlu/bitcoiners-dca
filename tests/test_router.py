@@ -143,16 +143,20 @@ async def test_balance_aware_picks_cheapest_when_both_funded():
 
 @pytest.mark.asyncio
 async def test_balance_aware_falls_back_when_all_underfunded():
-    """If every exchange is short, router still returns a candidate so the
-    caller can produce a clear InsufficientBalanceError downstream."""
-    a = FakeExchange("a", ask="350000", bid="349900", quote_balance="100")
-    b = FakeExchange("b", ask="360000", bid="359900", quote_balance="200")
+    """If every exchange is short, the bot prefers the exchange with the
+    MOST usable quote balance — not the one with the cheapest price. A
+    near-empty venue priced 0.1% better is worthless if it can't fund the
+    buy. The strategy's post-route balance-clamp trims the ask to what's
+    actually available. Prevents a scenario where OKX has 37 AED + the
+    best price keeps winning while BitOasis has 1189 AED sitting idle.
+    """
+    cheap_but_empty = FakeExchange("a", ask="350000", bid="349900", quote_balance="100")
+    pricier_but_funded = FakeExchange("b", ask="360000", bid="359900", quote_balance="200")
 
     decision = await SmartRouter().pick(
-        [a, b], required_quote_amount=Decimal("1000"),
+        [cheap_but_empty, pricier_but_funded], required_quote_amount=Decimal("1000"),
     )
-    # Cheapest still wins among underfunded candidates
-    assert decision.chosen.route.hops[0].exchange == "a"
+    assert decision.chosen.route.hops[0].exchange == "b"
 
 
 @pytest.mark.asyncio
