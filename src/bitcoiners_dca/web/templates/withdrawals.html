@@ -53,11 +53,74 @@
       <label>Threshold (BTC)</label>
       <input type="number" step="0.00000001" min="0.0001"
         name="ex_{{ p.exchange }}_threshold_btc"
+        id="thr_{{ p.exchange }}"
+        data-exchange="{{ p.exchange }}"
+        data-supports-lightning="{{ '1' if p.supports_lightning else '0' }}"
         value="{{ p.threshold_btc }}">
       <small>Once BTC balance on {{ p.exchange|capitalize }} ≥ this, the bot withdraws automatically. Lower = more frequent withdrawals = more fees.</small>
+      <small id="thr_fee_{{ p.exchange }}" style="margin-top:6px;color:var(--text-muted)"></small>
     </div>
   </div>
 {% endfor %}
+
+<script>
+(function() {
+  // Per-exchange withdrawal fee estimates in BTC. Real fees vary; these
+  // are conservative defaults derived from each exchange's published
+  // schedule as of 2026-05. Used only for the live preview — the actual
+  // execution always queries get_fee_schedule() at withdraw time.
+  const ONCHAIN_FEE_BTC = {
+    okx:      0.0002,
+    binance:  0.0002,
+    bitoasis: 0.0003,
+  };
+  const LIGHTNING_FEE_BTC = 0.0000005;  // ~1 sat — effectively free
+
+  function update(input) {
+    const ex = input.dataset.exchange;
+    const supportsLn = input.dataset.supportsLightning === '1';
+    const out = document.getElementById('thr_fee_' + ex);
+    if (!out) return;
+    const threshold = parseFloat(input.value || '0');
+    if (!threshold || threshold <= 0) { out.textContent = ''; return; }
+    // Pick on-chain by default; if exchange supports LN AND user selected LN
+    // network, use LN fee instead.
+    const netSel = document.querySelector('select[name="ex_' + ex + '_network"]');
+    const isLn = supportsLn && netSel && netSel.value === 'lightning';
+    const fee = isLn ? LIGHTNING_FEE_BTC : ONCHAIN_FEE_BTC[ex];
+    if (!fee) { out.textContent = ''; return; }
+    const pct = (fee / threshold) * 100;
+    let msg = 'Estimated network fee at this threshold: ' + fee.toFixed(8)
+      + ' BTC ≈ <strong>' + pct.toFixed(2) + '%</strong> of each sweep';
+    if (pct > 5) {
+      out.style.color = '#e86363';
+      msg += '. <strong>That’s high.</strong> Raise the threshold so each '
+        + 'withdrawal carries enough to amortize the fee — most stackers '
+        + 'target &lt;1%.';
+    } else if (pct > 1) {
+      out.style.color = '#f0b000';
+      msg += ' — workable, but raising the threshold a bit will cut your fee drag.';
+    } else {
+      out.style.color = 'var(--text-muted)';
+    }
+    out.innerHTML = msg;
+  }
+
+  document.querySelectorAll('input[id^="thr_"]').forEach(input => {
+    input.addEventListener('input', () => update(input));
+    update(input);
+  });
+  // Re-compute when LN/onchain network toggle changes — fee differs ~400x.
+  document.querySelectorAll('select[name$="_network"]').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const m = sel.name.match(/^ex_(.+)_network$/);
+      if (!m) return;
+      const input = document.getElementById('thr_' + m[1]);
+      if (input) update(input);
+    });
+  });
+})();
+</script>
 
 <div class="card">
   <h2>Safety</h2>

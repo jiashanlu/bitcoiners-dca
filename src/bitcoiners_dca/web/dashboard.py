@@ -969,7 +969,17 @@ def create_app(
 
         # Auto-detect Lightning from the destination so a user who pastes
         # an `lnbc...` invoice doesn't have to also toggle the network.
-        from bitcoiners_dca.core.lightning import is_lightning as _is_ln
+        from bitcoiners_dca.core.lightning import (
+            detect_network as _detect_network,
+            is_lightning as _is_ln,
+            WithdrawalNetwork as _Net,
+        )
+
+        def _refuse(msg: str):
+            return HTMLResponse(jinja.get_template("withdrawals.html").render(_ctx(
+                request, active="withdrawals", **_withdrawals_ctx_extra(),
+                flash={"kind": "err", "message": msg},
+            )))
 
         per_exchange: dict[str, dict] = {}
         any_enabled = False
@@ -982,9 +992,44 @@ def create_app(
                 threshold = Decimal(str(form.get(prefix + "threshold_btc", "0.001")).strip() or "0.001")
             except InvalidOperation:
                 threshold = Decimal("0.001")
-            # Auto-flip to lightning if the address is clearly an LN invoice.
+
+            # Auto-flip to lightning if the address is clearly an LN invoice/address.
             if destination and _is_ln(destination):
                 requested_network = "lightning"
+
+            # Validation runs only when the row is enabled — disabled rows
+            # can have blank/garbage destination, we don't care.
+            if enabled and destination:
+                net = _detect_network(destination)
+                if net == _Net.UNKNOWN:
+                    return _refuse(
+                        f"{name}: destination {destination[:40]!r} doesn't look like a "
+                        "valid BTC address (bc1…/1…/3…) or Lightning address "
+                        "(you@walletprovider.com). Double-check it before saving."
+                    )
+                # BOLT11 invoices expire (default 1h, max 7d). They make no
+                # sense as an auto-withdraw destination — by the time the
+                # bot has accumulated enough BTC to trip the threshold, the
+                # invoice is dead. Refuse explicitly with a clear message
+                # pointing at the alternatives.
+                if net == _Net.LIGHTNING:
+                    return _refuse(
+                        f"{name}: that's a one-shot BOLT11 invoice — it'll "
+                        "expire before the bot can reuse it. For ongoing "
+                        "auto-withdraw, paste a static Lightning Address "
+                        "(e.g. you@walletofsatoshi.com) or an on-chain BTC "
+                        "address. Use the CLI for one-off invoice withdraws."
+                    )
+                # LNURL is opaque — we'd have to fetch + parse the response
+                # to know what we're sending to. Same problem class as
+                # BOLT11; reject.
+                if net == _Net.LNURL:
+                    return _refuse(
+                        f"{name}: LNURL-pay destinations aren't supported "
+                        "for auto-withdraw yet. Paste a Lightning Address "
+                        "(you@host) or an on-chain BTC address instead."
+                    )
+
             # Refuse LN on an exchange that doesn't support it — fail loudly
             # in the dashboard rather than silently dropping to on-chain.
             if (
@@ -992,12 +1037,11 @@ def create_app(
                 and requested_network == "lightning"
                 and not _LIGHTNING_SUPPORT.get(name, False)
             ):
-                ctx_extra = _withdrawals_ctx_extra()
-                return HTMLResponse(jinja.get_template("withdrawals.html").render(_ctx(
-                    request, active="withdrawals", **ctx_extra,
-                    flash={"kind": "err",
-                           "message": f"{name} doesn't support Lightning withdrawals. Use an on-chain BTC address or pick a different exchange."},
-                )))
+                return _refuse(
+                    f"{name} doesn't support Lightning withdrawals. Use an "
+                    "on-chain BTC address or pick a different exchange."
+                )
+
             per_exchange[name] = {
                 "enabled": enabled,
                 "destination": destination,
@@ -1149,6 +1193,34 @@ def create_app(
             *[_safe_get_ticker(ex, pair) for ex in _exchanges()]
         )
         return dict(results)
+
+    @app.get("/api/current-btc-aed")
+    async def api_current_btc_aed():
+        """Cheapest current BTC/AED ask across enabled exchanges, for
+        the strategy form's live preview. Cached 45s via the same TTL
+        cache as /htmx/prices so a customer typing in the budget field
+        doesn't hammer exchange APIs.
+        """
+        import time as _t
+        entry = _live_cache.get("current_btc_aed")
+        if entry and _t.time() - entry[0] <= _LIVE_CACHE_TTL:
+            return {"price_aed": entry[1], "cached": True}
+        results = await asyncio.gather(
+            *[_safe_get_ticker(ex, "BTC/AED") for ex in _exchanges()],
+            return_exceptions=True,
+        )
+        prices = []
+        for r in results:
+            if isinstance(r, Exception):
+                continue
+            _name, t = r
+            ask = t.get("ask")
+            if ask:
+                prices.append(float(ask))
+        price = min(prices) if prices else None
+        if price:
+            _cache_set("current_btc_aed", price)
+        return {"price_aed": price, "cached": False}
 
     @app.get("/api/cumulative-btc")
     async def api_cumulative_btc():

@@ -161,6 +161,27 @@ td { padding: 10px 12px; border-bottom: 1px solid #181818; }
   opacity: 0.55;
   cursor: not-allowed;
 }
+/* Mobile — UAE traffic is ~70% mobile and the 200px label column
+   crushed input width below readable on a 375px screen. Stack to a
+   single column under 700px. */
+@media (max-width: 700px) {
+  .form-row {
+    grid-template-columns: 1fr;
+    gap: 6px;
+    margin-bottom: 18px;
+  }
+  .form-row label { font-size: 14px; font-weight: 600; }
+  .form-row small { font-size: 13px; line-height: 1.5; }
+  .main { padding: 20px 16px 32px; }
+  .stats { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .stat .val { font-size: 22px; }
+  table { font-size: 13px; }
+  table th, table td { padding: 8px 6px; }
+  .status-banner { padding: 12px 14px; gap: 10px; flex-direction: column; align-items: stretch; }
+  .status-banner .status-controls { justify-content: stretch; }
+  .status-banner .btn-primary-sm,
+  .status-banner .btn-secondary-sm { flex: 1; text-align: center; }
+}
 .pro-lock {
   display: inline-block;
   margin-left: 8px;

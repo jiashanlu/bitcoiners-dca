@@ -141,6 +141,13 @@
     } else {
       out.style.color = '';
     }
+    // Show "≈ X sats" alongside the AED preview when we know current price.
+    if (window._btcAedPrice && perCycle > 0) {
+      const sats = Math.round((perCycle / window._btcAedPrice) * 1e8);
+      const formattedSats = sats.toLocaleString();
+      summary += ' <span style="color:var(--text-muted);font-size:12px">≈ '
+        + formattedSats + ' sats per cycle</span>';
+    }
     out.innerHTML = summary;
   }
   // Show day-of-week only for weekly. Relabel/hint Time-of-day for hourly.
@@ -182,6 +189,22 @@
   });
   update();
   applyFreqVisibility();
+
+  // Fetch current BTC/AED price for the sats preview. Cached server-side
+  // (45s TTL) so this is cheap. Re-fetch every 60s in case the customer
+  // leaves the page open while tuning.
+  async function refreshBtcPrice() {
+    try {
+      const r = await fetch('{{ prefix }}/api/current-btc-aed');
+      const j = await r.json();
+      if (j.price_aed) {
+        window._btcAedPrice = j.price_aed;
+        update();
+      }
+    } catch (e) { /* silent — sats preview just won't show */ }
+  }
+  refreshBtcPrice();
+  setInterval(refreshBtcPrice, 60_000);
 })();
 </script>
 
