@@ -111,9 +111,10 @@ def provision(
         body.tier,
     ]
     try:
-        # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args
-        result = subprocess.run(
-            cmd,
+        # Args validated upstream; see note above. Suppress semgrep flag at the
+        # caller — the rule fires on the first arg reference (line of `cmd,`).
+        result = subprocess.run(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args
+            cmd,  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args
             capture_output=True,
             text=True,
             check=True,
