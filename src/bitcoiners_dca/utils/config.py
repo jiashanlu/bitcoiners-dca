@@ -275,6 +275,12 @@ class FundingMonitorConfig(BaseModel):
 
 class RiskConfig(BaseModel):
     """Spend caps + circuit breakers — see `core/risk.py` for behavior."""
+    # Maximum fraction of a single exchange's available quote balance the
+    # bot can spend in one cycle. With this set to 0.25 and an AED balance
+    # of 10,000, no single cycle can take more than 2,500 AED — protects
+    # against config typos (e.g. amount_aed=15000 instead of 150) sweeping
+    # the whole balance on the first Buy Now click.
+    max_pct_of_balance: Decimal = Decimal("0.25")
     max_daily_aed: Optional[Decimal] = None         # None = no daily cap
     max_single_buy_aed: Optional[Decimal] = None    # None = no per-buy cap
     max_consecutive_failures: int = 5               # auto-pause threshold

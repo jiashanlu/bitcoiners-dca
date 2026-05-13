@@ -280,6 +280,7 @@ def _build_strategy(cfg: AppConfig, router: SmartRouter) -> DCAStrategy:
             maker_limit_at=cfg.execution.maker.limit_at,
             maker_spread_bps_below_market=cfg.execution.maker.spread_bps_below_market,
             maker_timeout_seconds=cfg.execution.maker.timeout_seconds,
+            max_pct_of_balance=cfg.risk.max_pct_of_balance,
         ),
         router=router,
         overlays=_build_overlays(cfg),

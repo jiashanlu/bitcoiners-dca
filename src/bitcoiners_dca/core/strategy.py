@@ -110,6 +110,12 @@ class StrategyConfig:
     maker_spread_bps_below_market: int = 5
     maker_timeout_seconds: int = 600
 
+    # Hard ceiling on per-cycle balance consumption. 0.25 = never spend
+    # more than 25% of the chosen exchange's available quote balance in
+    # one cycle, regardless of the configured base_amount_aed. Safety net
+    # against misconfiguration sweeping a whole wallet.
+    max_pct_of_balance: Decimal = Decimal("0.25")
+
 
 @dataclass
 class ExecutionResult:
@@ -268,10 +274,31 @@ class DCAStrategy:
             and chosen_balance > 0
             and chosen_balance < amount
         ):
-            new_amount = (chosen_balance * Decimal("0.99")).quantize(Decimal("0.01"))
+            # Two-layer clamp:
+            #   1. Hard ceiling: never spend more than max_pct_of_balance
+            #      of available balance in a single cycle (default 25%).
+            #      Stops a misconfigured 15000-AED amount from sweeping
+            #      a 3700-AED balance to zero on one Buy Now click.
+            #   2. Within that ceiling, take 99% of the lesser of (a) the
+            #      available balance, (b) the configured amount — leaves
+            #      fee headroom so the exchange doesn't reject for being
+            #      a hair over.
+            max_pct = getattr(self.config, "max_pct_of_balance", Decimal("0.25"))
+            try:
+                max_pct = Decimal(str(max_pct))
+            except Exception:
+                max_pct = Decimal("0.25")
+            cap_pct_of_balance = (chosen_balance * max_pct).quantize(Decimal("0.01"))
+            clamp_ceiling = min(chosen_balance, amount)
+            new_amount = min(
+                cap_pct_of_balance,
+                (clamp_ceiling * Decimal("0.99")).quantize(Decimal("0.01")),
+            )
             result.notes.append(
                 f"balance clamp: {amount} → {new_amount} "
-                f"({chosen_balance} {decision.chosen.route.input_ccy} available on {decision.chosen.route.hops[0].exchange})"
+                f"(max {max_pct * 100:.0f}% of {chosen_balance} "
+                f"{decision.chosen.route.input_ccy} on "
+                f"{decision.chosen.route.hops[0].exchange})"
             )
             amount = new_amount
             result.intended_amount_aed = amount
