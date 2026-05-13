@@ -1,0 +1,66 @@
+name: Build & ship bitcoiners-dca image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+# Builds bitcoiners-dca:latest on dockers-LXC, then ships the tarball
+# to tenants-LXC via SSH and `docker load`s it. Future tenant container
+# `up -d --force-recreate` calls then pick up the new image.
+#
+# This replaces the "hot-patch via docker cp" dance that caused the W4
+# claims-vs-reality drift (source said one thing, live container ran
+# something else).
+#
+# Idempotent: re-running this job rebuilds and ships a new latest tag.
+# Existing tenants keep their currently-running containers until someone
+# explicitly recreates them (so a CI run doesn't ungracefully restart
+# customers).
+
+jobs:
+  build-and-ship:
+    runs-on: dockers-lxc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Docker CLI in job container
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends docker.io openssh-client >/dev/null
+          docker --version
+
+      - name: Build bitcoiners-dca:latest
+        run: |
+          docker build -t bitcoiners-dca:latest -t bitcoiners-dca:git-${GITEA_SHA:0:7} .
+
+      - name: Build bitcoiners-provisioner:latest
+        run: |
+          docker build -f hosted/provisioner.Dockerfile \
+            -t bitcoiners-provisioner:latest \
+            -t bitcoiners-provisioner:git-${GITEA_SHA:0:7} .
+
+      - name: Save images + ship to tenants-LXC
+        # No private registry yet — docker save → ssh → docker load.
+        # Cutover to registry pull when Gitea's package registry is wired.
+        run: |
+          mkdir -p /tmp/dca-build && cd /tmp/dca-build
+          docker save bitcoiners-dca:latest -o dca.tar
+          docker save bitcoiners-provisioner:latest -o provisioner.tar
+          chmod 600 /root/.ssh/jiashan_ai_ed25519 2>/dev/null || true
+          scp -o StrictHostKeyChecking=accept-new \
+            -i /root/.ssh/jiashan_ai_ed25519 \
+            dca.tar provisioner.tar root@192.168.4.160:/tmp/
+          ssh -o StrictHostKeyChecking=accept-new \
+            -i /root/.ssh/jiashan_ai_ed25519 \
+            root@192.168.4.160 '
+              docker load -i /tmp/dca.tar
+              docker load -i /tmp/provisioner.tar
+              rm /tmp/dca.tar /tmp/provisioner.tar
+              # Restart the provisioner so it picks up the new image.
+              # Tenant containers stay on their currently-running image;
+              # explicit recreate is operator-initiated.
+              cd /opt/bitcoiners-dca/hosted && \
+                IMAGE_TAG=bitcoiners-provisioner:latest \
+                docker compose -f docker-compose.provisioner.yml up -d --force-recreate
+            '
