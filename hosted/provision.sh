@@ -59,19 +59,48 @@ echo "    Base dir: ${tenant_dir}"
 mkdir -p "${tenant_dir}"/{config,data,reports}
 chmod 700 "${tenant_dir}"
 
-# Pick an unused localhost port in 8100-8999. Skip anything already in use.
-dash_port=""
-for candidate in $(seq 8100 8999); do
-  if ! ss -ltn "( sport = :${candidate} )" 2>/dev/null | grep -q LISTEN; then
+# Pick an unused localhost port in 8100-8999.
+#
+# IMPORTANT: `ss -ltn` only sees sockets inside THIS process's network
+# namespace. When provision.sh runs inside the bitcoiners-provisioner
+# container, ss does NOT see host-bound tenant dashboard ports → every
+# new tenant picked 8100, colliding with the first tenant.
+#
+# Fix: parse the assigned port out of every existing tenant's
+# docker-compose.yml. The compose ports line is:
+#     - "0.0.0.0:${TENANT_DASH_PORT}:8000"
+# We grep that and collect all assigned ports, plus check ss for any
+# host-process sockets in our namespace just in case. Re-running for an
+# existing tenant reuses its already-assigned port (idempotent).
+existing_port=""
+if [[ -f "${tenant_dir}/docker-compose.yml" ]]; then
+  existing_port="$(grep -oE '0\.0\.0\.0:[0-9]+:8000' "${tenant_dir}/docker-compose.yml" | head -1 | cut -d: -f2 || true)"
+fi
+if [[ -n "${existing_port}" ]]; then
+  dash_port="${existing_port}"
+  echo "    Dashboard port (reused): ${dash_port}"
+else
+  # Build a set of all already-assigned ports across all tenants on disk.
+  assigned_ports="$(grep -rhoE '0\.0\.0\.0:[0-9]+:8000' "${PROVISION_BASE_DIR}/tenants" 2>/dev/null | cut -d: -f2 | sort -u || true)"
+  dash_port=""
+  for candidate in $(seq 8100 8999); do
+    # Skip if any existing tenant compose claims this port.
+    if echo "${assigned_ports}" | grep -qx "${candidate}"; then
+      continue
+    fi
+    # Also skip if a process in our own namespace is bound to it.
+    if ss -ltn "( sport = :${candidate} )" 2>/dev/null | grep -q LISTEN; then
+      continue
+    fi
     dash_port="${candidate}"
     break
+  done
+  if [[ -z "${dash_port}" ]]; then
+    echo "no free port in 8100-8999" >&2
+    exit 1
   fi
-done
-if [[ -z "${dash_port}" ]]; then
-  echo "no free port in 8100-8999" >&2
-  exit 1
+  echo "    Dashboard port: ${dash_port}"
 fi
-echo "    Dashboard port: ${dash_port}"
 
 # Issue a 1-year license token. Use GNU `date -d` (Linux) with a BSD `date -v`
 # fallback for macOS dev environments.
