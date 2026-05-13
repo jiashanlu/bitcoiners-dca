@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Pre-commit gate: gitleaks on staged files.
+#
+# Catches accidental `STRIPE_SECRET_KEY=sk_live_...` / SSH-key paste / API-key
+# constant before it ever reaches a remote. Runs only on the diff being
+# committed, so it stays fast (~150ms typical).
+#
+# Activate once per clone:
+#   git config core.hooksPath .githooks
+#
+# Bypass (last resort only) with `git commit --no-verify`.
+
+set -euo pipefail
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "[pre-commit] gitleaks not installed — skipping secret scan."
+  echo "             install: brew install gitleaks  or  https://github.com/gitleaks/gitleaks"
+  exit 0
+fi
+
+# --staged scans only the index, which is exactly what's about to land.
+if ! gitleaks protect --staged --no-banner --redact --verbose; then
+  echo
+  echo "[pre-commit] gitleaks found a secret in your staged changes."
+  echo "             Fix it (move to env/secret store, redact, etc.) and retry."
+  echo "             If this is a known false positive, add a rule to .gitleaks.toml"
+  echo "             rather than --no-verify."
+  exit 1
+fi

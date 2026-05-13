@@ -1,0 +1,18 @@
+# gitleaks config — allowlist for known-safe fixtures.
+#
+# Bias: noisy is fine for CI gating; we triage manually and add narrow rules
+# here when we hit a real false positive. The default ruleset is intentionally
+# permissive — don't loosen it without surfacing the alternative to Ben.
+
+title = "bitcoiners-dca"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Files that are allowed to contain secret-looking strings."
+paths = [
+  '''(.*?)tests/.*\.py$''',          # unit-test fixtures (asserted values, not real secrets)
+  '''(.*?)tests/.*\.json$''',
+  '''docs/.*\.md$''',                # docs with redacted/example placeholders
+]

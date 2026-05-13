@@ -1,0 +1,61 @@
+name: Security pipeline
+
+# Runs the three-layer security check on every PR and every push to main:
+#   1. Secret detection (gitleaks) — fails build on any secret in the diff
+#   2. SAST (semgrep) — Python + JS rules, reports high-severity findings
+#   3. Dependency CVE scan (trivy) — Python deps, fails on HIGH+ CVE
+#
+# Mirrored on bitcoiners-app. See bitcoiners-launch-plan.md for the pipeline
+# design rationale.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  gitleaks:
+    runs-on: dockers-lxc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends curl ca-certificates >/dev/null
+          curl -sL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz | tar -xz -C /usr/local/bin gitleaks
+      - name: Scan repo for secrets
+        run: gitleaks detect --source . --no-banner --redact --verbose
+
+  semgrep:
+    runs-on: dockers-lxc
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install semgrep
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends python3-pip >/dev/null
+          pip3 install --quiet --break-system-packages semgrep
+      - name: Semgrep SAST (Python)
+        run: |
+          semgrep --config p/python --config p/security-audit --config p/owasp-top-ten \
+            --severity ERROR --error --quiet --metrics off .
+
+  trivy-fs:
+    runs-on: dockers-lxc
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install trivy
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends curl ca-certificates wget >/dev/null
+          wget -qO- https://aquasecurity.github.io/trivy-repo/deb/public.key | apt-key add - >/dev/null
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb generic main" > /etc/apt/sources.list.d/trivy.list
+          apt-get update -qq
+          apt-get install -y --no-install-recommends trivy >/dev/null
+      - name: Scan Python dependencies for CVEs
+        run: |
+          trivy fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1 \
+            --skip-dirs node_modules --skip-dirs .venv --skip-dirs tests/fixtures .
