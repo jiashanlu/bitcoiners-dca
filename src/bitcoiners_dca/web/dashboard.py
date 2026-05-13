@@ -610,6 +610,46 @@ def create_app(
             "risk.max_daily_aed": _parse_risk_cap(form.get("max_daily_aed")),
             "risk.max_single_buy_aed": _parse_risk_cap(form.get("max_single_buy_aed")),
         }
+
+        # Server-side sanity on amount_aed. Catches the trap that bit a real
+        # customer (15,000 AED/cycle hourly = 360k AED/day intent). Two
+        # guardrails:
+        #   1. Hard ceiling: refuse > 100,000 AED per cycle, period. Anyone
+        #      who genuinely DCAs 100k+ per cycle is in private banking, not
+        #      this UX.
+        #   2. Soft ceiling: 5,000 AED/cycle requires explicit
+        #      max_single_buy_aed to be set. Without it the user is one
+        #      misclick away from sweeping a balance.
+        max_single_cap = _parse_risk_cap(form.get("max_single_buy_aed"))
+        if amount_aed > Decimal("100000"):
+            flash = {"kind": "err",
+                     "message": f"Per-cycle amount {amount_aed} AED exceeds the 100,000 AED hard ceiling. Lower the budget or stretch the cadence. Saving refused."}
+            return HTMLResponse(jinja.get_template("strategy.html").render(_ctx(
+                request, active="strategy", flash=flash,
+            )))
+        if amount_aed > Decimal("5000") and not max_single_cap:
+            flash = {"kind": "err",
+                     "message": (
+                         f"Per-cycle amount is {amount_aed} AED. Set a "
+                         "Max single-buy cap (AED) below to confirm this is "
+                         "intended — otherwise saving is refused. The cap "
+                         "stops a typo or misclick from sweeping your wallet."
+                     )}
+            return HTMLResponse(jinja.get_template("strategy.html").render(_ctx(
+                request, active="strategy", flash=flash,
+            )))
+        # Auto-suggest a max_daily_aed if it's not set. Heuristic: 2x daily
+        # spend at the configured cadence. User can override later.
+        if not _parse_risk_cap(form.get("max_daily_aed")):
+            cycles_per_day = {
+                "hourly": Decimal(24) / Decimal(every_n_hours),
+                "daily": Decimal(1),
+                "weekly": Decimal("0.143"),  # 1/7
+                "monthly": Decimal("0.033"),  # 1/30
+            }.get(frequency, Decimal(1))
+            suggested_daily = (amount_aed * cycles_per_day * Decimal(2)).quantize(Decimal("1"))
+            patch["risk.max_daily_aed"] = str(suggested_daily)
+
         flash = _apply_patch(state["config_path"], patch, _refresh_config)
         return HTMLResponse(jinja.get_template("strategy.html").render(_ctx(
             request, active="strategy", flash=flash,

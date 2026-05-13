@@ -12,7 +12,21 @@ from decimal import Decimal
 from typing import Optional
 
 import ccxt.async_support as ccxt_async
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+
+
+# Errors that are safe to retry without risking a duplicate order. An
+# order-placement method that succeeded server-side but raised
+# client-side (transient parse/connection hiccup) MUST NOT be retried
+# — re-entering the function would place a second real order. So we
+# whitelist only network-level errors that fire BEFORE the request hits
+# the exchange.
+_SAFE_RETRY_EXCEPTIONS = (
+    ccxt_async.NetworkError,
+    ccxt_async.RequestTimeout,
+    ccxt_async.DDoSProtection,
+    ccxt_async.RateLimitExceeded,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +125,12 @@ class OKXExchange(Exchange):
                 ))
         return out
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(min=1, max=8),
+        retry=retry_if_exception_type(_SAFE_RETRY_EXCEPTIONS),
+        reraise=True,
+    )
     async def place_market_buy(self, pair: str, quote_amount: Decimal) -> Order:
         if self.dry_run:
             # Simulate the buy at current price
@@ -164,7 +183,12 @@ class OKXExchange(Exchange):
         except Exception as e:
             raise ExchangeError(f"OKX market buy failed: {e}") from e
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(min=1, max=8),
+        retry=retry_if_exception_type(_SAFE_RETRY_EXCEPTIONS),
+        reraise=True,
+    )
     async def place_limit_buy(
         self,
         pair: str,
