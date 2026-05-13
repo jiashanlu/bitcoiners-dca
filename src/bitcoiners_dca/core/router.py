@@ -195,17 +195,26 @@ class SmartRouter:
                 pairs_to_try.append(f"{target_asset}/{inter}")     # hop 2
         pairs_to_try = list(dict.fromkeys(pairs_to_try))  # de-dup, preserve order
 
+        # Also fetch balances for every intermediate (USDT, etc.) — we
+        # use those to enumerate "intermediate-direct" routes that skip
+        # the AED leg when the user already holds the intermediate. This
+        # is how `Use USDT first` works: a 224-USDT idle balance on OKX
+        # lets the bot route BTC/USDT directly instead of AED→USDT→BTC.
+        ccys_to_balance = [quote_ccy] + [
+            i for i in self.intermediates if i != quote_ccy and i != target_asset
+        ]
+
         async def for_one(ex: Exchange) -> _ExchangeMarketData:
             ticker_tasks = [ex.get_ticker(p) for p in pairs_to_try]
             fee_task = ex.get_fee_schedule(pairs_to_try[0])
-            quote_balance_task = ex.get_balance(quote_ccy)
+            balance_tasks = [ex.get_balance(c) for c in ccys_to_balance]
             results = await asyncio.gather(
-                *ticker_tasks, fee_task, quote_balance_task,
+                *ticker_tasks, fee_task, *balance_tasks,
                 return_exceptions=True,
             )
             tickers_raw = results[:len(pairs_to_try)]
             fees_raw = results[len(pairs_to_try)]
-            quote_bal_raw = results[-1]
+            balances_raw = results[len(pairs_to_try) + 1:]
 
             tickers: dict[str, Ticker] = {}
             for p, t in zip(pairs_to_try, tickers_raw):
@@ -217,10 +226,9 @@ class SmartRouter:
                 taker = fees_raw.taker_pct
 
             balances: dict[str, Decimal] = {}
-            if not isinstance(quote_bal_raw, Exception):
-                balances[quote_ccy] = (
-                    quote_bal_raw.free if quote_bal_raw else Decimal(0)
-                )
+            for c, b in zip(ccys_to_balance, balances_raw):
+                if not isinstance(b, Exception):
+                    balances[c] = b.free if b else Decimal(0)
             return _ExchangeMarketData(
                 exchange=ex, tickers=tickers, taker_pct=taker, balances=balances,
             )
@@ -276,6 +284,35 @@ class SmartRouter:
                             md.tickers[leg2].spread_pct,
                         )
                         executable.append(self._score(route, sample_amount, max_spread))
+
+                    # Intermediate-direct: if we already hold this
+                    # intermediate (e.g. USDT sitting idle on OKX), we can
+                    # skip leg-1 entirely and just BTC/USDT. The
+                    # quote_balance is reported in the intermediate's
+                    # units; balance-clamp in strategy.execute handles the
+                    # conversion. Only emit when the intermediate balance
+                    # is non-trivial — sub-1 unit is noise.
+                    inter_balance = md.balances.get(inter, Decimal(0))
+                    direct_pair_via_inter = f"{target_asset}/{inter}"
+                    if (
+                        inter_balance > Decimal("1")
+                        and direct_pair_via_inter in md.tickers
+                    ):
+                        hop = TradeHop(
+                            md.exchange.name,
+                            direct_pair_via_inter,
+                            "buy",
+                            md.tickers[direct_pair_via_inter].ask,
+                            md.taker_pct,
+                        )
+                        route = TradeRoute(
+                            hops=(hop,),
+                            quote_balance=inter_balance,
+                        )
+                        executable.append(self._score(
+                            route, sample_amount,
+                            md.tickers[direct_pair_via_inter].spread_pct,
+                        ))
 
         # Cross-exchange routes (alerts only)
         if self.enable_cross_exchange_alerts:
