@@ -113,8 +113,27 @@ class _OriginCSRFMiddleware(BaseHTTPMiddleware):
     """
     SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
 
+    @staticmethod
+    def _host_of(url_like: str) -> str:
+        """Return just the hostname (no scheme, no port) from a URL-ish string."""
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(url_like)
+            return (parsed.hostname or "").lower()
+        except Exception:
+            return ""
+
     async def dispatch(self, request: Request, call_next):
         if request.method in self.SAFE_METHODS:
+            return await call_next(request)
+
+        # Trust requests that came through bitcoiners-app's proxy. The proxy
+        # is server-side; only it can set this header. The proxy already
+        # enforces a valid Auth.js session before forwarding, which is the
+        # primary CSRF defense — a cross-site attacker can't initiate a
+        # POST that the proxy then "blesses" because they don't have the
+        # auth cookie for app.bitcoiners.ae.
+        if request.headers.get("cf-access-authenticated-user-email"):
             return await call_next(request)
 
         origin = request.headers.get("origin")
@@ -125,26 +144,27 @@ class _OriginCSRFMiddleware(BaseHTTPMiddleware):
         # those requests as coming from the proxy host, not the upstream.
         # We accept the proxy's forwarded values.
         fwd_host = request.headers.get("x-forwarded-host")
-        fwd_proto = request.headers.get("x-forwarded-proto", scheme)
-        expected_origins = set()
-        if fwd_host:
-            expected_origins.add(f"{fwd_proto}://{fwd_host}")
-        if host:
-            expected_origins.add(f"{scheme}://{host}")
+
+        # Compare by hostname (case-insensitive, ignore port + scheme) so
+        # a proxy that omits the port or differs on http/https doesn't
+        # spuriously 403. The cookie-bound CSRF semantics still hold:
+        # same registered domain, same browser-origin.
+        allowed_hosts = {self._host_of(f"//{host}") for host in {host, fwd_host} if host}
+        allowed_hosts.discard("")
 
         if origin:
-            if origin not in expected_origins:
+            if self._host_of(origin) not in allowed_hosts:
                 return JSONResponse(
                     {"error": "csrf",
-                     "detail": f"origin {origin!r} not in {expected_origins}"},
+                     "detail": f"origin host {self._host_of(origin)!r} not in {allowed_hosts}"},
                     status_code=403,
                 )
             return await call_next(request)
         if referer:
-            if not any(referer.startswith(o + "/") or referer == o for o in expected_origins):
+            if self._host_of(referer) not in allowed_hosts:
                 return JSONResponse(
                     {"error": "csrf",
-                     "detail": f"referer {referer!r} not under {expected_origins}"},
+                     "detail": f"referer host {self._host_of(referer)!r} not in {allowed_hosts}"},
                     status_code=403,
                 )
             return await call_next(request)
