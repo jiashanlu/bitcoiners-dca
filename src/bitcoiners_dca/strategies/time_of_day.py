@@ -21,7 +21,9 @@ Preferred hours are configured directly (default: 9-18 Asia/Dubai).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import timezone as _tz
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from bitcoiners_dca.strategies.base import (
     OverlayContext, OverlayResult, StrategyOverlay,
@@ -35,9 +37,22 @@ class TimeOfDayOverlay(StrategyOverlay):
     preferred_hours: list[int] = field(default_factory=lambda: list(range(9, 19)))
     spread_scale_min: Decimal = Decimal("0.5")   # min multiplier when spread is huge
     spread_scale_max: Decimal = Decimal("1.5")
+    # Hours in `preferred_hours` are interpreted in this timezone (defaults
+    # to Asia/Dubai since this product is UAE-first). Before this field
+    # existed the overlay compared UTC hours, which silently skipped
+    # 4 hours/day of legitimate buys for Dubai-time users.
+    timezone: str = "Asia/Dubai"
 
     def apply(self, ctx: OverlayContext) -> OverlayResult:
-        hour = ctx.now.hour
+        now = ctx.now
+        try:
+            if now.tzinfo is None:
+                now = now.replace(tzinfo=_tz.utc)
+            now = now.astimezone(ZoneInfo(self.timezone))
+        except Exception:
+            # Bad timezone string → fall back to whatever ctx.now is.
+            pass
+        hour = now.hour
         if self.mode == "skip_if_not_best":
             if hour not in self.preferred_hours:
                 return OverlayResult(

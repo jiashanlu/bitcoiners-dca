@@ -241,6 +241,9 @@ def _build_overlays(cfg: AppConfig) -> list:
             preferred_hours=cfg.overlays.time_of_day.preferred_hours,
             spread_scale_min=cfg.overlays.time_of_day.spread_scale_min,
             spread_scale_max=cfg.overlays.time_of_day.spread_scale_max,
+            # Honour the strategy's scheduling timezone so "preferred hours"
+            # are interpreted in the user's local time, not UTC.
+            timezone=cfg.strategy.timezone or "Asia/Dubai",
         ))
     if cfg.overlays.drawdown_aware.enabled:
         out.append(DrawdownOverlay(

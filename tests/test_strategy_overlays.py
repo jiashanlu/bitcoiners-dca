@@ -96,7 +96,7 @@ def test_volatility_no_op_when_data_missing():
 # === TimeOfDayOverlay ===
 
 def test_time_of_day_skip_outside_preferred():
-    ovl = TimeOfDayOverlay(mode="skip_if_not_best", preferred_hours=list(range(9, 19)))
+    ovl = TimeOfDayOverlay(mode="skip_if_not_best", preferred_hours=list(range(9, 19)), timezone="UTC")
     # 3 AM Dubai → outside window
     ctx = _ctx(now=datetime(2026, 5, 12, 3, 0, tzinfo=timezone.utc))
     r = ovl.apply(ctx)
@@ -105,14 +105,14 @@ def test_time_of_day_skip_outside_preferred():
 
 
 def test_time_of_day_allows_preferred_hour():
-    ovl = TimeOfDayOverlay(mode="skip_if_not_best", preferred_hours=[9, 10, 11])
+    ovl = TimeOfDayOverlay(mode="skip_if_not_best", preferred_hours=[9, 10, 11], timezone="UTC")
     ctx = _ctx(now=datetime(2026, 5, 12, 10, 0, tzinfo=timezone.utc))
     r = ovl.apply(ctx)
     assert r.skip is False
 
 
 def test_time_of_day_scale_by_spread():
-    ovl = TimeOfDayOverlay(mode="scale_by_spread")
+    ovl = TimeOfDayOverlay(mode="scale_by_spread", timezone="UTC")
     history = {h: Decimal("0.05") for h in range(24)}
     history[10] = Decimal("0.025")   # hour 10 has half the avg spread
     ctx = _ctx(

@@ -562,6 +562,8 @@ def create_app(
     async def trades_page(request: Request, page: int = Query(1, ge=1)):
         per_page = 50
         db = _db()
+        cfg = _config()
+        user_tz = cfg.strategy.timezone or "Asia/Dubai"
         total = db._conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
         rows = db._conn.execute(
             """SELECT timestamp, exchange, pair, side, amount_quote,
@@ -569,6 +571,70 @@ def create_app(
                FROM trades ORDER BY timestamp DESC LIMIT ? OFFSET ?""",
             (per_page, (page - 1) * per_page),
         ).fetchall()
+
+        # Decorate rows: localized timestamp + grouped route label for
+        # multi-hop cycles. Two trades < 5 seconds apart on the same
+        # exchange are treated as legs of the same cycle. We reconstruct
+        # the route by chaining their pairs (e.g. AED→USDT→BTC).
+        from datetime import datetime, timezone as _tz
+        from zoneinfo import ZoneInfo
+        try:
+            tz = ZoneInfo(user_tz)
+        except Exception:
+            tz = ZoneInfo("Asia/Dubai")
+
+        # Sort ascending so route grouping reads naturally, then we'll
+        # reverse at the end for display.
+        sorted_asc = sorted(
+            [dict(r) for r in rows], key=lambda r: r["timestamp"]
+        )
+        decorated: list[dict] = []
+        cur_group: list[dict] = []
+
+        def _parse(ts: str) -> datetime:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=_tz.utc)
+            return dt
+
+        def _close_group(group: list[dict]):
+            if not group:
+                return
+            pair_legs = [g["pair"] for g in group]
+            # Render route as A→B→C from "X/Y" pairs (X is bought, Y is
+            # spent). Read each pair as "buy-X-with-Y" then chain.
+            currencies: list[str] = []
+            for p in pair_legs:
+                base, quote = (p.split("/") + [""])[:2]
+                if not currencies:
+                    currencies.append(quote)
+                currencies.append(base)
+            route = " → ".join(currencies) if len(currencies) > 1 else None
+            for g in group:
+                g["route"] = route if len(group) > 1 else None
+                g["is_leg"] = len(group) > 1
+            decorated.extend(group)
+
+        for r in sorted_asc:
+            dt = _parse(r["timestamp"])
+            r["local_ts"] = dt.astimezone(tz).strftime("%Y-%m-%d %H:%M")
+            r["ts_dt"] = dt
+            if (
+                cur_group
+                and r["exchange"] == cur_group[-1]["exchange"]
+                and (dt - cur_group[-1]["ts_dt"]).total_seconds() <= 10
+            ):
+                cur_group.append(r)
+            else:
+                _close_group(cur_group)
+                cur_group = [r]
+        _close_group(cur_group)
+        # Strip the helper datetime; not JSON-serialisable in some Jinja
+        # filters and not needed by the template.
+        for r in decorated:
+            r.pop("ts_dt", None)
+        decorated.reverse()
+
         last_page = max(1, (total + per_page - 1) // per_page)
         # Surface a flash if we landed here from /controls/buy-now
         flash = None
@@ -579,7 +645,7 @@ def create_app(
                      "message": f"Buy-now failed: {request.query_params['error']}"}
         return HTMLResponse(jinja.get_template("trades.html").render(_ctx(
             request, active="trades", flash=flash,
-            trades=rows, total=total, page=page,
+            trades=decorated, total=total, page=page, user_tz=user_tz,
             last_page=last_page, prev_page=max(1, page - 1),
             next_page=min(last_page, page + 1),
         )))
