@@ -54,6 +54,95 @@ from bitcoiners_dca.web.jinja_env import make_jinja
 
 logger = logging.getLogger(__name__)
 
+# Pro API base URL — matches the router's resolution. When set AND the
+# user has a Pro license key, /backtest tries the hosted /api/pro/backtest
+# endpoint first and falls back to the local engine on any failure.
+_DASHBOARD_PRO_API_URL = os.environ.get("BITCOINERS_DCA_PRO_API_URL", "").rstrip("/")
+_DASHBOARD_PRO_API_TIMEOUT = float(
+    os.environ.get("BITCOINERS_DCA_PRO_API_TIMEOUT", "10")
+)
+
+
+async def _remote_backtest(license_token, cfg, points):
+    """Call /api/pro/backtest. Returns a BacktestResult or None on
+    any failure — caller falls back to local logic."""
+    from bitcoiners_dca.core.backtest import BacktestCycle, BacktestResult
+
+    if not _DASHBOARD_PRO_API_URL or not license_token:
+        return None
+    try:
+        import httpx
+    except ImportError:
+        return None
+
+    body = {
+        "amount_aed": float(cfg.base_amount_aed),
+        "frequency": cfg.frequency,
+        "day_of_week": cfg.day_of_week,
+        "taker_fee_pct": float(cfg.taker_fee_pct),
+        "dip_overlay_enabled": cfg.dip_overlay_enabled,
+        "dip_threshold_pct": float(cfg.dip_threshold_pct),
+        "dip_lookback_days": cfg.dip_lookback_days,
+        "dip_multiplier": float(cfg.dip_multiplier),
+        "points": [
+            {"day": p.day.isoformat(), "price": float(p.price)} for p in points
+        ],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=_DASHBOARD_PRO_API_TIMEOUT) as client:
+            resp = await client.post(
+                f"{_DASHBOARD_PRO_API_URL}/api/pro/backtest",
+                headers={"Authorization": f"Bearer {license_token}"},
+                json=body,
+            )
+    except httpx.HTTPError as e:
+        logger.warning("[pro-api] /api/pro/backtest call failed: %s", e)
+        return None
+
+    if resp.status_code != 200:
+        logger.warning(
+            "[pro-api] /api/pro/backtest HTTP %s — using local engine",
+            resp.status_code,
+        )
+        return None
+
+    try:
+        data = resp.json()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[pro-api] /api/pro/backtest non-JSON: %s", e)
+        return None
+
+    if data.get("stub"):
+        logger.info(
+            "[pro-api] /api/pro/backtest stub:true (%s) — using local engine",
+            data.get("rationale", "no rationale"),
+        )
+        return None
+
+    # Translate JSON cycles back into BacktestCycle/Result. Decimals on the
+    # way out keep the template's existing %.0f / %.4f formatting happy.
+    from datetime import date as _date
+    try:
+        cycles = [
+            BacktestCycle(
+                day=_date.fromisoformat(c["day"]),
+                price_aed=Decimal(str(c["price_aed"])),
+                aed_spent=Decimal(str(c["aed_spent"])),
+                btc_bought=Decimal(str(c["btc_bought"])),
+                overlay_applied=bool(c.get("overlay_applied", False)),
+            )
+            for c in data.get("cycles", [])
+        ]
+        return BacktestResult(
+            config=cfg,
+            cycles=cycles,
+            start_day=_date.fromisoformat(data["start_day"]) if data.get("start_day") else None,
+            end_day=_date.fromisoformat(data["end_day"]) if data.get("end_day") else None,
+        )
+    except (KeyError, ValueError, TypeError) as e:
+        logger.warning("[pro-api] malformed /api/pro/backtest response: %s", e)
+        return None
+
 
 CF_USER_HEADER = "Cf-Access-Authenticated-User-Email"
 
@@ -1143,7 +1232,11 @@ def create_app(
                 error=str(e),
             )))
 
-        result = run_backtest(cfg, points)
+        # Try the hosted Pro API first if configured + the user has a Pro
+        # license. Any failure (network, 4xx/5xx, stub:true) falls back
+        # silently to the local engine — same pattern as router.pick().
+        remote_result = await _remote_backtest(_license().key, cfg, points)
+        result = remote_result if remote_result is not None else run_backtest(cfg, points)
         baseline = naive_baseline(cfg, points) if form["dip_overlay"] else None
         # Show last 30 cycles in the recent table; full history available
         # via the CLI's --show-cycles flag.
