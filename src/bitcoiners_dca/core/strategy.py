@@ -271,13 +271,18 @@ class DCAStrategy:
         # can't fund the intended buy). Passes the license token through
         # so the router can try the hosted Pro API first when configured
         # (see workspace/bitcoiners-pro-api-plan.md). License is optional;
-        # Free-tier or self-host setups pass None and stay on local logic.
+        # Free-tier, self-host, and test fixtures that don't have a
+        # `.license` section pass None and stay on local logic.
+        # Double getattr because StrategyConfig (used in unit tests) has
+        # no `.license` attribute at all — direct access raises.
+        _lic_section = getattr(self.config, "license", None)
+        license_token = getattr(_lic_section, "key", None)
         try:
             decision = await self.router.pick(
                 exchanges,
                 self.config.pair,
                 required_quote_amount=amount,
-                license_token=getattr(self.config.license, "key", None),
+                license_token=license_token,
             )
             result.routing_decision = decision
             result.notes.append(decision.reason)
