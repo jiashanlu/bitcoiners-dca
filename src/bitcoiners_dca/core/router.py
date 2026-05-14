@@ -166,6 +166,8 @@ class SmartRouter:
                     self.preferred_exchange,
                     self.preferred_bonus_pct,
                     self.exclude_if_spread_pct_above,
+                    self.enable_two_hop,
+                    self.intermediates,
                 )
                 if remote is not None:
                     return remote
@@ -483,35 +485,54 @@ def _market_data_to_payload(
     market_data: list["_ExchangeMarketData"],
     target_asset: str,
     quote_ccy: str,
+    intermediates: list[str],
 ) -> list[dict]:
     """Serialize per-exchange market data for the Pro API.
 
-    Only the direct pair (e.g. BTC/AED) is sent — multi-hop ranking
-    remains bot-local for now. Balances for the quote currency are
-    included so the server can apply the balance filter; balances for
-    other assets are omitted because they're not used by direct ranking.
+    Includes the direct pair (BTC/AED) plus, for each intermediate,
+    the two pairs needed to synthesize a two-hop route. Balances are
+    sent for the quote currency AND each intermediate, which lets the
+    server emit the "intermediate-direct" (already-held USDT) shortcut.
     """
-    payload: list[dict] = []
     direct_pair = f"{target_asset}/{quote_ccy}"
-    for md in market_data:
-        ticker = md.tickers.get(direct_pair)
-        if ticker is None or ticker.ask <= 0:
+    wanted_pairs = {direct_pair}
+    for inter in intermediates:
+        if inter == quote_ccy or inter == target_asset:
             continue
-        item = {
-            "exchange": md.exchange.name,
-            "tickers": {
-                direct_pair: {
-                    "ask": float(ticker.ask),
-                    "bid": float(ticker.bid),
-                    "spread_pct": float(ticker.spread_pct),
-                }
-            },
-            "taker_pct": float(md.taker_pct),
-            "balances": {
-                quote_ccy: float(md.balances.get(quote_ccy, Decimal(0))),
-            },
+        wanted_pairs.add(f"{inter}/{quote_ccy}")
+        wanted_pairs.add(f"{target_asset}/{inter}")
+
+    payload: list[dict] = []
+    for md in market_data:
+        # Skip exchanges that don't carry the direct pair AND can't
+        # serve any two-hop path either.
+        tickers_out: dict[str, dict] = {}
+        for p in wanted_pairs:
+            t = md.tickers.get(p)
+            if t is None or t.ask <= 0:
+                continue
+            tickers_out[p] = {
+                "ask": float(t.ask),
+                "bid": float(t.bid),
+                "spread_pct": float(t.spread_pct),
+            }
+        if not tickers_out:
+            continue
+
+        balances_out = {
+            quote_ccy: float(md.balances.get(quote_ccy, Decimal(0))),
         }
-        payload.append(item)
+        for inter in intermediates:
+            if inter in (quote_ccy, target_asset):
+                continue
+            balances_out[inter] = float(md.balances.get(inter, Decimal(0)))
+
+        payload.append({
+            "exchange": md.exchange.name,
+            "tickers": tickers_out,
+            "taker_pct": float(md.taker_pct),
+            "balances": balances_out,
+        })
     return payload
 
 
@@ -585,6 +606,8 @@ async def _remote_pick(
     preferred_exchange: Optional[str],
     preferred_bonus_pct: Decimal,
     exclude_if_spread_pct_above: Decimal,
+    enable_two_hop: bool,
+    intermediates: list[str],
 ) -> Optional[RoutingDecision]:
     """Call /api/pro/route on the hosted Pro API with full market data.
 
@@ -601,10 +624,10 @@ async def _remote_pick(
         return None
 
     target_asset, quote_ccy = pair.split("/")
-    market_payload = _market_data_to_payload(market_data, target_asset, quote_ccy)
+    market_payload = _market_data_to_payload(
+        market_data, target_asset, quote_ccy, intermediates,
+    )
     if not market_payload:
-        # No usable tickers — let local logic try (it may have multi-hop
-        # routes via USDT that didn't get serialized).
         return None
 
     body = {
@@ -616,6 +639,8 @@ async def _remote_pick(
         "preferred_exchange": preferred_exchange,
         "preferred_bonus_pct": float(preferred_bonus_pct),
         "exclude_if_spread_pct_above": float(exclude_if_spread_pct_above),
+        "enable_two_hop": enable_two_hop,
+        "intermediates": intermediates,
     }
     try:
         async with httpx.AsyncClient(timeout=_PRO_API_TIMEOUT_SECONDS) as client:
