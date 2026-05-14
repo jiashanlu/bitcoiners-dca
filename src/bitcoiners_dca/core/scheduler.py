@@ -351,7 +351,7 @@ class DCAScheduler:
         if not self.funding_monitor:
             return
         try:
-            readings = await self.funding_monitor.poll()
+            readings = await self._funding_readings()
             for r in readings:
                 msg = self.funding_monitor.evaluate_alert(r)
                 if msg:
@@ -359,6 +359,48 @@ class DCAScheduler:
                     await self.notifier.notify_error("Funding-rate alert", msg)
         except Exception as e:
             logger.warning("Funding monitor poll failed: %s", e)
+
+    async def _funding_readings(self):
+        """Try the hosted Pro API first (one central poll across all
+        tenants). Fall back to a direct OKX poll on any failure — the
+        bot's local monitor was the original source of truth and
+        remains the canonical fallback. Returns a list of
+        FundingReading."""
+        from decimal import Decimal
+        from datetime import datetime
+        from bitcoiners_dca.core.funding_monitor import FundingReading
+        from bitcoiners_dca.core.pro_api_client import remote_funding_readings
+
+        license_token = getattr(
+            getattr(self.config, "license", None), "key", None,
+        )
+        # Match the bot's configured instrument list — call the server for
+        # each. The server currently only supports BTC-USDT-SWAP, so other
+        # instruments naturally fall back to local. Cheap, no contention.
+        out = []
+        for inst in self.funding_monitor.instruments:
+            ex = inst["exchange"].lower()
+            sym = inst["symbol"]
+            remote = await remote_funding_readings(
+                license_token, exchange=ex, instrument=sym, hours=1,
+            )
+            if remote and remote[0]:
+                top = remote[0]
+                out.append(FundingReading(
+                    instrument=top["instrument"],
+                    exchange=top["exchange"],
+                    rate_per_period=Decimal(str(top["rate_per_period"])),
+                    annualized_pct=Decimal(str(top["annualized_pct"])),
+                    settles_at=datetime.fromisoformat(top["settles_at"].replace("Z", "+00:00")),
+                ))
+                continue
+            # Fall back to local poll for this instrument.
+            local = await self.funding_monitor.poll()
+            for r in local:
+                if r.instrument == sym and r.exchange == ex:
+                    out.append(r)
+                    break
+        return out
 
     async def _run_health_check(self) -> None:
         """Verify each exchange is reachable + authenticated.
