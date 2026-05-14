@@ -902,6 +902,7 @@ def create_app(
             decision = await router.pick(
                 _exchanges(), pair="BTC/AED",
                 required_quote_amount=amount,
+                license_token=getattr(getattr(cfg, "license", None), "key", None),
             )
             # Audit shows only routes that start from AED. Intermediate-
             # direct routes (e.g. BTC/USDT when there's idle USDT) are an
