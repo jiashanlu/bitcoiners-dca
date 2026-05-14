@@ -145,6 +145,15 @@ class SmartRouter:
         required_quote_amount: Optional[Decimal] = None,
         license_token: Optional[str] = None,
     ) -> RoutingDecision:
+        target_asset, quote_ccy = pair.split("/")
+
+        # Always gather market data first — both the remote and local paths
+        # need it. Keeping the gather here (not inside _remote_pick) means
+        # the local fallback is free if the remote call fails.
+        market_data = await self._gather_market_data(
+            exchanges, target_asset, quote_ccy
+        )
+
         # If the hosted Pro API is configured AND the caller passed a
         # license token, try the remote pick first. Any failure (network,
         # 4xx/5xx, or `stub:true` response) returns None and we fall
@@ -153,7 +162,10 @@ class SmartRouter:
         if _PRO_API_URL and license_token:
             try:
                 remote = await _remote_pick(
-                    license_token, required_quote_amount, exchanges
+                    license_token, pair, required_quote_amount, market_data,
+                    self.preferred_exchange,
+                    self.preferred_bonus_pct,
+                    self.exclude_if_spread_pct_above,
                 )
                 if remote is not None:
                     return remote
@@ -162,12 +174,6 @@ class SmartRouter:
                 logger.warning(
                     "[pro-api] remote pick raised, falling back to local: %s", e
                 )
-
-        target_asset, quote_ccy = pair.split("/")
-
-        market_data = await self._gather_market_data(
-            exchanges, target_asset, quote_ccy
-        )
 
         executable, cross_alerts = self._enumerate_routes(
             market_data, target_asset, quote_ccy, required_quote_amount
@@ -473,21 +479,118 @@ class SmartRouter:
         return usable
 
 
+def _market_data_to_payload(
+    market_data: list["_ExchangeMarketData"],
+    target_asset: str,
+    quote_ccy: str,
+) -> list[dict]:
+    """Serialize per-exchange market data for the Pro API.
+
+    Only the direct pair (e.g. BTC/AED) is sent — multi-hop ranking
+    remains bot-local for now. Balances for the quote currency are
+    included so the server can apply the balance filter; balances for
+    other assets are omitted because they're not used by direct ranking.
+    """
+    payload: list[dict] = []
+    direct_pair = f"{target_asset}/{quote_ccy}"
+    for md in market_data:
+        ticker = md.tickers.get(direct_pair)
+        if ticker is None or ticker.ask <= 0:
+            continue
+        item = {
+            "exchange": md.exchange.name,
+            "tickers": {
+                direct_pair: {
+                    "ask": float(ticker.ask),
+                    "bid": float(ticker.bid),
+                    "spread_pct": float(ticker.spread_pct),
+                }
+            },
+            "taker_pct": float(md.taker_pct),
+            "balances": {
+                quote_ccy: float(md.balances.get(quote_ccy, Decimal(0))),
+            },
+        }
+        payload.append(item)
+    return payload
+
+
+def _decode_remote_decision(
+    data: dict,
+    pair: str,
+) -> Optional[RoutingDecision]:
+    """Translate the /api/pro/route JSON response into a RoutingDecision.
+
+    The server's response shape (non-stub) is:
+        { chosen: {label, exchange, hops:[{exchange,pair,side,price,taker_pct}],
+                   effective_price, max_spread_pct, quote_balance, note?},
+          alternatives: [...same shape...],
+          reason: string,
+          stub: false }
+
+    Returns None if the shape is malformed — caller falls back to local.
+    """
+
+    def _to_candidate(c: dict) -> RouteCandidate:
+        hops_raw = c.get("hops") or []
+        if not hops_raw:
+            raise ValueError("candidate has no hops")
+        hops = tuple(
+            TradeHop(
+                exchange=h["exchange"],
+                pair=h["pair"],
+                side=h["side"],
+                price=Decimal(str(h["price"])),
+                taker_pct=Decimal(str(h["taker_pct"])),
+            )
+            for h in hops_raw
+        )
+        qb = c.get("quote_balance")
+        route = TradeRoute(
+            hops=hops,
+            quote_balance=Decimal(str(qb)) if qb is not None else None,
+            cross_exchange=False,
+        )
+        return RouteCandidate(
+            route=route,
+            effective_price=Decimal(str(c["effective_price"])),
+            score=Decimal(str(c["effective_price"])),
+            max_spread_pct=Decimal(str(c.get("max_spread_pct", 0))),
+            quote_balance=Decimal(str(qb)) if qb is not None else None,
+            note=c.get("note", ""),
+        )
+
+    try:
+        chosen = _to_candidate(data["chosen"])
+        alternatives = [_to_candidate(c) for c in data.get("alternatives", [])]
+    except (KeyError, TypeError, ValueError) as e:
+        logger.warning(
+            "[pro-api] malformed /api/pro/route response, falling back: %s", e
+        )
+        return None
+
+    return RoutingDecision(
+        chosen=chosen,
+        alternatives=alternatives,
+        cross_exchange_alerts=[],   # Phase 2 follow-up
+        reason=data.get("reason", "Remote pick"),
+    )
+
+
 async def _remote_pick(
     license_token: str,
-    aed_amount: Optional[Decimal],
-    exchanges: list[Exchange],
+    pair: str,
+    required_quote_amount: Optional[Decimal],
+    market_data: list["_ExchangeMarketData"],
+    preferred_exchange: Optional[str],
+    preferred_bonus_pct: Decimal,
+    exclude_if_spread_pct_above: Decimal,
 ) -> Optional[RoutingDecision]:
-    """Call /api/pro/route on the hosted Pro API.
+    """Call /api/pro/route on the hosted Pro API with full market data.
 
     Returns a `RoutingDecision` if the remote returns an authoritative
     result. Returns None if the remote is unreachable, returns an error,
-    returns `stub:true`, or returns a shape we can't yet translate. The
-    caller falls back to local logic on None.
-
-    Decoupled from `SmartRouter.pick` so that adding new server-side
-    Pro endpoints later (funding, arbitrage, etc.) can share the same
-    HTTP plumbing without bloating the router class.
+    or returns `stub:true`. The caller falls back to local logic on None.
     """
     if not _PRO_API_URL:
         return None
@@ -497,11 +600,22 @@ async def _remote_pick(
         logger.warning("[pro-api] httpx not available, skipping remote pick")
         return None
 
-    available = [ex.name for ex in exchanges if getattr(ex, "name", None)]
+    target_asset, quote_ccy = pair.split("/")
+    market_payload = _market_data_to_payload(market_data, target_asset, quote_ccy)
+    if not market_payload:
+        # No usable tickers — let local logic try (it may have multi-hop
+        # routes via USDT that didn't get serialized).
+        return None
+
     body = {
-        "aed_amount": str(aed_amount) if aed_amount is not None else "0",
-        "available_exchanges": available,
-        "prefer_maker": True,
+        "pair": pair,
+        "required_quote_amount": (
+            str(required_quote_amount) if required_quote_amount is not None else None
+        ),
+        "market_data": market_payload,
+        "preferred_exchange": preferred_exchange,
+        "preferred_bonus_pct": float(preferred_bonus_pct),
+        "exclude_if_spread_pct_above": float(exclude_if_spread_pct_above),
     }
     try:
         async with httpx.AsyncClient(timeout=_PRO_API_TIMEOUT_SECONDS) as client:
@@ -536,19 +650,18 @@ async def _remote_pick(
 
     if data.get("stub"):
         logger.info(
-            "[pro-api] /api/pro/route returned stub:true (Phase 2 vertical "
-            "slice), falling back to local SmartRouter for this cycle"
+            "[pro-api] /api/pro/route returned stub:true — falling back to "
+            "local SmartRouter for this cycle (%s)",
+            data.get("rationale", "no rationale"),
         )
         return None
 
-    # TODO: when the server stops returning stub:true, translate `data` into
-    # a `RoutingDecision` here. Will involve building `RouteCandidate`s from
-    # the JSON shape — see workspace/bitcoiners-pro-api-plan.md for the
-    # response contract. For now we only know the auth + transport works,
-    # which is the vertical slice goal.
-    logger.warning(
-        "[pro-api] /api/pro/route returned non-stub response but the bot "
-        "doesn't yet know how to translate it — falling back to local. "
-        "Update _remote_pick() to deserialize the new schema."
+    decision = _decode_remote_decision(data, pair)
+    if decision is None:
+        return None
+    logger.info(
+        "[pro-api] remote pick: %s @ %s",
+        decision.chosen.label,
+        decision.chosen.effective_price,
     )
-    return None
+    return decision
