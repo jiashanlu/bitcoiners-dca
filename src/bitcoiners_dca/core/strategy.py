@@ -268,10 +268,16 @@ class DCAStrategy:
         result.intended_amount_aed = amount
 
         # 2. Route to best exchange — balance-aware (skips exchanges that
-        # can't fund the intended buy).
+        # can't fund the intended buy). Passes the license token through
+        # so the router can try the hosted Pro API first when configured
+        # (see workspace/bitcoiners-pro-api-plan.md). License is optional;
+        # Free-tier or self-host setups pass None and stay on local logic.
         try:
             decision = await self.router.pick(
-                exchanges, self.config.pair, required_quote_amount=amount,
+                exchanges,
+                self.config.pair,
+                required_quote_amount=amount,
+                license_token=getattr(self.config.license, "key", None),
             )
             result.routing_decision = decision
             result.notes.append(decision.reason)

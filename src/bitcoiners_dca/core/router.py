@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Optional
@@ -31,6 +32,15 @@ from bitcoiners_dca.core.routing import TradeHop, TradeRoute
 from bitcoiners_dca.exchanges.base import Exchange
 
 logger = logging.getLogger(__name__)
+
+# Pro API feature flag. When set, the router tries the hosted /api/pro/route
+# endpoint first and falls back to local logic on any failure (timeout, 4xx,
+# 5xx, or stub:true). Unset = unchanged behavior (local-only). See
+# workspace/bitcoiners-pro-api-plan.md for the migration plan.
+_PRO_API_URL = os.environ.get("BITCOINERS_DCA_PRO_API_URL", "").rstrip("/")
+_PRO_API_TIMEOUT_SECONDS = float(
+    os.environ.get("BITCOINERS_DCA_PRO_API_TIMEOUT", "5")
+)
 
 
 @dataclass
@@ -133,7 +143,26 @@ class SmartRouter:
         exchanges: list[Exchange],
         pair: str = "BTC/AED",
         required_quote_amount: Optional[Decimal] = None,
+        license_token: Optional[str] = None,
     ) -> RoutingDecision:
+        # If the hosted Pro API is configured AND the caller passed a
+        # license token, try the remote pick first. Any failure (network,
+        # 4xx/5xx, or `stub:true` response) returns None and we fall
+        # through to the local implementation below — no behavior change
+        # for Free-tier / self-hosters.
+        if _PRO_API_URL and license_token:
+            try:
+                remote = await _remote_pick(
+                    license_token, required_quote_amount, exchanges
+                )
+                if remote is not None:
+                    return remote
+            except Exception as e:  # noqa: BLE001 — defensive: never let
+                # remote failure break a cycle
+                logger.warning(
+                    "[pro-api] remote pick raised, falling back to local: %s", e
+                )
+
         target_asset, quote_ccy = pair.split("/")
 
         market_data = await self._gather_market_data(
@@ -442,3 +471,84 @@ class SmartRouter:
         else:
             usable.sort(key=lambda c: c.score)
         return usable
+
+
+async def _remote_pick(
+    license_token: str,
+    aed_amount: Optional[Decimal],
+    exchanges: list[Exchange],
+) -> Optional[RoutingDecision]:
+    """Call /api/pro/route on the hosted Pro API.
+
+    Returns a `RoutingDecision` if the remote returns an authoritative
+    result. Returns None if the remote is unreachable, returns an error,
+    returns `stub:true`, or returns a shape we can't yet translate. The
+    caller falls back to local logic on None.
+
+    Decoupled from `SmartRouter.pick` so that adding new server-side
+    Pro endpoints later (funding, arbitrage, etc.) can share the same
+    HTTP plumbing without bloating the router class.
+    """
+    if not _PRO_API_URL:
+        return None
+    try:
+        import httpx  # local import — httpx is already a dep for ccxt async
+    except ImportError:
+        logger.warning("[pro-api] httpx not available, skipping remote pick")
+        return None
+
+    available = [ex.name for ex in exchanges if getattr(ex, "name", None)]
+    body = {
+        "aed_amount": str(aed_amount) if aed_amount is not None else "0",
+        "available_exchanges": available,
+        "prefer_maker": True,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=_PRO_API_TIMEOUT_SECONDS) as client:
+            resp = await client.post(
+                f"{_PRO_API_URL}/api/pro/route",
+                headers={"Authorization": f"Bearer {license_token}"},
+                json=body,
+            )
+    except httpx.HTTPError as e:
+        logger.warning("[pro-api] /api/pro/route call failed: %s", e)
+        return None
+
+    if resp.status_code == 401:
+        logger.warning(
+            "[pro-api] license rejected by /api/pro/route — using local logic. "
+            "Check that your license key in config.yaml matches the active "
+            "subscription on bitcoiners.ae."
+        )
+        return None
+    if resp.status_code != 200:
+        logger.warning(
+            "[pro-api] /api/pro/route HTTP %s, falling back to local logic",
+            resp.status_code,
+        )
+        return None
+
+    try:
+        data = resp.json()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[pro-api] /api/pro/route returned non-JSON: %s", e)
+        return None
+
+    if data.get("stub"):
+        logger.info(
+            "[pro-api] /api/pro/route returned stub:true (Phase 2 vertical "
+            "slice), falling back to local SmartRouter for this cycle"
+        )
+        return None
+
+    # TODO: when the server stops returning stub:true, translate `data` into
+    # a `RoutingDecision` here. Will involve building `RouteCandidate`s from
+    # the JSON shape — see workspace/bitcoiners-pro-api-plan.md for the
+    # response contract. For now we only know the auth + transport works,
+    # which is the vertical slice goal.
+    logger.warning(
+        "[pro-api] /api/pro/route returned non-stub response but the bot "
+        "doesn't yet know how to translate it — falling back to local. "
+        "Update _remote_pick() to deserialize the new schema."
+    )
+    return None
