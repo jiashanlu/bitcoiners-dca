@@ -341,6 +341,31 @@ a { color: var(--accent); text-decoration: none; }
       {% include "partials/status_banner.html" %}
     </div>
 
+    {# Pro API fallback banner — shown when the most recent remote Pro
+       call fell back to local. Auto-hides after 30 min of no failures,
+       on the next successful call, or when the user dismisses. Non-
+       blocking; just informational so paying customers know they're
+       getting local logic instead of hosted Pro. #}
+    {% if pro_api and pro_api.banner_visible %}
+    <div id="pro-api-banner" class="flash warn"
+         style="display:flex; align-items:center; gap:12px; line-height:1.5">
+      <span style="flex:1">
+        <strong>Pro API unavailable.</strong> Last call to
+        <code>{{ pro_api.endpoint }}</code> fell back to local logic —
+        {{ pro_api.reason }}. Your bot is still running normally on
+        embedded routing/backtest. Status updates on next cycle.
+      </span>
+      <button type="button"
+              class="btn-secondary-sm"
+              hx-post="{{ prefix }}/htmx/pro-api-banner/dismiss"
+              hx-target="#pro-api-banner"
+              hx-swap="outerHTML"
+              style="padding:4px 10px">
+        Dismiss
+      </button>
+    </div>
+    {% endif %}
+
     {# Multi-hop orphan — funds stuck in an intermediate currency on an
        exchange because a hop failed after the previous hop settled. The
        operator needs to either complete the conversion manually (sell

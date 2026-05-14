@@ -642,6 +642,8 @@ async def _remote_pick(
         "enable_two_hop": enable_two_hop,
         "intermediates": intermediates,
     }
+    from bitcoiners_dca.core import pro_api_status  # local — avoid import cycles
+
     try:
         async with httpx.AsyncClient(timeout=_PRO_API_TIMEOUT_SECONDS) as client:
             resp = await client.post(
@@ -651,6 +653,7 @@ async def _remote_pick(
             )
     except httpx.HTTPError as e:
         logger.warning("[pro-api] /api/pro/route call failed: %s", e)
+        await pro_api_status.record_fallback("/api/pro/route", f"network error: {e}")
         return None
 
     if resp.status_code == 401:
@@ -659,11 +662,17 @@ async def _remote_pick(
             "Check that your license key in config.yaml matches the active "
             "subscription on bitcoiners.ae."
         )
+        await pro_api_status.record_fallback(
+            "/api/pro/route", "license token rejected (HTTP 401)",
+        )
         return None
     if resp.status_code != 200:
         logger.warning(
             "[pro-api] /api/pro/route HTTP %s, falling back to local logic",
             resp.status_code,
+        )
+        await pro_api_status.record_fallback(
+            "/api/pro/route", f"HTTP {resp.status_code}",
         )
         return None
 
@@ -671,6 +680,7 @@ async def _remote_pick(
         data = resp.json()
     except Exception as e:  # noqa: BLE001
         logger.warning("[pro-api] /api/pro/route returned non-JSON: %s", e)
+        await pro_api_status.record_fallback("/api/pro/route", "malformed response")
         return None
 
     if data.get("stub"):
@@ -679,14 +689,22 @@ async def _remote_pick(
             "local SmartRouter for this cycle (%s)",
             data.get("rationale", "no rationale"),
         )
+        await pro_api_status.record_fallback(
+            "/api/pro/route",
+            f"server returned stub: {data.get('rationale', 'no rationale')}",
+        )
         return None
 
     decision = _decode_remote_decision(data, pair)
     if decision is None:
+        await pro_api_status.record_fallback(
+            "/api/pro/route", "malformed response (decode failed)",
+        )
         return None
     logger.info(
         "[pro-api] remote pick: %s @ %s",
         decision.chosen.label,
         decision.chosen.effective_price,
     )
+    await pro_api_status.record_success("/api/pro/route")
     return decision

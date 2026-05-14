@@ -67,6 +67,7 @@ async def _remote_backtest(license_token, cfg, points):
     """Call /api/pro/backtest. Returns a BacktestResult or None on
     any failure — caller falls back to local logic."""
     from bitcoiners_dca.core.backtest import BacktestCycle, BacktestResult
+    from bitcoiners_dca.core import pro_api_status
 
     if not _DASHBOARD_PRO_API_URL or not license_token:
         return None
@@ -97,6 +98,7 @@ async def _remote_backtest(license_token, cfg, points):
             )
     except httpx.HTTPError as e:
         logger.warning("[pro-api] /api/pro/backtest call failed: %s", e)
+        await pro_api_status.record_fallback("/api/pro/backtest", f"network error: {e}")
         return None
 
     if resp.status_code != 200:
@@ -104,18 +106,26 @@ async def _remote_backtest(license_token, cfg, points):
             "[pro-api] /api/pro/backtest HTTP %s — using local engine",
             resp.status_code,
         )
+        await pro_api_status.record_fallback(
+            "/api/pro/backtest", f"HTTP {resp.status_code}",
+        )
         return None
 
     try:
         data = resp.json()
     except Exception as e:  # noqa: BLE001
         logger.warning("[pro-api] /api/pro/backtest non-JSON: %s", e)
+        await pro_api_status.record_fallback("/api/pro/backtest", "malformed response")
         return None
 
     if data.get("stub"):
         logger.info(
             "[pro-api] /api/pro/backtest stub:true (%s) — using local engine",
             data.get("rationale", "no rationale"),
+        )
+        await pro_api_status.record_fallback(
+            "/api/pro/backtest",
+            f"server returned stub: {data.get('rationale', 'no rationale')}",
         )
         return None
 
@@ -133,14 +143,19 @@ async def _remote_backtest(license_token, cfg, points):
             )
             for c in data.get("cycles", [])
         ]
-        return BacktestResult(
+        result = BacktestResult(
             config=cfg,
             cycles=cycles,
             start_day=_date.fromisoformat(data["start_day"]) if data.get("start_day") else None,
             end_day=_date.fromisoformat(data["end_day"]) if data.get("end_day") else None,
         )
+        await pro_api_status.record_success("/api/pro/backtest")
+        return result
     except (KeyError, ValueError, TypeError) as e:
         logger.warning("[pro-api] malformed /api/pro/backtest response: %s", e)
+        await pro_api_status.record_fallback(
+            "/api/pro/backtest", "malformed response (decode failed)",
+        )
         return None
 
 
@@ -433,6 +448,12 @@ def create_app(
         except Exception:
             orphan = None
 
+        # Pro API health — surfaces a non-blocking banner when the most
+        # recent attempt fell back to local. Cleared on next success or
+        # explicit dismiss.
+        from bitcoiners_dca.core import pro_api_status
+        pro_api = pro_api_status.snapshot()
+
         return {
             "request": request,
             "user_email": _authenticated_user(request),
@@ -442,6 +463,7 @@ def create_app(
             "bot_status": _bot_status(),
             "welcome": welcome,
             "orphan": orphan,
+            "pro_api": pro_api,
             "flash": extra.pop("flash", None),
             "active": extra.pop("active", ""),
             **extra,
@@ -619,6 +641,14 @@ def create_app(
         return HTMLResponse(jinja.get_template("partials/status_banner.html").render(
             bot_status=_bot_status(), prefix=_prefix(request),
         ))
+
+    @app.post("/htmx/pro-api-banner/dismiss", response_class=HTMLResponse)
+    async def htmx_pro_api_dismiss(request: Request):
+        """User clicked × on the Pro API fallback banner. Marks it dismissed
+        in-memory; banner stays hidden until the next real fallback."""
+        from bitcoiners_dca.core import pro_api_status
+        pro_api_status.dismiss()
+        return HTMLResponse("")  # swap with empty so banner disappears
 
     @app.get("/htmx/trades-list", response_class=HTMLResponse)
     async def htmx_trades_list(request: Request, page: int = Query(1, ge=1)):
