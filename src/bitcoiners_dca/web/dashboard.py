@@ -1360,26 +1360,29 @@ def create_app(
                 request,
                 f"/trades?error=Buy now blocked by risk caps: {'; '.join(decision.reasons)[:200]}",
             )
-        try:
-            await _buy_once(state["config_path"], dry=False)
-        except Exception as e:
-            return _redirect(request, f"/trades?error={str(e)[:200]}")
-        # _buy_once swallows cycle-internal errors and records them in
-        # cycle_log. If the most recent cycle has errors and no order,
-        # report that to the user instead of pretending success.
-        try:
-            row = _db()._conn.execute(
-                "SELECT success, errors FROM cycle_log "
-                "ORDER BY timestamp DESC LIMIT 1"
-            ).fetchone()
-            if row and not row["success"]:
-                import json as _json
-                errs = _json.loads(row["errors"] or "[]")
-                err_msg = "; ".join(errs)[:300] or "cycle returned no order"
-                return _redirect(request, f"/trades?error=Buy now did not execute: {err_msg}")
-        except Exception:
-            pass
-        return _redirect(request, "/trades?ran=1")
+        # Fire-and-forget so the browser doesn't block on the full DCA
+        # cycle (exchange auth + market data + route + order placement +
+        # notifications can take 30–300s; browsers/proxies give up at
+        # ~100s). The cycle's outcome surfaces in the status-banner poll
+        # within 20s, and any error lands in /trades?error= or audit-log.
+        import asyncio
+        cfg_path = state["config_path"]
+
+        async def _run_buy_once_and_log():
+            try:
+                await _buy_once(cfg_path, dry=False)
+            except Exception as e:
+                logger.exception("buy-now cycle failed: %s", e)
+                _db().set_meta(
+                    "buy_now.last_error",
+                    f"{datetime.now(timezone.utc).isoformat()} :: {str(e)[:200]}",
+                )
+
+        asyncio.create_task(_run_buy_once_and_log())
+        # Fire-and-forget: redirect immediately. The status-banner poll
+        # picks up the cycle outcome on its next 20-second tick, and any
+        # error is written to buy_now.last_error (visible on /trades).
+        return _redirect(request, "/trades?queued=1")
 
     # === JSON endpoints (kept for backward compat + CLI/scripting use) ===
 
