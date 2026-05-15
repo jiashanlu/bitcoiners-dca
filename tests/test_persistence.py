@@ -248,3 +248,54 @@ def test_uae_tax_csv_export(tmp_db, tmp_path):
     assert "500" in contents
     assert "300" in contents
     assert "Total AED spent" in contents
+
+
+def test_uae_tax_csv_multi_hop_summary_math(tmp_db, tmp_path):
+    """Regression: previously the CSV's "Total AED spent" summed every
+    `amount_quote` regardless of pair, which double-counted multi-hop
+    cycles (1000 AED→USDT→BTC contributed both the 1000 AED row AND the
+    270 USDT row). Same for "Total BTC acquired" — it summed amount_base
+    on USDT/AED rows as if they were BTC. Pair-filter math (added in
+    D4-fix) is what the test pins.
+    """
+    from bitcoiners_dca.persistence.reports import export_uae_tax_csv
+
+    # Direct BTC/AED buy: 500 AED → 0.0014 BTC, 0.75 AED fee.
+    tmp_db.record_trade(_make_order(order_id="d-1"))
+
+    # Multi-hop leg 1: 1000 AED → 270 USDT, 2 AED fee. Counts toward
+    # "Total AED spent" + fees, but NOT toward "Total BTC acquired".
+    tmp_db.record_trade(Order(
+        exchange="binance", order_id="mh-1", pair="USDT/AED",
+        side=OrderSide.BUY, type=OrderType.MARKET,
+        amount_quote=Decimal("1000"), amount_base=Decimal("270"),
+        price_filled_avg=Decimal("3.7037"), fee_quote=Decimal("2"),
+        status=OrderStatus.FILLED,
+        created_at=datetime.now(timezone.utc),
+        filled_at=datetime.now(timezone.utc),
+    ))
+
+    # Multi-hop leg 2: 270 USDT → 0.0026 BTC. Counts toward "Total BTC
+    # acquired", but NOT toward "Total AED spent" (its amount_quote is
+    # in USDT, not AED). Fee is USDT — must not enter AED fee total.
+    tmp_db.record_trade(Order(
+        exchange="binance", order_id="mh-2", pair="BTC/USDT",
+        side=OrderSide.BUY, type=OrderType.MARKET,
+        amount_quote=Decimal("270"), amount_base=Decimal("0.0026"),
+        price_filled_avg=Decimal("103846.15"), fee_quote=Decimal("0.27"),
+        status=OrderStatus.FILLED,
+        created_at=datetime.now(timezone.utc),
+        filled_at=datetime.now(timezone.utc),
+    ))
+
+    out_path = export_uae_tax_csv(tmp_db, str(tmp_path), year=None)
+    contents = Path(out_path).read_text()
+
+    # Total AED spent = 500 (direct) + 1000 (USDT/AED leg) = 1500.
+    # Wrong (old) math would yield 500 + 1000 + 270 = 1770.
+    assert "Total AED spent (buys),1500.00" in contents
+    # Total BTC acquired = 0.0014 (direct) + 0.0026 (mh-2) = 0.0040.
+    # Wrong (old) math would yield 0.0014 + 270 + 0.0026 ≈ 270.0040.
+    assert "Total BTC acquired,0.00400000" in contents
+    # Total AED fees = 0.75 (direct) + 2 (USDT/AED). USDT fee 0.27 excluded.
+    assert "Total fees (AED),2.75" in contents

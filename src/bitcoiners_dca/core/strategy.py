@@ -553,7 +553,22 @@ class DCAStrategy:
             # "below minimum precision" error — that's how we lost cycles
             # before the OKX fill-poll fix.
             from bitcoiners_dca.core.models import OrderStatus as _OS
-            if order.status != _OS.FILLED or not order.amount_base or order.amount_base <= 0:
+            is_final_hop = (i == len(route.hops) - 1)
+            partial_with_btc = (
+                order.status == _OS.PARTIAL
+                and order.amount_base
+                and order.amount_base > 0
+            )
+            # A PARTIAL on the FINAL hop is acceptable — we keep the
+            # filled portion as the cycle's order. Threading to a next
+            # hop with a partial amount isn't safe (intermediate hop
+            # would compute base from a fraction of the expected input),
+            # so reject PARTIAL on hops < final.
+            if (
+                (order.status != _OS.FILLED and not (is_final_hop and partial_with_btc))
+                or not order.amount_base
+                or order.amount_base <= 0
+            ):
                 if i > 0:
                     # Hops 1..N-1 settled into the intermediate currency on
                     # this exchange; record it explicitly so the orphan
@@ -609,6 +624,17 @@ class DCAStrategy:
         if final.status == OrderStatus.FILLED:
             return final
 
+        # Snapshot the partial-fill state BEFORE the cancel call. Some
+        # exchange adapters return a brand-new Order on cancel, but stubs
+        # in tests (and a future adapter that gets clever) might mutate
+        # `final` in-place — turning a PARTIAL into a CANCELLED and
+        # losing the "we already bought some BTC" signal we need below.
+        was_partial = (
+            final.status == OrderStatus.PARTIAL
+            and final.amount_base
+            and final.amount_base > 0
+        )
+
         # Not fully filled — cancel any remaining unfilled portion to free
         # the locked quote. If `final` was PARTIAL, some quote was already
         # spent on the filled portion and that fill stays on the book; only
@@ -623,7 +649,7 @@ class DCAStrategy:
         # cycle catches up naturally. Don't top-up via market_buy even in
         # maker_fallback mode — that would put two orders behind one hop,
         # which the rest of the route execution doesn't model.
-        if final.status == OrderStatus.PARTIAL and final.amount_base and final.amount_base > 0:
+        if was_partial:
             return final
 
         if mode == "maker_only":
