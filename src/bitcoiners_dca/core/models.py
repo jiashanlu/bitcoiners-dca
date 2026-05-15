@@ -5,7 +5,7 @@ Every exchange adapter normalizes its responses to these types. Strategy,
 router, arbitrage, and reporting all consume these — never raw exchange JSON.
 """
 from __future__ import annotations
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
 from typing import Optional
@@ -33,7 +33,7 @@ class Ticker(BaseModel):
         return cls(
             exchange=exchange, pair=pair, bid=bid, ask=ask,
             last=last or mid, mid=mid, spread_pct=spread_pct,
-            timestamp=ts or datetime.utcnow(),
+            timestamp=ts or datetime.now(timezone.utc),
         )
 
 

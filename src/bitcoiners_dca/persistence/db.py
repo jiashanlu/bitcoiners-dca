@@ -13,7 +13,7 @@ Tables:
 from __future__ import annotations
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Optional, Any
@@ -200,7 +200,7 @@ class Database:
         self._conn.execute(
             """INSERT INTO meta (key, value, updated_at) VALUES (?, ?, ?)
                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at""",
-            (key, value, datetime.utcnow().isoformat()),
+            (key, value, datetime.now(timezone.utc).isoformat()),
         )
         self._conn.commit()
 

@@ -184,7 +184,7 @@ class OKXExchange(Exchange):
             fake_base = quote_amount / ticker.ask
             return Order(
                 exchange=self.name,
-                order_id=f"dry-{datetime.utcnow().isoformat()}",
+                order_id=f"dry-{datetime.now(timezone.utc).isoformat()}",
                 pair=pair,
                 side=OrderSide.BUY,
                 type=OrderType.MARKET,
@@ -193,8 +193,8 @@ class OKXExchange(Exchange):
                 price_filled_avg=ticker.ask,
                 fee_quote=quote_amount * Decimal("0.0015"),
                 status=OrderStatus.FILLED,
-                created_at=datetime.utcnow(),
-                filled_at=datetime.utcnow(),
+                created_at=datetime.now(timezone.utc),
+                filled_at=datetime.now(timezone.utc),
             )
 
         # OKX market-buy: pass `quoteOrderQty` for AED-based market buys.
@@ -236,7 +236,7 @@ class OKXExchange(Exchange):
             # Dry-run simulates the happy path: limit fills at the limit price.
             # We mark status FILLED so wait_for_fill returns immediately rather
             # than making a real get_order call against a non-existent order id.
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             base = quote_amount / limit_price
             return Order(
                 exchange=self.name,
@@ -275,7 +275,7 @@ class OKXExchange(Exchange):
         if self.dry_run:
             # Dry-run cancel just flips status
             o = await self.get_order(pair, order_id) if order_id.startswith("dry") else None
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             return o or Order(
                 exchange=self.name, order_id=order_id, pair=pair,
                 side=OrderSide.BUY, type=OrderType.LIMIT,
@@ -325,13 +325,13 @@ class OKXExchange(Exchange):
         if self.dry_run:
             return Withdrawal(
                 exchange=self.name,
-                withdrawal_id=f"dry-w-{datetime.utcnow().isoformat()}",
+                withdrawal_id=f"dry-w-{datetime.now(timezone.utc).isoformat()}",
                 asset="BTC",
                 amount=amount_btc,
                 address=address,
                 fee=Decimal("0") if normalized_network == "lightning" else Decimal("0.0002"),
                 status=WithdrawalStatus.PENDING,
-                created_at=datetime.utcnow(),
+                created_at=datetime.now(timezone.utc),
             )
         try:
             params = {"chain": chain}
@@ -349,7 +349,7 @@ class OKXExchange(Exchange):
                 address=address,
                 fee=_to_decimal(raw.get("fee", {}).get("cost", "0.0002") if isinstance(raw.get("fee"), dict) else raw.get("fee", "0.0002")),
                 status=WithdrawalStatus.PENDING,
-                created_at=datetime.utcnow(),
+                created_at=datetime.now(timezone.utc),
                 txid=raw.get("txid"),
             )
         except ccxt_async.PermissionDenied as e:
@@ -419,7 +419,7 @@ class OKXExchange(Exchange):
                     fee=_to_decimal(w.get("fee", {}).get("cost") if isinstance(w.get("fee"), dict) else w.get("fee", 0)),
                     status=status_map.get(w.get("status", "pending"), WithdrawalStatus.PENDING),
                     txid=w.get("txid"),
-                    created_at=datetime.fromtimestamp(w.get("timestamp", 0) / 1000),
+                    created_at=datetime.fromtimestamp(w.get("timestamp", 0) / 1000, tz=timezone.utc),
                 )
         raise ExchangeError(f"OKX withdrawal {withdrawal_id} not found")
 
@@ -443,8 +443,8 @@ class OKXExchange(Exchange):
             price_filled_avg=_to_decimal(raw.get("average") or raw.get("price")),
             fee_quote=_to_decimal(raw.get("fee", {}).get("cost") if isinstance(raw.get("fee"), dict) else 0),
             status=status_map.get(raw.get("status", "open"), OrderStatus.PENDING),
-            created_at=datetime.fromtimestamp(raw.get("timestamp", 0) / 1000) if raw.get("timestamp") else datetime.utcnow(),
-            filled_at=datetime.utcnow() if raw.get("status") == "closed" else None,
+            created_at=datetime.fromtimestamp(raw.get("timestamp", 0) / 1000, tz=timezone.utc) if raw.get("timestamp") else datetime.now(timezone.utc),
+            filled_at=datetime.now(timezone.utc) if raw.get("status") == "closed" else None,
         )
 
     def _normalize_trade_as_order(self, trade: dict, pair: str) -> Order:
@@ -459,8 +459,8 @@ class OKXExchange(Exchange):
             price_filled_avg=_to_decimal(trade.get("price")),
             fee_quote=_to_decimal(trade.get("fee", {}).get("cost") if isinstance(trade.get("fee"), dict) else 0),
             status=OrderStatus.FILLED,
-            created_at=datetime.fromtimestamp(trade.get("timestamp", 0) / 1000),
-            filled_at=datetime.fromtimestamp(trade.get("timestamp", 0) / 1000),
+            created_at=datetime.fromtimestamp(trade.get("timestamp", 0) / 1000, tz=timezone.utc),
+            filled_at=datetime.fromtimestamp(trade.get("timestamp", 0) / 1000, tz=timezone.utc),
         )
 
     async def close(self) -> None:

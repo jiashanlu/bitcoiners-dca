@@ -13,7 +13,7 @@ The estimated net profit accounts for:
 """
 from __future__ import annotations
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -90,7 +90,7 @@ class ArbitrageMonitor:
                     expensive_bid=exp_t.bid,
                     spread_pct=gross_spread_pct,
                     net_profit_pct_after_fees=net_pct,
-                    timestamp=datetime.utcnow(),
+                    timestamp=datetime.now(timezone.utc),
                 ))
 
         opportunities.sort(key=lambda o: -o.net_profit_pct_after_fees)

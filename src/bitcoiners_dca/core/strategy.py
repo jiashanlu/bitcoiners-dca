@@ -8,7 +8,7 @@ and the SmartRouter decides which one to use for each buy.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 
@@ -195,7 +195,7 @@ class DCAStrategy:
         from bitcoiners_dca.strategies import OverlayContext
 
         result = ExecutionResult(
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             intended_amount_aed=self.config.base_amount_aed,
             overlay_applied=None,
             routing_decision=None,
@@ -233,7 +233,7 @@ class DCAStrategy:
                 current_price = min(current_quotes, key=lambda t: t.ask).ask
             extra = market_context or {}
             ctx = OverlayContext(
-                now=datetime.utcnow(),
+                now=datetime.now(timezone.utc),
                 base_amount_aed=self.config.base_amount_aed,
                 current_price_aed=current_price,
                 price_7d_ago_aed=historical_price_7d_ago,
@@ -564,11 +564,22 @@ class DCAStrategy:
         if final.status == OrderStatus.FILLED:
             return final
 
-        # Not filled — cancel to free the funds
+        # Not fully filled — cancel any remaining unfilled portion to free
+        # the locked quote. If `final` was PARTIAL, some quote was already
+        # spent on the filled portion and that fill stays on the book; only
+        # the unfilled remainder cancels.
         try:
             await ex.cancel_order(hop.pair, placed.order_id)
         except Exception:
             pass
+
+        # Partial fill: keep what we got — discarding it would be a worse
+        # outcome (lost trade history, miscounted cost basis). The next
+        # cycle catches up naturally. Don't top-up via market_buy even in
+        # maker_fallback mode — that would put two orders behind one hop,
+        # which the rest of the route execution doesn't model.
+        if final.status == OrderStatus.PARTIAL and final.amount_base and final.amount_base > 0:
+            return final
 
         if mode == "maker_only":
             return None  # caller treats as skip

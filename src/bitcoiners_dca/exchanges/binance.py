@@ -139,18 +139,26 @@ class BinanceExchange(Exchange):
         if self.dry_run:
             ticker = await self.get_ticker(pair)
             return Order(
-                exchange=self.name, order_id=f"dry-{datetime.utcnow().isoformat()}",
+                exchange=self.name, order_id=f"dry-{datetime.now(timezone.utc).isoformat()}",
                 pair=pair, side=OrderSide.BUY, type=OrderType.MARKET,
                 amount_quote=quote_amount, amount_base=quote_amount / ticker.ask,
                 price_filled_avg=ticker.ask, fee_quote=quote_amount * Decimal("0.001"),
-                status=OrderStatus.FILLED, created_at=datetime.utcnow(), filled_at=datetime.utcnow(),
+                status=OrderStatus.FILLED, created_at=datetime.now(timezone.utc), filled_at=datetime.now(timezone.utc),
             )
-        # Binance uses quoteOrderQty for AED-amount market buys
+        # Binance market-buy: tell ccxt explicitly that we're spending
+        # `quote_amount` of the quote currency (USDT/AED), not buying that
+        # many units of the base. The previous code passed `amount=
+        # quote_amount` AND `params={"quoteOrderQty": ...}` which was
+        # ambiguous — depending on ccxt version, `amount` could be treated
+        # as base-amount and the order would buy wildly more (or less) than
+        # intended. `create_market_buy_order_with_cost` is ccxt's documented
+        # entry point for "spend this much quote" and forwards
+        # quoteOrderQty under the hood.
         try:
-            raw = await self._client.create_market_buy_order(
-                symbol=pair, amount=float(quote_amount),
+            raw = await self._client.create_market_buy_order_with_cost(
+                symbol=pair,
+                cost=float(quote_amount),
                 params={
-                    "quoteOrderQty": float(quote_amount),
                     # Tag for cancel_all_open_orders selectivity.
                     "newClientOrderId": make_bot_client_order_id(),
                 },
@@ -168,7 +176,7 @@ class BinanceExchange(Exchange):
     async def place_limit_buy(self, pair: str, quote_amount: Decimal, limit_price: Decimal) -> Order:
         if self.dry_run:
             # Dry-run simulates happy path: limit fills at the limit price.
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             return Order(
                 exchange=self.name, order_id=f"dry-limit-{now.isoformat()}",
                 pair=pair, side=OrderSide.BUY, type=OrderType.LIMIT,
@@ -191,7 +199,7 @@ class BinanceExchange(Exchange):
 
     async def cancel_order(self, pair: str, order_id: str) -> Order:
         if self.dry_run:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             return Order(
                 exchange=self.name, order_id=order_id, pair=pair,
                 side=OrderSide.BUY, type=OrderType.LIMIT,
@@ -226,9 +234,9 @@ class BinanceExchange(Exchange):
 
         if self.dry_run:
             return Withdrawal(
-                exchange=self.name, withdrawal_id=f"dry-w-{datetime.utcnow().isoformat()}",
+                exchange=self.name, withdrawal_id=f"dry-w-{datetime.now(timezone.utc).isoformat()}",
                 asset="BTC", amount=amount_btc, address=address, fee=Decimal("0.0002"),
-                status=WithdrawalStatus.PENDING, created_at=datetime.utcnow(),
+                status=WithdrawalStatus.PENDING, created_at=datetime.now(timezone.utc),
             )
         try:
             params = {"network": "BTC" if network == "bitcoin" else network}
@@ -239,7 +247,7 @@ class BinanceExchange(Exchange):
                 exchange=self.name, withdrawal_id=str(raw.get("id") or ""),
                 asset="BTC", amount=amount_btc, address=address,
                 fee=Decimal("0.0002"),
-                status=WithdrawalStatus.PENDING, created_at=datetime.utcnow(),
+                status=WithdrawalStatus.PENDING, created_at=datetime.now(timezone.utc),
                 txid=raw.get("txid"),
             )
         except ccxt_async.PermissionDenied as e:
@@ -263,7 +271,7 @@ class BinanceExchange(Exchange):
                     fee=Decimal("0.0002"),
                     status=status_map.get(w.get("status"), WithdrawalStatus.PENDING),
                     txid=w.get("txid"),
-                    created_at=datetime.fromtimestamp(w.get("timestamp", 0) / 1000),
+                    created_at=datetime.fromtimestamp(w.get("timestamp", 0) / 1000, tz=timezone.utc),
                 )
         raise ExchangeError(f"Binance withdrawal {withdrawal_id} not found")
 
@@ -279,8 +287,8 @@ class BinanceExchange(Exchange):
             price_filled_avg=_to_decimal(raw.get("average") or raw.get("price")),
             fee_quote=_to_decimal(raw.get("fee", {}).get("cost") if isinstance(raw.get("fee"), dict) else 0),
             status=status_map.get(raw.get("status", "open"), OrderStatus.PENDING),
-            created_at=datetime.fromtimestamp(raw.get("timestamp", 0) / 1000) if raw.get("timestamp") else datetime.utcnow(),
-            filled_at=datetime.utcnow() if raw.get("status") == "closed" else None,
+            created_at=datetime.fromtimestamp(raw.get("timestamp", 0) / 1000, tz=timezone.utc) if raw.get("timestamp") else datetime.now(timezone.utc),
+            filled_at=datetime.now(timezone.utc) if raw.get("status") == "closed" else None,
         )
 
     def _normalize_trade_as_order(self, trade: dict, pair: str) -> Order:
@@ -292,8 +300,8 @@ class BinanceExchange(Exchange):
             price_filled_avg=_to_decimal(trade.get("price")),
             fee_quote=_to_decimal(trade.get("fee", {}).get("cost") if isinstance(trade.get("fee"), dict) else 0),
             status=OrderStatus.FILLED,
-            created_at=datetime.fromtimestamp(trade.get("timestamp", 0) / 1000),
-            filled_at=datetime.fromtimestamp(trade.get("timestamp", 0) / 1000),
+            created_at=datetime.fromtimestamp(trade.get("timestamp", 0) / 1000, tz=timezone.utc),
+            filled_at=datetime.fromtimestamp(trade.get("timestamp", 0) / 1000, tz=timezone.utc),
         )
 
     async def close(self) -> None:
