@@ -2,21 +2,25 @@ name: Build & ship bitcoiners-dca image
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     tags: ["v*"]
 
-# Builds bitcoiners-dca:latest on dockers-LXC, then ships the tarball
-# to tenants-LXC via SSH and `docker load`s it. Future tenant container
-# `up -d --force-recreate` calls then pick up the new image.
+# Builds bitcoiners-dca:latest + bitcoiners-provisioner:latest on
+# dockers-LXC, then ships the tarballs to ONE host based on branch:
 #
-# This replaces the "hot-patch via docker cp" dance that caused the W4
-# claims-vs-reality drift (source said one thing, live container ran
-# something else).
+#   main → 178.105.66.56  (Hetzner CCX13, prod, runs benbois + paying tenants)
+#   dev  → 192.168.4.160  (home tenants-LXC, dev, runs replicated test tenants)
 #
-# Idempotent: re-running this job rebuilds and ships a new latest tag.
-# Existing tenants keep their currently-running containers until someone
-# explicitly recreates them (so a CI run doesn't ungracefully restart
-# customers).
+# Both hosts accept the same DEPLOY_SSH_KEY (jiashan-ai keypair). The job
+# container materializes that key as a tempfile, scp's the image tarball,
+# `docker load`s it, then recreates the provisioner so new tenant
+# provisioning picks up the latest image. Existing tenant containers stay
+# on their currently-running image — a CI run never restarts customer
+# bots; the operator (or resume flow) does that explicitly.
+#
+# Bug history: #143 — originally referenced /root/.ssh/jiashan_ai_ed25519
+# which doesn't exist in ephemeral act_runner containers. Fixed by
+# materializing the key from the DEPLOY_SSH_KEY secret on each run.
 
 jobs:
   build-and-ship:
@@ -41,40 +45,59 @@ jobs:
             -t bitcoiners-provisioner:git-${GITEA_SHA:0:7} .
 
       - name: Write deploy SSH key
-        # Stored as a Gitea Actions secret on this repo. Materialize as a
-        # tempfile inside the job container so scp/ssh can read it. The
-        # historical workflow referenced /root/.ssh/jiashan_ai_ed25519 which
-        # doesn't exist inside ephemeral act_runner job containers and the
-        # ship step silently failed — bug #143, fixed 2026-05-13.
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
         run: |
           mkdir -p /root/.ssh
           printf '%s' "$DEPLOY_SSH_KEY" > /root/.ssh/deploy_key
           chmod 600 /root/.ssh/deploy_key
-          ssh-keyscan -H 192.168.4.160 >> /root/.ssh/known_hosts 2>/dev/null || true
 
-      - name: Save images + ship to tenants-LXC
-        # Save → scp tarball → docker load on tenants-LXC. The repo design
-        # doc says "stay on LXC, only puller is tenants-LXC next door" so
-        # there's no remote registry to push to.
+      - name: Resolve target host from branch
+        # GITHUB_REF on Gitea is `refs/heads/<branch>` for branch pushes and
+        # `refs/tags/<tag>` for tag pushes. We treat tags as prod (Hetzner)
+        # because we only cut versioned tags off main.
+        id: target
         run: |
+          case "$GITHUB_REF" in
+            refs/heads/main|refs/tags/v*)
+              echo "host=178.105.66.56" >> $GITHUB_OUTPUT
+              echo "env=prod" >> $GITHUB_OUTPUT
+              ;;
+            refs/heads/dev)
+              echo "host=192.168.4.160" >> $GITHUB_OUTPUT
+              echo "env=dev" >> $GITHUB_OUTPUT
+              ;;
+            *)
+              echo "Unsupported ref $GITHUB_REF — refusing to deploy" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Save images + ship to target host
+        env:
+          TARGET_HOST: ${{ steps.target.outputs.host }}
+          TARGET_ENV:  ${{ steps.target.outputs.env }}
+        run: |
+          echo "Shipping to $TARGET_ENV ($TARGET_HOST)"
+          ssh-keyscan -H "$TARGET_HOST" >> /root/.ssh/known_hosts 2>/dev/null || true
           mkdir -p /tmp/dca-build && cd /tmp/dca-build
           docker save bitcoiners-dca:latest -o dca.tar
           docker save bitcoiners-provisioner:latest -o provisioner.tar
+          # Compress on the wire — Hetzner is across the public internet
+          # and Hetzner-bound 600MB uncompressed every CI run is wasteful.
+          gzip -1 dca.tar provisioner.tar
           scp -o StrictHostKeyChecking=no \
             -i /root/.ssh/deploy_key \
-            dca.tar provisioner.tar root@192.168.4.160:/tmp/
+            dca.tar.gz provisioner.tar.gz root@${TARGET_HOST}:/tmp/
           ssh -o StrictHostKeyChecking=no \
             -i /root/.ssh/deploy_key \
-            root@192.168.4.160 '
-              docker load -i /tmp/dca.tar
-              docker load -i /tmp/provisioner.tar
-              rm /tmp/dca.tar /tmp/provisioner.tar
+            root@${TARGET_HOST} '
+              gunzip -c /tmp/dca.tar.gz | docker load
+              gunzip -c /tmp/provisioner.tar.gz | docker load
+              rm /tmp/dca.tar.gz /tmp/provisioner.tar.gz
               # Restart provisioner so it picks up its new image.
-              # Tenant containers stay on their currently-running image;
-              # explicit recreate is operator-initiated (or the next time
-              # the customer-state machine recreates them, e.g. resume).
+              # Tenant containers stay on their currently-running image —
+              # operator (or resume flow) recreates them explicitly.
               cd /opt/bitcoiners-dca/hosted && \
                 IMAGE_TAG=bitcoiners-provisioner:latest \
                 docker compose -f docker-compose.provisioner.yml up -d --force-recreate
