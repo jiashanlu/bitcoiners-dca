@@ -490,7 +490,7 @@ def create_app(
         welcome = False
         try:
             if cfg.dry_run:
-                cnt = _db()._conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+                cnt = _db().trade_count()
                 welcome = (cnt == 0)
         except Exception:
             welcome = False
@@ -668,20 +668,10 @@ def create_app(
             usdt_inventory_aed_hint = total_aed - cost_basis_aed
         # Pull 24 rows so multi-hop cycles (2 rows each) still surface
         # ~10 distinct cycles after merging.
-        rows = db._conn.execute(
-            """SELECT timestamp, exchange, pair, side, amount_quote,
-                      amount_base, price_avg, status, order_id
-               FROM trades
-               WHERE side='buy' AND status='filled'
-               ORDER BY timestamp DESC LIMIT 24"""
-        ).fetchall()
+        rows = db.recent_filled_buys(limit=24)
         recent = _decorate_trades(rows, user_tz)[:12]
-        arb_count = db._conn.execute(
-            "SELECT COUNT(*) FROM arbitrage_log WHERE alerted=1"
-        ).fetchone()[0]
-        cycle_count = db._conn.execute(
-            "SELECT COUNT(*) FROM cycle_log"
-        ).fetchone()[0]
+        arb_count = db.alerted_arbitrage_count()
+        cycle_count = db.cycle_count()
         return {
             "total_btc": total_btc,
             "total_aed": total_aed,
@@ -733,7 +723,7 @@ def create_app(
         db = _db()
         cfg = _config()
         user_tz = cfg.strategy.timezone or "Asia/Dubai"
-        total = db._conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+        total = db.trade_count()
         rows = db._conn.execute(
             """SELECT timestamp, exchange, pair, side, amount_quote,
                       amount_base, price_avg, status, order_id
@@ -1052,7 +1042,7 @@ def create_app(
         db = _db()
         cfg = _config()
         user_tz = cfg.strategy.timezone or "Asia/Dubai"
-        total = db._conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+        total = db.trade_count()
         rows = db._conn.execute(
             """SELECT timestamp, exchange, pair, side, amount_quote,
                       amount_base, price_avg, status, order_id
@@ -1549,9 +1539,7 @@ def create_app(
             "btc_cost_basis_aed": str(cost_basis_aed),
             "average_cost_per_btc":
                 str(cost_basis_aed / total_btc) if total_btc > 0 else "0",
-            "trades_count": db._conn.execute(
-                "SELECT COUNT(*) FROM trades"
-            ).fetchone()[0],
+            "trades_count": db.trade_count(),
         }
 
     @app.get("/api/balances")

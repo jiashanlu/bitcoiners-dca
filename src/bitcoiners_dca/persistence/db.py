@@ -350,5 +350,38 @@ class Database:
 
         return direct_aed + via_usdt_aed
 
+    # ─── Read helpers used by the dashboard ─────────────────────────────
+    #
+    # Centralised so dashboard.py doesn't reach into `db._conn.execute(...)`
+    # for ad-hoc queries. Any schema rename now breaks compilation here
+    # instead of failing silently at request time.
+
+    def recent_filled_buys(self, limit: int = 24) -> list[sqlite3.Row]:
+        """Most recent N filled BUY trades (descending by timestamp).
+        Includes both BTC-receiving legs and intermediate USDT/AED legs;
+        callers that need only one or the other should filter."""
+        return self._conn.execute(
+            """SELECT timestamp, exchange, pair, side, amount_quote,
+                      amount_base, price_avg, status, order_id
+               FROM trades
+               WHERE side='buy' AND status='filled'
+               ORDER BY timestamp DESC LIMIT ?""",
+            (int(limit),),
+        ).fetchall()
+
+    def alerted_arbitrage_count(self) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM arbitrage_log WHERE alerted=1"
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    def cycle_count(self) -> int:
+        row = self._conn.execute("SELECT COUNT(*) FROM cycle_log").fetchone()
+        return int(row[0]) if row else 0
+
+    def trade_count(self) -> int:
+        row = self._conn.execute("SELECT COUNT(*) FROM trades").fetchone()
+        return int(row[0]) if row else 0
+
     def close(self) -> None:
         self._conn.close()
