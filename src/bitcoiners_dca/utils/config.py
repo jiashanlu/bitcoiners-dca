@@ -171,7 +171,10 @@ class MakerConfig(BaseModel):
         inside the spread, lower fill probability, lowest cost
     """
     limit_at: Literal["bid", "midpoint", "ask_minus_bps"] = "bid"
-    spread_bps_below_market: int = 5
+    # Decimal so sub-bp precision works. 0.2 ≈ "at the touch" (very fast
+    # fill, possible taker conversion); 5 = ~5bps below ask (max maker
+    # rebate but often times out → falls back to taker anyway).
+    spread_bps_below_market: Decimal = Decimal("1")
     timeout_seconds: int = 600
 
 

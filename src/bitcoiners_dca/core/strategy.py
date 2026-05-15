@@ -107,7 +107,10 @@ class StrategyConfig:
     # Execution mode: "taker" | "maker_only" | "maker_fallback"
     execution_mode: str = "taker"
     maker_limit_at: str = "bid"               # "bid" | "midpoint" | "ask_minus_bps"
-    maker_spread_bps_below_market: int = 5
+    # Decimal so sub-bp precision works (e.g. 0.2 ≈ "at the touch"). Set
+    # 0.2–1 if you want fast fills; 5+ for max maker rebate at the cost
+    # of frequent timeouts that fall back to taker anyway.
+    maker_spread_bps_below_market: Decimal = Decimal("1")
     maker_timeout_seconds: int = 600
 
     # Hard ceiling on per-cycle balance consumption. 0.25 = never spend
