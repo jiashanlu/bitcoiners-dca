@@ -80,6 +80,103 @@ def test_trade_status_filter(tmp_db):
     assert tmp_db.total_aed_spent() == Decimal("500")  # only the filled one
 
 
+# === Cost basis ===
+
+def _hop(pair, order_id, amount_quote, amount_base):
+    """Shorthand for building a filled buy Order for an arbitrary pair."""
+    return Order(
+        exchange="okx", order_id=order_id, pair=pair,
+        side=OrderSide.BUY, type=OrderType.MARKET,
+        amount_quote=Decimal(amount_quote),
+        amount_base=Decimal(amount_base),
+        price_filled_avg=Decimal(amount_quote) / Decimal(amount_base),
+        fee_quote=Decimal("0"), status=OrderStatus.FILLED,
+        created_at=datetime.now(timezone.utc),
+        filled_at=datetime.now(timezone.utc),
+    )
+
+
+def test_cost_basis_direct_only(tmp_db):
+    """No multi-hop: cost basis == total AED spent."""
+    tmp_db.record_trade(_hop("BTC/AED", "d-1", "500", "0.0017"))
+    tmp_db.record_trade(_hop("BTC/AED", "d-2", "500", "0.0016"))
+
+    assert tmp_db.total_aed_spent() == Decimal("1000")
+    assert tmp_db.btc_cost_basis_aed() == Decimal("1000")
+
+
+def test_cost_basis_excludes_unused_usdt_inventory(tmp_db):
+    """The bug Ben hit: pre-buy a lot of USDT, only spend a fraction on BTC.
+
+    Setup:
+      - USDT/AED buy: AED 3677 → 1000 USDT (rate = 3.677 AED/USDT).
+      - BTC/USDT buy: 200 USDT → 0.0006 BTC.
+      - 800 USDT still sits idle on the exchange.
+
+    Expectation:
+      - total_aed_spent = 3677 (raw outflow — correct, but the wrong
+        denominator for avg cost).
+      - cost_basis_aed  = 200 USDT × 3.677 AED/USDT = 735.4 AED.
+      - Avg cost = 735.4 / 0.0006 = 1,225,667 AED/BTC (sane), NOT
+        3677 / 0.0006 = 6,128,333 AED/BTC (the old buggy number).
+    """
+    tmp_db.record_trade(_hop("USDT/AED", "u-1", "3677", "1000"))
+    tmp_db.record_trade(_hop("BTC/USDT", "b-1", "200", "0.0006"))
+
+    assert tmp_db.total_aed_spent() == Decimal("3677")
+    # weighted USDT/AED rate = 3677 / 1000 = 3.677 AED/USDT
+    # cost basis = 200 USDT × 3.677 = 735.4 AED
+    assert tmp_db.btc_cost_basis_aed() == Decimal("735.4")
+
+
+def test_cost_basis_mixed_direct_plus_multi_hop(tmp_db):
+    """Some BTC bought direct, some via USDT — both should attribute correctly."""
+    # Direct: AED 500 → 0.0017 BTC
+    tmp_db.record_trade(_hop("BTC/AED", "d-1", "500", "0.0017"))
+    # USDT pool: 3.7 AED/USDT
+    tmp_db.record_trade(_hop("USDT/AED", "u-1", "370", "100"))
+    # BTC via USDT: spend 50 of those USDT
+    tmp_db.record_trade(_hop("BTC/USDT", "b-1", "50", "0.00015"))
+
+    # cost basis = 500 (direct) + 50 USDT × 3.7 AED/USDT = 500 + 185 = 685
+    assert tmp_db.btc_cost_basis_aed() == Decimal("685")
+    # Total raw outflow = 500 + 370 = 870 (the higher, "all AED ever spent")
+    assert tmp_db.total_aed_spent() == Decimal("870")
+
+
+def test_cost_basis_skips_btc_usdt_when_no_usdt_aed_history(tmp_db):
+    """If bot has no audit trail for where its USDT came from (e.g. user
+    pre-funded USDT externally), don't fabricate an AED cost — just
+    exclude those BTC/USDT trades from cost basis."""
+    tmp_db.record_trade(_hop("BTC/USDT", "b-1", "100", "0.0003"))
+
+    assert tmp_db.total_aed_spent() == Decimal("0")
+    assert tmp_db.btc_cost_basis_aed() == Decimal("0")
+
+
+def test_cost_basis_attributes_pre_existing_usdt_at_weighted_rate(tmp_db):
+    """Bot spends MORE USDT on BTC than it bought via USDT/AED legs
+    (because user pre-funded USDT externally). Methodology choice:
+    attribute the excess at the bot's weighted USDT/AED rate too. Those
+    USDT cost the bot nothing IN ITS OWN ACCOUNTING, but the user paid
+    AED for them somewhere outside the bot — so treating them as free
+    produces an unrealistically low avg-cost number.
+
+    Setup:
+      - USDT/AED: 100 USDT for 370 AED (rate 3.70 AED/USDT).
+      - User had 30 USDT pre-existing in their OKX account.
+      - BTC/USDT: spent 130 USDT → 0.0004 BTC.
+
+    Expectation:
+      - cost_basis = 130 × 3.70 = 481 AED (attributes ALL USDT spent
+        on BTC at the bot's weighted rate).
+    """
+    tmp_db.record_trade(_hop("USDT/AED", "u-1", "370", "100"))
+    tmp_db.record_trade(_hop("BTC/USDT", "b-1", "130", "0.0004"))
+
+    assert tmp_db.btc_cost_basis_aed() == Decimal("481")
+
+
 # === Withdrawals ===
 
 def test_record_withdrawal_roundtrip(tmp_db):

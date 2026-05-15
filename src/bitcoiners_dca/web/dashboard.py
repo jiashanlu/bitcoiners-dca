@@ -638,7 +638,12 @@ def create_app(
         user_tz = cfg.strategy.timezone or "Asia/Dubai"
         total_btc = db.total_btc_bought()
         total_aed = db.total_aed_spent()
-        avg_price = total_aed / total_btc if total_btc > 0 else Decimal(0)
+        # Use the cost-basis number (USDT-pre-buy aware) for the average,
+        # not raw total_aed_spent. Pre-funding USDT for multi-hop cycles
+        # would otherwise inflate the denominator with USDT inventory the
+        # bot has not yet converted to BTC. See Database.btc_cost_basis_aed.
+        cost_basis_aed = db.btc_cost_basis_aed()
+        avg_price = cost_basis_aed / total_btc if total_btc > 0 else Decimal(0)
         # Pull 24 rows so multi-hop cycles (2 rows each) still surface
         # ~10 distinct cycles after merging.
         rows = db._conn.execute(
@@ -658,6 +663,7 @@ def create_app(
         return {
             "total_btc": total_btc,
             "total_aed": total_aed,
+            "cost_basis_aed": cost_basis_aed,
             "avg_price": avg_price,
             "recent": recent,
             "user_tz": user_tz,
@@ -1459,11 +1465,15 @@ def create_app(
         db = _db()
         total_btc = db.total_btc_bought()
         total_aed = db.total_aed_spent()
+        cost_basis_aed = db.btc_cost_basis_aed()
         return {
             "total_btc": str(total_btc),
             "total_aed_spent": str(total_aed),
+            # AED attributed to BTC actually delivered. Excludes unused
+            # USDT pre-buy inventory. See Database.btc_cost_basis_aed.
+            "btc_cost_basis_aed": str(cost_basis_aed),
             "average_cost_per_btc":
-                str(total_aed / total_btc) if total_btc > 0 else "0",
+                str(cost_basis_aed / total_btc) if total_btc > 0 else "0",
             "trades_count": db._conn.execute(
                 "SELECT COUNT(*) FROM trades"
             ).fetchone()[0],

@@ -1,10 +1,20 @@
 <div class="stats">
   <div class="stat"><div class="label">Total BTC</div>
     <div class="val">{{ total_btc|btc }}<span class="unit">BTC</span></div></div>
-  <div class="stat"><div class="label">Total AED spent</div>
+  <div class="stat"
+       title="Sum of every AED outflow the bot has made — direct BTC/AED buys plus USDT/AED pre-buys for multi-hop cycles. Includes USDT inventory not yet converted to BTC.">
+    <div class="label">Total AED spent</div>
     <div class="val">{{ total_aed|money(0) }}<span class="unit">AED</span></div></div>
-  <div class="stat"><div class="label">Avg cost basis</div>
-    <div class="val">{{ avg_price|money(0) }}<span class="unit">AED/BTC</span></div></div>
+  <div class="stat"
+       title="AED attributed to the BTC actually delivered: direct BTC/AED buys + (USDT spent on BTC × bot's weighted-average USDT/AED purchase rate). Excludes unused USDT inventory.">
+    <div class="label">Avg cost basis</div>
+    <div class="val">{{ avg_price|money(0) }}<span class="unit">AED/BTC</span></div>
+    {% if cost_basis_aed and total_aed and (cost_basis_aed < total_aed * 0.95) %}
+    <div style="font-size:10px;color:var(--text-muted);margin-top:4px">
+      cost basis: {{ cost_basis_aed|money(0) }} AED · {{ ((total_aed - cost_basis_aed)|round(0))|int }} AED in unused USDT
+    </div>
+    {% endif %}
+  </div>
   <div class="stat"><div class="label">Cycles</div>
     <div class="val">{{ cycle_count }}</div></div>
   <div class="stat"><div class="label">Arb alerts</div>

@@ -309,6 +309,13 @@ a { color: var(--accent); text-decoration: none; }
       <div>Signed in as</div>
       <strong>{{ user_email }}</strong>
       <div style="margin-top:6px"><span class="pill {% if license_tier == 'pro' or license_tier == 'business' %}accent{% else %}muted{% endif %}">{{ license_tier }}</span></div>
+      {# Absolute path on purpose — breaks out of the /dca/console/ proxy
+         and lands on app.bitcoiners.ae/account, where the Auth.js
+         "Sign out" button lives. Session cookie is scoped to
+         .bitcoiners.ae so the same session applies across both layers. #}
+      <div style="margin-top:10px;font-size:12px">
+        <a href="/account" style="color:var(--text-muted)">Account &amp; sign out ↗</a>
+      </div>
     </div>
   </aside>
   <main class="main">
