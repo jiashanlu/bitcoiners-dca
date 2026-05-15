@@ -59,8 +59,8 @@ services:
     # stays well under 256MB at idle but the route-audit page can spike
     # while loading multi-exchange tickers. 384MB gives headroom without
     # eating the daemon's budget.
-    mem_limit: 384m
-    memswap_limit: 384m
+    mem_limit: 512m
+    memswap_limit: 512m
     cpus: 0.5
     pids_limit: 200
     command:
