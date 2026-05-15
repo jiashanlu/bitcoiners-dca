@@ -7,15 +7,21 @@ on:
 
 jobs:
   pytest:
-    # Run on the shared dockers-LXC runner. python:3.11 image has uv-free
-    # pip + venv tooling already.
+    # Run on the shared dockers-LXC runner. The job container needs BOTH
+    # Python (for pytest) and Node.js (because actions/checkout@v4 is a
+    # JavaScript action — `docker exec node /var/run/act/.../index.js`).
+    # Plain python:3.11-slim has no node, so checkout fails immediately
+    # with `exec: "node": executable file not found` and pytest never
+    # runs. Bug #154 — confirmed via gitea action log task 581 on
+    # 2026-05-15. Switching to the nikolaik image (Apache 2.0, well-
+    # maintained) gives us a slim base with both interpreters.
     runs-on: dockers-lxc
     container:
-      image: python:3.11-slim
+      image: nikolaik/python-nodejs:python3.11-nodejs22-slim
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install OS deps (sqlite is in slim, but build-essential helps cffi)
+      - name: Install OS deps (build-essential helps cffi wheels)
         run: |
           apt-get update -qq
           apt-get install -y --no-install-recommends build-essential >/dev/null
