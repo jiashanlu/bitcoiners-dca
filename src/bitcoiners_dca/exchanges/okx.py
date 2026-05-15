@@ -144,12 +144,39 @@ class OKXExchange(Exchange):
                 ))
         return out
 
+    # Internal place-only path. ONLY retries the create_market_buy_order
+    # call. `_poll_until_settled` MUST NOT be inside the @retry — a
+    # network blip during the poll would re-enter and place a SECOND
+    # real order. Critical safety boundary.
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(min=1, max=8),
         retry=retry_if_exception_type(_SAFE_RETRY_EXCEPTIONS),
         reraise=True,
     )
+    async def _create_market_buy_only(
+        self, pair: str, quote_amount: Decimal,
+    ) -> Order:
+        # `quoteOrderQty` + `tdMode=cash` — see place_market_buy docstring.
+        params = {
+            "quoteOrderQty": float(quote_amount),
+            "tgtCcy": "quote_ccy",
+            "tdMode": "cash",
+            # Tag so cancel_all_open_orders can recognise bot orders
+            # and leave the user's manual orders alone.
+            "clOrdId": make_bot_client_order_id(),
+        }
+        logger.info(
+            "OKX place_market_buy: pair=%s amount=%s params=%s",
+            pair, float(quote_amount), params,
+        )
+        raw = await self._client.create_market_buy_order(
+            symbol=pair,
+            amount=float(quote_amount),  # ccxt expects float
+            params=params,
+        )
+        return self._normalize_order(raw, pair, quote_amount)
+
     async def place_market_buy(self, pair: str, quote_amount: Decimal) -> Order:
         if self.dry_run:
             # Simulate the buy at current price
@@ -170,40 +197,28 @@ class OKXExchange(Exchange):
                 filled_at=datetime.utcnow(),
             )
 
+        # OKX market-buy: pass `quoteOrderQty` for AED-based market buys.
+        # `tdMode=cash` forces SPOT settlement — without it, accounts in
+        # cross-margin or unified-account mode have OKX route the order
+        # through the margin engine, which fails with 51008 "available
+        # AED is insufficient, available margin (in USD) is too low for
+        # borrowing" even when spot AED balance is plenty. Cash mode
+        # only checks the spot wallet, which is what we want for DCA.
         try:
-            # OKX market-buy: pass `quoteOrderQty` for AED-based market buys.
-            # `tdMode=cash` forces SPOT settlement — without it, accounts in
-            # cross-margin or unified-account mode have OKX route the order
-            # through the margin engine, which fails with 51008 "available
-            # AED is insufficient, available margin (in USD) is too low for
-            # borrowing" even when spot AED balance is plenty. Cash mode
-            # only checks the spot wallet, which is what we want for DCA.
-            params = {
-                "quoteOrderQty": float(quote_amount),
-                "tgtCcy": "quote_ccy",
-                "tdMode": "cash",
-                # Tag so cancel_all_open_orders can recognise bot orders
-                # and leave the user's manual orders alone.
-                "clOrdId": make_bot_client_order_id(),
-            }
-            logger.info(
-                "OKX place_market_buy: pair=%s amount=%s params=%s",
-                pair, float(quote_amount), params,
-            )
-            raw = await self._client.create_market_buy_order(
-                symbol=pair,
-                amount=float(quote_amount),  # ccxt expects float, careful with precision
-                params=params,
-            )
-            order = self._normalize_order(raw, pair, quote_amount)
-            # OKX returns the order before it's been filled (raw["filled"]=0
-            # at place-time). Use the base-class helper to poll for the real
-            # fill — see `Exchange._poll_until_settled` for the rationale.
-            return await self._poll_until_settled(pair, order)
+            order = await self._create_market_buy_only(pair, quote_amount)
         except ccxt_async.InsufficientFunds as e:
             raise InsufficientBalanceError(str(e)) from e
         except Exception as e:
             raise ExchangeError(f"OKX market buy failed: {e}") from e
+
+        # OKX returns the order before it's been filled (raw["filled"]=0
+        # at place-time). Use the base-class helper to poll for the real
+        # fill — see `Exchange._poll_until_settled`. NOTE: this is
+        # deliberately OUTSIDE the @retry block above so a network
+        # timeout during the poll doesn't re-enter and place a second
+        # real order. Worst case: we return the order with status=PENDING
+        # and the strategy / next cycle reconciles.
+        return await self._poll_until_settled(pair, order)
 
     @retry(
         stop=stop_after_attempt(3),

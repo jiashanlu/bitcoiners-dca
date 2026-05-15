@@ -102,9 +102,23 @@ def export_uae_tax_csv(
             )
 
             if row["side"] == "buy":
-                total_aed += amount_aed
-                total_btc += amount_btc
-                total_fees += fee
+                # Only the AED-quoted legs count toward "AED spent" —
+                # otherwise multi-hop cycles double-count (AED→USDT→BTC
+                # contributes both the AED outlay AND the USDT amount-as-
+                # AED). Only the BTC-receiving legs count toward "BTC
+                # acquired" — otherwise USDT amount_base values get
+                # summed in as if they were BTC, yielding nonsense like
+                # 1003 "BTC" from 12 cycles. Fees are AED-equivalent so
+                # we only sum the AED-quoted ones to avoid mixing USDT
+                # fees in. This matches Database.total_btc_bought /
+                # total_aed_spent semantics; see also btc_cost_basis_aed
+                # for the weighted-USDT-rate cost-basis calculation.
+                pair = str(row["pair"] or "")
+                if pair.endswith("/AED"):
+                    total_aed += amount_aed
+                    total_fees += fee
+                if pair.startswith("BTC/"):
+                    total_btc += amount_btc
 
         # Summary section
         writer.writerow([])

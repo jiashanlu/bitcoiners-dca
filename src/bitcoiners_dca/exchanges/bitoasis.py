@@ -343,6 +343,51 @@ class BitOasisExchange(Exchange):
         order_raw = data.get("order", data)
         return self._normalize_order(order_raw, pair, quote_amount)
 
+    async def cancel_all_open_orders(self, pair: str) -> int:
+        """Cancel every open order on `pair` for this account.
+
+        Override needed because the base implementation calls ccxt's
+        `fetch_open_orders` on `self._client` — BitOasis's `_client` is
+        an httpx.AsyncClient (no ccxt), so that call raises AttributeError
+        which the base catches and returns 0. The pre-cycle sweep would
+        therefore silently do nothing on BitOasis, leaving stale
+        maker_fallback orders locking up AED across cycles.
+
+        Caveat vs OKX/Binance: BitOasis's API has no clientOrderId
+        concept, so we can't filter "bot orders only" — this cancels
+        ALL open orders for the pair on the account. Users running the
+        bot alongside manual BitOasis orders should be aware. Single-
+        purpose accounts (the recommended setup) see no impact.
+        """
+        bo = _to_bitoasis_pair(pair)
+        try:
+            data = await self._request(
+                "GET",
+                f"/exchange/orders/{bo}",
+                params={"status": "OPEN"},
+            )
+        except Exception as e:
+            logger.warning("BitOasis fetch open orders failed for %s: %s", pair, e)
+            return 0
+        orders_raw = data.get("orders", []) or []
+        n = 0
+        for raw in orders_raw:
+            oid = raw.get("id")
+            if oid is None:
+                continue
+            try:
+                await self.cancel_order(pair, str(oid))
+                n += 1
+            except Exception as e:
+                logger.warning(
+                    "BitOasis cancel_order failed for %s (order %s): %s",
+                    pair, oid, e,
+                )
+                continue
+        if n:
+            logger.info("BitOasis swept %d open order(s) on %s", n, pair)
+        return n
+
     async def cancel_order(self, pair: str, order_id: str) -> Order:
         if self.dry_run:
             now = datetime.now(timezone.utc)
