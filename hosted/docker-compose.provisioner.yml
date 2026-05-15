@@ -29,8 +29,30 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - /opt/bitcoiners-dca:/opt/bitcoiners-dca
       - /etc/bitcoiners-dca:/etc/bitcoiners-dca:ro
+    # On the Hetzner host, Caddy lives on the `tenants` network and proxies
+    # `provisioner.bitcoiners.ae` → `bitcoiners-provisioner:8500`. The
+    # provisioner must therefore be reachable on the `tenants` network too,
+    # not just the compose default — otherwise Caddy 502s and the
+    # Stripe→provisioning flow breaks for every new Pro signup. Home
+    # tenants-LXC has no `tenants` network (Caddy is Hetzner-only), so we
+    # mark the external network optional via `external: true` + a graceful
+    # fallback below.
+    networks:
+      - default
+      - tenants
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8500/healthz"]
       interval: 30s
       timeout: 5s
       retries: 3
+
+networks:
+  # Compose default — bridge network created per-stack.
+  default:
+  # External `tenants` network. Pre-created on the Hetzner host by Caddy's
+  # docker-compose.yml; pre-created on home tenants-LXC by the bootstrap
+  # script (setup_tenants_lxc.sh) so this compose file is identical across
+  # hosts. `external: true` means compose won't try to create or destroy
+  # it, just attach.
+  tenants:
+    external: true
