@@ -9,9 +9,9 @@
        title="AED attributed to the BTC actually delivered: direct BTC/AED buys + (USDT spent on BTC × bot's weighted-average USDT/AED purchase rate). Excludes unused USDT inventory.">
     <div class="label">Avg cost basis</div>
     <div class="val">{{ avg_price|money(0) }}<span class="unit">AED/BTC</span></div>
-    {% if cost_basis_aed and total_aed and (cost_basis_aed < total_aed * 0.95) %}
+    {% if usdt_inventory_aed_hint %}
     <div style="font-size:10px;color:var(--text-muted);margin-top:4px">
-      cost basis: {{ cost_basis_aed|money(0) }} AED · {{ ((total_aed - cost_basis_aed)|round(0))|int }} AED in unused USDT
+      cost basis: {{ cost_basis_aed|money(0) }} AED · {{ usdt_inventory_aed_hint|money(0) }} AED in unused USDT
     </div>
     {% endif %}
   </div>

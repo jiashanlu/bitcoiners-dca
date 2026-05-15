@@ -644,6 +644,15 @@ def create_app(
         # bot has not yet converted to BTC. See Database.btc_cost_basis_aed.
         cost_basis_aed = db.btc_cost_basis_aed()
         avg_price = cost_basis_aed / total_btc if total_btc > 0 else Decimal(0)
+        # When cost basis is materially below raw total AED outflow, the
+        # delta is locked up as unused USDT inventory. Surface it under
+        # the avg-cost stat so the user can see at a glance why the two
+        # numbers diverge. Threshold 5% — below that it's rounding noise.
+        # Computed here in Decimal so the template doesn't trip on
+        # Decimal-vs-float arithmetic.
+        usdt_inventory_aed_hint: Optional[Decimal] = None
+        if total_aed > 0 and cost_basis_aed < total_aed * Decimal("0.95"):
+            usdt_inventory_aed_hint = total_aed - cost_basis_aed
         # Pull 24 rows so multi-hop cycles (2 rows each) still surface
         # ~10 distinct cycles after merging.
         rows = db._conn.execute(
@@ -665,6 +674,7 @@ def create_app(
             "total_aed": total_aed,
             "cost_basis_aed": cost_basis_aed,
             "avg_price": avg_price,
+            "usdt_inventory_aed_hint": usdt_inventory_aed_hint,
             "recent": recent,
             "user_tz": user_tz,
             "arb_count": arb_count,
