@@ -299,3 +299,63 @@ def test_uae_tax_csv_multi_hop_summary_math(tmp_db, tmp_path):
     assert "Total BTC acquired,0.00400000" in contents
     # Total AED fees = 0.75 (direct) + 2 (USDT/AED). USDT fee 0.27 excluded.
     assert "Total fees (AED),2.75" in contents
+
+
+def test_record_cycle_is_atomic(tmp_db, monkeypatch):
+    """Regression: record_cycle must commit cycle_log + per-hop trades
+    inside a single transaction. If the second hop's INSERT throws,
+    NEITHER the cycle_log row nor the first hop should land — partial
+    writes make reconciliation impossible.
+    """
+    from bitcoiners_dca.core.strategy import ExecutionResult
+
+    bad_order = Order(
+        exchange="binance", order_id="bad-1", pair="BTC/USDT",
+        side=OrderSide.BUY, type=OrderType.MARKET,
+        amount_quote=Decimal("100"), amount_base=Decimal("0.001"),
+        price_filled_avg=Decimal("100000"), fee_quote=Decimal("0.1"),
+        status=OrderStatus.FILLED,
+        created_at=datetime.now(timezone.utc),
+        filled_at=datetime.now(timezone.utc),
+    )
+    good_order = _make_order(order_id="good-1")
+
+    result = ExecutionResult(
+        timestamp=datetime.now(timezone.utc),
+        intended_amount_aed=Decimal("500"),
+        overlay_applied=None,
+        routing_decision=None,
+        orders=[good_order, bad_order],
+    )
+
+    # Force the SECOND trade insert to blow up. The first should
+    # roll back along with the cycle_log row. sqlite3.Connection
+    # methods are read-only — wrap the connection in a small proxy
+    # so we can intercept execute() calls.
+    real_conn = tmp_db._conn
+    call_count = {"trades": 0}
+
+    class FlakyConn:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql, *args):
+            if isinstance(sql, str) and "INTO TRADES" in sql.upper():
+                call_count["trades"] += 1
+                if call_count["trades"] == 2:
+                    raise RuntimeError("simulated mid-write failure")
+            return self._inner.execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    tmp_db._conn = FlakyConn(real_conn)
+    try:
+        with pytest.raises(RuntimeError, match="simulated"):
+            tmp_db.record_cycle(result)
+    finally:
+        tmp_db._conn = real_conn
+
+    # Neither the cycle_log row nor the first trade should be present.
+    assert tmp_db.cycle_count() == 0
+    assert tmp_db.trade_count() == 0
