@@ -228,5 +228,69 @@ class Database:
         )
         return Decimal(str(cur.fetchone()[0]))
 
+    def btc_cost_basis_aed(self) -> Decimal:
+        """AED actually spent acquiring the BTC currently in inventory.
+
+        Differs from `total_aed_spent` in that it does NOT inflate by
+        unused USDT pre-buys. Example:
+
+          - User buys 1000 USDT for 3677 AED to pre-fund 2-hop cycles.
+          - Bot has only converted ~300 USDT to BTC so far; 700 USDT sits
+            idle in the exchange account.
+          - `total_aed_spent` returns 3677 (all AED ever spent by the
+            bot), which over-states the cost basis of the BTC delivered.
+          - `btc_cost_basis_aed` returns ~1100 (3677 × 300/1000), the
+            AED-equivalent of the USDT that was actually converted, at
+            the bot's weighted-average USDT/AED purchase rate.
+
+        Math:
+          - Direct BTC/AED buys: count `amount_quote` (AED) 1:1.
+          - BTC/USDT buys: convert `amount_quote` (USDT) → AED via the
+            bot's weighted-average USDT/AED purchase rate (= total AED
+            spent on USDT / total USDT bought). If the bot has no
+            USDT/AED buys, BTC/USDT trades are EXCLUDED from cost basis
+            — we have no audit trail for how those USDT got into the
+            account, so we can't honestly attribute an AED cost.
+
+        Returns 0 if no BTC has been bought yet.
+        """
+        # Total AED spent on direct BTC/AED buys.
+        cur = self._conn.execute(
+            "SELECT COALESCE(SUM(CAST(amount_quote AS REAL)), 0) "
+            "FROM trades WHERE side='buy' AND status='filled' "
+            "AND pair = 'BTC/AED'"
+        )
+        direct_aed = Decimal(str(cur.fetchone()[0]))
+
+        # Bot's weighted-average USDT/AED purchase rate.
+        cur = self._conn.execute(
+            "SELECT "
+            "  COALESCE(SUM(CAST(amount_quote AS REAL)), 0) AS aed_spent, "
+            "  COALESCE(SUM(CAST(amount_base AS REAL)), 0)  AS usdt_bought "
+            "FROM trades WHERE side='buy' AND status='filled' "
+            "AND pair='USDT/AED'"
+        )
+        row = cur.fetchone()
+        usdt_aed_spent = Decimal(str(row[0]))
+        usdt_bought    = Decimal(str(row[1]))
+
+        # Total USDT spent acquiring BTC.
+        cur = self._conn.execute(
+            "SELECT COALESCE(SUM(CAST(amount_quote AS REAL)), 0) "
+            "FROM trades WHERE side='buy' AND status='filled' "
+            "AND pair='BTC/USDT'"
+        )
+        usdt_spent_on_btc = Decimal(str(cur.fetchone()[0]))
+
+        if usdt_bought > 0 and usdt_spent_on_btc > 0:
+            weighted_rate = usdt_aed_spent / usdt_bought
+            via_usdt_aed = usdt_spent_on_btc * weighted_rate
+        else:
+            # No bot-tracked USDT/AED buys, OR no BTC/USDT trades.
+            # In either case there's nothing to attribute via USDT.
+            via_usdt_aed = Decimal(0)
+
+        return direct_aed + via_usdt_aed
+
     def close(self) -> None:
         self._conn.close()
