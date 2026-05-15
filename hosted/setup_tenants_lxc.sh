@@ -131,7 +131,15 @@ docker build -t bitcoiners-dca:latest .
 log "Building bitcoiners-provisioner:latest"
 docker build -f hosted/provisioner.Dockerfile -t bitcoiners-provisioner:latest .
 
-# ─── 5. Start provisioner ────────────────────────────────────────────────
+# ─── 5. Pre-create the external `tenants` network ──────────────────────
+# docker-compose.provisioner.yml attaches the provisioner to this network
+# so that on Hetzner-style hosts, the Caddy reverse-proxy (which lives on
+# `tenants`) can reach the provisioner at `bitcoiners-provisioner:8500`.
+# Idempotent — `network create` is a no-op if it already exists.
+log "Ensuring 'tenants' docker network exists"
+docker network inspect tenants >/dev/null 2>&1 || docker network create tenants
+
+# ─── 6. Start provisioner ────────────────────────────────────────────────
 log "Starting provisioner container"
 docker compose -f "${INSTALL_DIR}/hosted/docker-compose.provisioner.yml" up -d
 
