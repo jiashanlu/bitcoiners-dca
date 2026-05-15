@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 from bitcoiners_dca.core.lightning import WithdrawalNetwork, detect_network
 from bitcoiners_dca.core.models import (
-    Ticker, Balance, Order, OrderSide, OrderStatus, OrderType,
+    Ticker, Balance, Order, OrderMinimum, OrderSide, OrderStatus, OrderType,
     Withdrawal, WithdrawalStatus, FeeSchedule,
 )
 from bitcoiners_dca.exchanges.base import (
@@ -110,6 +110,24 @@ class OKXExchange(Exchange):
             maker_pct=_to_decimal(maker),
             taker_pct=_to_decimal(taker),
             withdrawal_fee_btc=withdraw_fee,
+        )
+
+    async def get_order_minimum(self, pair: str = "BTC/AED") -> OrderMinimum:
+        # OKX V5 publishes minSz (base) and minOrderSz; cost.min is usually
+        # also populated for fiat pairs. ccxt normalizes both into
+        # market["limits"]["amount"]["min"] and ...["cost"]["min"].
+        markets = await self._client.load_markets()
+        market = markets.get(pair) or {}
+        limits = market.get("limits") or {}
+        amt_min = (limits.get("amount") or {}).get("min")
+        cost_min = (limits.get("cost") or {}).get("min")
+        _, quote = pair.split("/")
+        return OrderMinimum(
+            exchange=self.name, pair=pair,
+            min_base=_to_decimal(amt_min) if amt_min else None,
+            min_quote=_to_decimal(cost_min) if cost_min else None,
+            quote_currency=quote,
+            source="api",
         )
 
     async def get_balances(self) -> list[Balance]:

@@ -116,6 +116,37 @@ class FeeSchedule(BaseModel):
     withdrawal_fee_btc: Decimal  # flat fee in BTC for withdrawal
 
 
+# === ORDER MIN ===
+
+class OrderMinimum(BaseModel):
+    """Minimum order size for one (exchange, pair).
+
+    Exchanges express their floor differently: BitOasis caps in base
+    units (0.000048 BTC), Binance exposes both a base AND a notional
+    minimum, OKX is mostly base-only. We capture both dimensions and
+    convert to the cycle's quote currency at evaluation time using the
+    live ask. Either field may be None, meaning 'no constraint on this
+    axis'.
+
+    The effective minimum, expressed in the route's INPUT currency at a
+    given hop price, is:
+        max(
+            min_base * hop.price                if min_base set,
+            min_quote * convert(quote_currency → input_ccy)  if min_quote set,
+        )
+    """
+    exchange: str
+    pair: str
+    min_base: Optional[Decimal] = None
+    min_quote: Optional[Decimal] = None
+    quote_currency: str
+    # "api"   — pulled live from exchange (ccxt market.limits)
+    # "probed" — empirically verified via API testing (e.g. BitOasis)
+    # "static" — fallback default; no authoritative source
+    # "unknown" — exchange does not publish; treat as permissive
+    source: str = "static"
+
+
 # === ARBITRAGE ===
 
 class ArbitrageOpportunity(BaseModel):

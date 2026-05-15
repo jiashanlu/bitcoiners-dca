@@ -18,7 +18,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, Sequence
+
+from bitcoiners_dca.core.models import OrderMinimum
 
 
 @dataclass(frozen=True)
@@ -128,6 +130,65 @@ class TradeRoute:
         for hop in self.hops:
             amount = hop.expected_output(amount)
         return amount
+
+    def min_input_amount(
+        self,
+        hop_minimums: Sequence[Optional[OrderMinimum]],
+    ) -> Decimal:
+        """How much input ccy the route requires to clear every hop's floor.
+
+        Each exchange/pair publishes a minimum order size. Some are
+        BTC-denominated (BitOasis: 0.000048 BTC), some quote-denominated
+        (Binance: 5 USDT notional), some both. We translate each hop's
+        floor back to the route's INPUT currency (typically AED) using the
+        chain of hop prices, then take the max — that's the cycle size
+        below which this route cannot be executed at all.
+
+        `hop_minimums[k]` is the OrderMinimum for hops[k] (or None when
+        we have no info; that hop contributes nothing to the floor).
+        """
+        if len(hop_minimums) != len(self.hops):
+            raise ValueError(
+                f"Expected {len(self.hops)} minimums, got {len(hop_minimums)}"
+            )
+        floor = Decimal(0)
+        for i, (hop, om) in enumerate(zip(self.hops, hop_minimums)):
+            if om is None:
+                continue
+            # Express this hop's min in the hop's own input currency.
+            # Today every hop is a BUY (we're always buying upstream
+            # toward BTC). For a buy: input_ccy == quote_ccy of pair, so
+            # min_quote is already in input_ccy and min_base × price
+            # gives the input-ccy floor too.
+            if hop.side != "buy":
+                # Sell hops would need division by price for min_base.
+                # No router caller emits sell hops today; the assertion
+                # makes wrong assumptions loud rather than silent.
+                raise NotImplementedError(
+                    "min_input_amount only supports buy hops today"
+                )
+            candidates = [Decimal(0)]
+            if om.min_base is not None and om.min_base > 0:
+                candidates.append(om.min_base * hop.price)
+            if om.min_quote is not None and om.min_quote > 0:
+                if om.quote_currency != hop.input_ccy:
+                    # OrderMinimum.quote_currency is the pair's quote.
+                    # For a buy, that == hop.input_ccy. If the adapter
+                    # returned a mismatch, treat as missing rather than
+                    # silently miscomputing.
+                    pass
+                else:
+                    candidates.append(om.min_quote)
+            hop_floor = max(candidates)
+            # Translate hop_floor back through earlier hops to express
+            # it in the route's overall input currency. For a BUY chain
+            # AED→USDT→BTC, walking back through hop_1 means multiplying
+            # by hop_1.price (3.67 AED/USDT) to express USDT floor in AED.
+            for prev in self.hops[:i]:
+                hop_floor = hop_floor * prev.price
+            if hop_floor > floor:
+                floor = hop_floor
+        return floor
 
     def effective_price(self, input_amount: Decimal = Decimal(1000)) -> Decimal:
         """Cost per unit of output currency (e.g. AED per BTC).

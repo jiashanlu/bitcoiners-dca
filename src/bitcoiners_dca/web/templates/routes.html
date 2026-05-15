@@ -6,7 +6,7 @@
 
 <form method="get" style="margin-bottom:20px;display:flex;gap:12px;align-items:center">
   <label>Cycle size (AED):</label>
-  <input type="number" min="50" step="50" name="amount" value="{{ amount }}">
+  <input type="number" min="1" step="1" name="amount" value="{{ amount }}">
   <button type="submit">Recompute</button>
 </form>
 
@@ -19,7 +19,7 @@
   <h2>Picked: {{ decision.chosen.route.label }}</h2>
   <p>{{ decision.reason }}</p>
   <table>
-    <thead><tr><th>Rank</th><th>Route</th><th>Effective price</th><th>Expected BTC</th><th>Balance</th></tr></thead>
+    <thead><tr><th>Rank</th><th>Route</th><th>Effective price</th><th>Expected BTC</th><th>Min cycle</th><th>Balance</th></tr></thead>
     <tbody>
     {% set candidates = [decision.chosen] + decision.alternatives %}
     {% for c in candidates %}
@@ -28,12 +28,32 @@
         <td>{{ c.route.label }}</td>
         <td class="mono">{{ c.effective_price|money }} AED/BTC</td>
         <td class="mono">{{ c.route.expected_output(amount)|btc }}</td>
+        <td class="mono">{% if c.min_input_amount > 0 %}≥ {{ c.min_input_amount|money }} AED{% else %}—{% endif %}</td>
         <td class="mono">{% if c.quote_balance is none %}—{% else %}{{ c.quote_balance|money }} AED{% if c.quote_balance < amount %} <span class="pill warn">underfunded</span>{% endif %}{% endif %}</td>
       </tr>
     {% endfor %}
     </tbody>
   </table>
 </div>
+
+{% if decision.excluded %}
+<div class="card">
+  <h2>Excluded at this cycle size</h2>
+  <p class="help">These venues would reject the order because the cycle is below their published minimum. Increase your per-cycle amount to unlock them.</p>
+  <table>
+    <thead><tr><th>Route</th><th>Partner minimum</th><th>Reason</th></tr></thead>
+    <tbody>
+    {% for e in decision.excluded %}
+      <tr>
+        <td>{{ e.route.label }}</td>
+        <td class="mono">≥ {{ e.min_input_amount|money }} AED at current price</td>
+        <td>{{ e.reason }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
 
 {% if decision.cross_exchange_alerts %}
 <div class="card">

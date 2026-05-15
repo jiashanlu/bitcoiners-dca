@@ -32,8 +32,10 @@ class AssetAllocation:
     """One leg of a multi-asset cycle.
 
     weight is a relative number — they don't have to sum to 1.0; we
-    normalize. min_buy_aed prevents micro-buys when a leg's weighted
-    share is below the exchange's minimum order size.
+    normalize. min_buy_aed is a USER-defined floor that skips a leg
+    whose weighted share would be too small to be worth executing
+    (e.g. fee-vs-amount ratio). The hard exchange-side floor is
+    computed dynamically by the smart router via OrderMinimum.
     """
     asset: str               # e.g. "BTC", "ETH", "SOL"
     weight: Decimal          # relative weight, e.g. 0.7 for 70% of cycle

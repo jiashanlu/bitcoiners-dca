@@ -32,6 +32,7 @@ from bitcoiners_dca.core.models import (
     Balance,
     FeeSchedule,
     Order,
+    OrderMinimum,
     OrderSide,
     OrderStatus,
     OrderType,
@@ -60,6 +61,15 @@ RETRY_WAIT_MAX = 8
 DEFAULT_TAKER_PCT = Decimal("0.005")    # 0.5%
 DEFAULT_MAKER_PCT = Decimal("0.002")    # 0.2%
 DEFAULT_BTC_WITHDRAW_FEE = Decimal("0.0005")
+
+# BitOasis minimum order size for BTC/AED is BTC-denominated.
+# Empirically confirmed 2026-05-14 via a descending limit-order probe
+# against /v1/exchange/order: AED-denominated 50/25/10 placed cleanly;
+# AED 5/2/1 rejected with "Amount is too low! Minimum is 0.000048 BTC".
+# BitOasis's public docs claim AED 50 — that figure is the implied
+# minimum at their internal reference price and not what the API
+# actually enforces. We use the real cap and translate to AED live.
+BITOASIS_BTC_MIN_BASE = Decimal("0.000048")
 
 
 def _to_bitoasis_pair(canonical: str) -> str:
@@ -218,6 +228,21 @@ class BitOasisExchange(Exchange):
             maker_pct=DEFAULT_MAKER_PCT,
             taker_pct=DEFAULT_TAKER_PCT,
             withdrawal_fee_btc=btc_fee,
+        )
+
+    async def get_order_minimum(self, pair: str = "BTC/AED") -> OrderMinimum:
+        base, quote = pair.split("/")
+        if base == "BTC":
+            return OrderMinimum(
+                exchange=self.name, pair=pair,
+                min_base=BITOASIS_BTC_MIN_BASE,
+                min_quote=None,
+                quote_currency=quote,
+                source="probed",
+            )
+        return OrderMinimum(
+            exchange=self.name, pair=pair,
+            quote_currency=quote, source="unknown",
         )
 
     async def get_balances(self) -> list[Balance]:

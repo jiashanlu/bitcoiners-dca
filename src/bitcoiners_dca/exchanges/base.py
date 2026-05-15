@@ -12,7 +12,7 @@ from decimal import Decimal
 from typing import Optional
 
 from bitcoiners_dca.core.models import (
-    Ticker, Balance, Order, OrderStatus, Withdrawal, FeeSchedule
+    Ticker, Balance, Order, OrderStatus, OrderMinimum, Withdrawal, FeeSchedule
 )
 
 
@@ -66,6 +66,22 @@ class Exchange(ABC):
     @abstractmethod
     async def get_fee_schedule(self, pair: str = "BTC/AED") -> FeeSchedule:
         """Maker/taker fees + withdrawal fee. May be hardcoded if exchange doesn't expose."""
+
+    async def get_order_minimum(self, pair: str = "BTC/AED") -> OrderMinimum:
+        """Minimum order size for the pair on this exchange.
+
+        Smart router uses this to exclude routes whose floor exceeds the
+        cycle's notional. Adapters override to return live limits from the
+        exchange API (e.g. ccxt market.limits) or empirically-verified
+        constants. The base default returns "unknown" — meaning the router
+        will not exclude this venue on min-size grounds.
+        """
+        base, quote = pair.split("/")
+        return OrderMinimum(
+            exchange=self.name, pair=pair,
+            min_base=None, min_quote=None,
+            quote_currency=quote, source="unknown",
+        )
 
     # === ACCOUNT (auth required) ===
 

@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Optional
 
-from bitcoiners_dca.core.models import Ticker, FeeSchedule
+from bitcoiners_dca.core.models import Ticker, FeeSchedule, OrderMinimum
 from bitcoiners_dca.core.routing import TradeHop, TradeRoute
 from bitcoiners_dca.exchanges.base import Exchange
 
@@ -51,6 +51,12 @@ class RouteCandidate:
     score: Decimal               # ranking metric; preference bonus applied here
     max_spread_pct: Decimal      # worst spread across all hops (for filtering)
     quote_balance: Optional[Decimal] = None
+    # Minimum amount of route input currency this route can execute, derived
+    # from each hop's partner-published OrderMinimum. 0 = no known floor.
+    min_input_amount: Decimal = Decimal(0)
+    # Per-hop minimums kept for the UI to render "BitOasis min: 0.000048 BTC"
+    # without re-fetching.
+    hop_minimums: tuple[Optional[OrderMinimum], ...] = ()
     note: str = ""
 
     @property
@@ -63,10 +69,28 @@ class RouteCandidate:
 
 
 @dataclass
+class ExcludedRoute:
+    """A route that survived enumeration but was filtered out before scoring.
+
+    Surfaced in `RoutingDecision.excluded` so the dashboard can tell the
+    user *why* a venue didn't appear in the picks ("BitOasis min AED 14
+    at current BTC price — your cycle is AED 10").
+    """
+    route: TradeRoute
+    reason: str
+    min_input_amount: Decimal = Decimal(0)
+    hop_minimums: tuple[Optional[OrderMinimum], ...] = ()
+
+
+@dataclass
 class RoutingDecision:
     chosen: RouteCandidate
     alternatives: list[RouteCandidate]
     cross_exchange_alerts: list[RouteCandidate] = field(default_factory=list)
+    # Routes the user can't take with the given cycle size. Each entry
+    # carries the reason — typically "below partner minimum". UI uses
+    # this to render an honest disclaimer.
+    excluded: list[ExcludedRoute] = field(default_factory=list)
     reason: str = ""
 
     @property
@@ -89,6 +113,7 @@ class _ExchangeMarketData:
     tickers: dict[str, Ticker]               # pair -> ticker (failed pairs absent)
     taker_pct: Decimal
     balances: dict[str, Decimal]             # asset -> free balance (0 if absent)
+    minimums: dict[str, OrderMinimum] = field(default_factory=dict)  # pair -> min
 
 
 # === The router. ===
@@ -181,8 +206,17 @@ class SmartRouter:
             market_data, target_asset, quote_ccy, required_quote_amount
         )
 
-        usable = self._apply_filters(executable, required_quote_amount)
+        usable, excluded = self._apply_filters(executable, required_quote_amount)
         if not usable:
+            if excluded:
+                # All routes filtered out by partner min. Give the user a
+                # surgical error so the dashboard can render "BitOasis
+                # needs AED 14, your cycle is AED 10" instead of a
+                # generic no-route message.
+                reasons = "; ".join(e.reason for e in excluded)
+                raise RuntimeError(
+                    f"No route can execute at this cycle size: {reasons}"
+                )
             raise RuntimeError(
                 f"No usable route to {target_asset} from {quote_ccy} "
                 f"across enabled exchanges"
@@ -211,6 +245,7 @@ class SmartRouter:
             chosen=chosen,
             alternatives=alternatives,
             cross_exchange_alerts=cross_alerts,
+            excluded=excluded,
             reason=reason,
         )
 
@@ -245,13 +280,17 @@ class SmartRouter:
             ticker_tasks = [ex.get_ticker(p) for p in pairs_to_try]
             fee_task = ex.get_fee_schedule(pairs_to_try[0])
             balance_tasks = [ex.get_balance(c) for c in ccys_to_balance]
+            min_tasks = [ex.get_order_minimum(p) for p in pairs_to_try]
             results = await asyncio.gather(
-                *ticker_tasks, fee_task, *balance_tasks,
+                *ticker_tasks, fee_task, *balance_tasks, *min_tasks,
                 return_exceptions=True,
             )
-            tickers_raw = results[:len(pairs_to_try)]
-            fees_raw = results[len(pairs_to_try)]
-            balances_raw = results[len(pairs_to_try) + 1:]
+            n_pairs = len(pairs_to_try)
+            n_bal = len(ccys_to_balance)
+            tickers_raw = results[:n_pairs]
+            fees_raw = results[n_pairs]
+            balances_raw = results[n_pairs + 1 : n_pairs + 1 + n_bal]
+            mins_raw = results[n_pairs + 1 + n_bal :]
 
             tickers: dict[str, Ticker] = {}
             for p, t in zip(pairs_to_try, tickers_raw):
@@ -266,11 +305,36 @@ class SmartRouter:
             for c, b in zip(ccys_to_balance, balances_raw):
                 if not isinstance(b, Exception):
                     balances[c] = b.free if b else Decimal(0)
+
+            minimums: dict[str, OrderMinimum] = {}
+            for p, m in zip(pairs_to_try, mins_raw):
+                if not isinstance(m, Exception):
+                    minimums[p] = m
+
             return _ExchangeMarketData(
-                exchange=ex, tickers=tickers, taker_pct=taker, balances=balances,
+                exchange=ex, tickers=tickers, taker_pct=taker,
+                balances=balances, minimums=minimums,
             )
 
         return await asyncio.gather(*[for_one(e) for e in exchanges])
+
+    def _lookup_minimums(
+        self,
+        route: TradeRoute,
+        market_data: list[_ExchangeMarketData],
+    ) -> tuple[Optional[OrderMinimum], ...]:
+        """For each hop, find the OrderMinimum on the hop's exchange/pair.
+
+        Returns None for the hop when the adapter returned no info — the
+        downstream min calculation skips Nones (treats them as no floor).
+        """
+        by_name = {md.exchange.name: md for md in market_data}
+        out: list[Optional[OrderMinimum]] = []
+        for hop in route.hops:
+            md = by_name.get(hop.exchange)
+            om = md.minimums.get(hop.pair) if md else None
+            out.append(om)
+        return tuple(out)
 
     def _enumerate_routes(
         self,
@@ -296,8 +360,10 @@ class SmartRouter:
                     hops=(hop,),
                     quote_balance=md.balances.get(quote_ccy),
                 )
-                executable.append(self._score(route, sample_amount,
-                                              md.tickers[direct_pair].spread_pct))
+                executable.append(self._score(
+                    route, sample_amount,
+                    md.tickers[direct_pair].spread_pct, market_data,
+                ))
 
             # Same-exchange two-hop via each intermediate
             if self.enable_two_hop:
@@ -320,7 +386,9 @@ class SmartRouter:
                             md.tickers[leg1].spread_pct,
                             md.tickers[leg2].spread_pct,
                         )
-                        executable.append(self._score(route, sample_amount, max_spread))
+                        executable.append(self._score(
+                            route, sample_amount, max_spread, market_data,
+                        ))
 
                     # Intermediate-direct: if we already hold this
                     # intermediate (e.g. USDT sitting idle on OKX), we can
@@ -351,6 +419,7 @@ class SmartRouter:
                         executable.append(self._score(
                             route, sample_amount,
                             md.tickers[direct_pair_via_inter].spread_pct,
+                            market_data,
                         ))
 
         # Cross-exchange routes (alerts only)
@@ -405,7 +474,9 @@ class SmartRouter:
                     max_spread = max(
                         src.tickers[leg1].spread_pct, dst.tickers[leg2].spread_pct
                     )
-                    out.append(self._score(route, sample_amount, max_spread))
+                    out.append(self._score(
+                        route, sample_amount, max_spread, market_data,
+                    ))
         # Sort by effective price; the most attractive alert first.
         out.sort(key=lambda c: c.effective_price)
         return out
@@ -415,21 +486,57 @@ class SmartRouter:
         route: TradeRoute,
         sample_amount: Decimal,
         max_spread_pct: Decimal,
+        market_data: list[_ExchangeMarketData],
     ) -> RouteCandidate:
         eff = route.effective_price(sample_amount)
+        hop_mins = self._lookup_minimums(route, market_data)
+        try:
+            min_input = route.min_input_amount(hop_mins)
+        except (NotImplementedError, ValueError):
+            # Non-buy hops would raise; current router only emits buys.
+            # Treat as no-floor so we don't accidentally exclude a route
+            # whose math we can't evaluate.
+            min_input = Decimal(0)
         return RouteCandidate(
             route=route,
             effective_price=eff,
             score=eff,
             max_spread_pct=max_spread_pct,
             quote_balance=route.quote_balance,
+            min_input_amount=min_input,
+            hop_minimums=hop_mins,
         )
 
     def _apply_filters(
         self,
         candidates: list[RouteCandidate],
         required_amount: Optional[Decimal],
-    ) -> list[RouteCandidate]:
+    ) -> tuple[list[RouteCandidate], list[ExcludedRoute]]:
+        excluded: list[ExcludedRoute] = []
+
+        # Partner-minimum filter (only applies when we have a cycle size).
+        # A route is excluded if cycle_amount < route.min_input_amount.
+        # We only filter — never fall back — because trying to buy below a
+        # partner's published floor returns a hard API rejection that
+        # cancels the cycle. Better to skip the venue than burn a cycle.
+        if required_amount is not None:
+            kept: list[RouteCandidate] = []
+            for c in candidates:
+                if c.min_input_amount > 0 and required_amount < c.min_input_amount:
+                    excluded.append(ExcludedRoute(
+                        route=c.route,
+                        reason=(
+                            f"Cycle {required_amount} below partner minimum "
+                            f"{c.min_input_amount:.2f} {c.route.input_ccy} "
+                            f"({_format_min_reason(c.hop_minimums)})"
+                        ),
+                        min_input_amount=c.min_input_amount,
+                        hop_minimums=c.hop_minimums,
+                    ))
+                else:
+                    kept.append(c)
+            candidates = kept
+
         # Spread filter
         usable = [
             c for c in candidates
@@ -478,7 +585,29 @@ class SmartRouter:
             usable.sort(key=lambda c: (-(c.quote_balance or Decimal(0)), c.score))
         else:
             usable.sort(key=lambda c: c.score)
-        return usable
+        return usable, excluded
+
+
+def _format_min_reason(
+    hop_minimums: tuple[Optional[OrderMinimum], ...],
+) -> str:
+    """One-line summary of the binding minimum for an excluded route.
+
+    Used to populate ExcludedRoute.reason so the UI can render
+    "BitOasis min 0.000048 BTC" verbatim without re-fetching.
+    """
+    parts: list[str] = []
+    for om in hop_minimums:
+        if om is None:
+            continue
+        bits: list[str] = []
+        if om.min_base is not None and om.min_base > 0:
+            bits.append(f"{om.min_base.normalize():f} base")
+        if om.min_quote is not None and om.min_quote > 0:
+            bits.append(f"{om.min_quote.normalize():f} {om.quote_currency}")
+        if bits:
+            parts.append(f"{om.exchange}:{om.pair} ≥ " + " / ".join(bits))
+    return "; ".join(parts) if parts else "partner minimum"
 
 
 def _market_data_to_payload(

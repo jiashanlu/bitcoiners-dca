@@ -10,7 +10,7 @@ from typing import Optional
 import pytest
 
 from bitcoiners_dca.core.models import (
-    Balance, FeeSchedule, Order, Ticker, Withdrawal,
+    Balance, FeeSchedule, Order, OrderMinimum, Ticker, Withdrawal,
 )
 from bitcoiners_dca.core.router import SmartRouter
 from bitcoiners_dca.exchanges.base import Exchange
@@ -28,12 +28,16 @@ class FakeExchange(Exchange):
         bid: str,
         taker: str = "0.001",
         quote_balance: str = "1000000",  # default: unlimited AED
+        min_base: Optional[str] = None,
+        min_quote: Optional[str] = None,
     ):
         self.name = name
         self._ask = Decimal(ask)
         self._bid = Decimal(bid)
         self._taker = Decimal(taker)
         self._quote_balance = Decimal(quote_balance)
+        self._min_base = Decimal(min_base) if min_base else None
+        self._min_quote = Decimal(min_quote) if min_quote else None
 
     async def health_check(self) -> bool: return True
 
@@ -47,6 +51,15 @@ class FakeExchange(Exchange):
             exchange=self.name, pair=pair,
             maker_pct=self._taker / 2, taker_pct=self._taker,
             withdrawal_fee_btc=Decimal("0.0002"),
+        )
+
+    async def get_order_minimum(self, pair: str = "BTC/AED") -> OrderMinimum:
+        _, quote = pair.split("/")
+        return OrderMinimum(
+            exchange=self.name, pair=pair,
+            min_base=self._min_base, min_quote=self._min_quote,
+            quote_currency=quote,
+            source="api" if (self._min_base or self._min_quote) else "unknown",
         )
 
     async def get_balances(self):
@@ -180,3 +193,103 @@ async def test_price_premium_calc():
     premium = decision.price_premium_vs_alt_pct()
     # Saved ~2.86% by picking cheap
     assert Decimal("2.5") < premium < Decimal("3.2"), f"Got {premium}"
+
+
+# === PARTNER MINIMUMS ===
+#
+# These tests cover the BTC-denominated partner-minimum path that broke
+# our prior assumption of "AED 50 floor on BitOasis". BitOasis enforces a
+# BTC-denominated cap (0.000048 BTC) which translates to a different AED
+# amount depending on the live price.
+
+
+@pytest.mark.asyncio
+async def test_excludes_route_when_cycle_below_btc_denominated_min():
+    """BitOasis BTC min × current ask exceeds the cycle amount → excluded."""
+    # BTC at AED 300,000 means 0.000048 × 300,000 = AED 14.4 min.
+    bo = FakeExchange("bitoasis", ask="300000", bid="299900",
+                       taker="0.005", min_base="0.000048")
+    okx = FakeExchange("okx", ask="299500", bid="299400",
+                        taker="0.0015")  # no min — accepts everything
+
+    decision = await SmartRouter().pick(
+        [bo, okx], required_quote_amount=Decimal("10"),
+    )
+    # OKX must win — BitOasis can't accept a 10 AED order
+    assert _first_hop_exchange(decision) == "okx"
+    # And the decision should record that BitOasis was excluded
+    excluded_venues = [e.route.hops[0].exchange for e in decision.excluded]
+    assert "bitoasis" in excluded_venues
+    # The reason should mention the binding minimum so the UI can render it
+    bo_excluded = next(e for e in decision.excluded
+                       if e.route.hops[0].exchange == "bitoasis")
+    assert "0.000048" in bo_excluded.reason
+    assert bo_excluded.min_input_amount == Decimal("14.400")
+
+
+@pytest.mark.asyncio
+async def test_does_not_exclude_when_cycle_clears_min():
+    """A cycle above the partner's floor must still allow that partner to win."""
+    bo = FakeExchange("bitoasis", ask="300000", bid="299900",
+                       taker="0.001", min_base="0.000048")  # ~AED 14.4
+    okx = FakeExchange("okx", ask="305000", bid="304900",
+                        taker="0.001")
+
+    decision = await SmartRouter().pick(
+        [bo, okx], required_quote_amount=Decimal("100"),
+    )
+    # BitOasis is cheaper AND we clear its 14.4 AED floor
+    assert _first_hop_exchange(decision) == "bitoasis"
+    assert decision.excluded == []
+
+
+@pytest.mark.asyncio
+async def test_quote_denominated_min_is_respected():
+    """Binance-style cost.min (e.g. 5 USDT notional) excludes too-small cycles."""
+    # Simulate a Binance USDT-quoted pair where the floor is 5 quote-ccy units
+    # (here we use AED for the test pair so the math is direct).
+    binance = FakeExchange("binance", ask="300000", bid="299900",
+                            taker="0.001", min_quote="50")
+    okx = FakeExchange("okx", ask="305000", bid="304900",
+                        taker="0.001")
+
+    decision = await SmartRouter().pick(
+        [binance, okx], required_quote_amount=Decimal("25"),
+    )
+    # Below Binance's 50-quote floor → must skip Binance even though cheaper
+    assert _first_hop_exchange(decision) == "okx"
+    excluded_venues = [e.route.hops[0].exchange for e in decision.excluded]
+    assert "binance" in excluded_venues
+
+
+@pytest.mark.asyncio
+async def test_unknown_min_does_not_exclude():
+    """Exchanges that don't publish a min must NEVER be excluded — Free-tier
+    self-hosters with adapters that haven't been wired up would otherwise
+    lose all routing."""
+    unknown = FakeExchange("legacy", ask="300000", bid="299900",
+                            taker="0.001")  # no min_base, no min_quote
+    decision = await SmartRouter().pick(
+        [unknown], required_quote_amount=Decimal("1"),  # absurdly tiny
+    )
+    assert _first_hop_exchange(decision) == "legacy"
+    assert decision.excluded == []
+
+
+@pytest.mark.asyncio
+async def test_all_partners_excluded_raises_clear_error():
+    """If every venue's floor exceeds the cycle, raise with a surgical
+    message — not the generic 'no usable route'."""
+    bo = FakeExchange("bitoasis", ask="300000", bid="299900",
+                       taker="0.005", min_base="0.000048")
+    binance = FakeExchange("binance", ask="299000", bid="298900",
+                            taker="0.001", min_quote="50")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await SmartRouter().pick(
+            [bo, binance], required_quote_amount=Decimal("5"),
+        )
+    msg = str(exc_info.value)
+    assert "below partner minimum" in msg.lower() or "below partner min" in msg.lower()
+    assert "bitoasis" in msg.lower()
+    assert "binance" in msg.lower()

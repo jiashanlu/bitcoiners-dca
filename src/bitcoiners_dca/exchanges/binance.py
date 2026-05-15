@@ -33,7 +33,7 @@ import ccxt.async_support as ccxt_async
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from bitcoiners_dca.core.models import (
-    Ticker, Balance, Order, OrderSide, OrderStatus, OrderType,
+    Ticker, Balance, Order, OrderMinimum, OrderSide, OrderStatus, OrderType,
     Withdrawal, WithdrawalStatus, FeeSchedule,
 )
 from bitcoiners_dca.exchanges.base import (
@@ -100,6 +100,25 @@ class BinanceExchange(Exchange):
             maker_pct=_to_decimal(market.get("maker", 0.001)),
             taker_pct=_to_decimal(market.get("taker", 0.001)),
             withdrawal_fee_btc=Decimal("0.0002"),  # standard Binance BTC withdrawal fee
+        )
+
+    async def get_order_minimum(self, pair: str = "BTC/USDT") -> OrderMinimum:
+        # ccxt's market.limits exposes both axes:
+        #   amount.min — base-currency floor (e.g. 0.00001 BTC for BTC/USDT)
+        #   cost.min   — notional floor in quote ccy (e.g. 5 USDT for BTC/USDT)
+        # We surface both and let the router pick the binding one at exec time.
+        markets = await self._client.load_markets()
+        market = markets.get(pair) or {}
+        limits = market.get("limits") or {}
+        amt_min = (limits.get("amount") or {}).get("min")
+        cost_min = (limits.get("cost") or {}).get("min")
+        _, quote = pair.split("/")
+        return OrderMinimum(
+            exchange=self.name, pair=pair,
+            min_base=_to_decimal(amt_min) if amt_min else None,
+            min_quote=_to_decimal(cost_min) if cost_min else None,
+            quote_currency=quote,
+            source="api",
         )
 
     async def get_balances(self) -> list[Balance]:
