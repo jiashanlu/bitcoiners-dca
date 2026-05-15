@@ -7,11 +7,17 @@ LABEL org.opencontainers.image.licenses=MIT
 
 WORKDIR /app
 
-# System deps: ca-certificates for HTTPS exchange APIs; wget for the dashboard
-# healthcheck used by docker-compose.
+# System deps: ca-certificates for HTTPS exchange APIs; wget for the
+# dashboard healthcheck used by docker-compose; gosu to drop privileges
+# from the entrypoint after the chown step (small static binary, ~2MB).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates wget \
+    ca-certificates wget gosu \
     && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user with stable uid/gid so chowned bind-mount data
+# survives image rebuilds and remains readable from host-side tools.
+RUN groupadd -r -g 1001 dca && \
+    useradd  -r -g dca -u 1001 -d /app -s /usr/sbin/nologin dca
 
 COPY pyproject.toml ./
 COPY src/ ./src/
@@ -24,7 +30,11 @@ COPY config.example.yaml ./
 RUN pip install --no-cache-dir --upgrade 'pip>=24.3' 'setuptools>=78.0' 'wheel>=0.46.2' \
     && pip install --no-cache-dir -e .
 
-# Mount points: /app/config holds config.yaml (read-only); /app/data holds the
+# Entrypoint shim that chowns bind mounts then drops privs to `dca`.
+COPY hosted/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# Mount points: /app/config holds config.yaml; /app/data holds the
 # SQLite event log; /app/reports holds generated tax CSVs.
 VOLUME ["/app/config", "/app/data", "/app/reports"]
 
@@ -32,5 +42,8 @@ VOLUME ["/app/config", "/app/data", "/app/reports"]
 # `dry_run: false` in their config.yaml.
 ENV BITCOINERS_DCA_DRY_RUN=true
 
-ENTRYPOINT ["bitcoiners-dca"]
+# NOTE: stay USER root through the entrypoint — it drops privileges to
+# `dca` via gosu after the chown step. Switching USER here would skip
+# that chown and break bind-mounted writes on first run.
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["--help"]
