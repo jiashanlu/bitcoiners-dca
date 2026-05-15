@@ -1393,18 +1393,23 @@ def create_app(
         cfg_path = state["config_path"]
 
         async def _run_buy_once_and_log():
+            print("[buy-now] task body started", flush=True)
             logger.info("buy-now: starting background cycle")
             try:
                 await _buy_once(cfg_path, dry=False)
+                print("[buy-now] _buy_once returned cleanly", flush=True)
                 logger.info("buy-now: background cycle completed")
             except Exception as e:
+                print(f"[buy-now] CRASHED: {e!r}", flush=True)
                 logger.exception("buy-now cycle failed: %s", e)
                 _db().set_meta(
                     "buy_now.last_error",
                     f"{datetime.now(timezone.utc).isoformat()} :: {str(e)[:200]}",
                 )
 
+        print(f"[buy-now] spawning task, current _BG_TASKS size={len(_BG_TASKS)}", flush=True)
         _spawn_bg(_run_buy_once_and_log())
+        print(f"[buy-now] task spawned, _BG_TASKS size={len(_BG_TASKS)}", flush=True)
         # Fire-and-forget: redirect immediately. The status-banner poll
         # picks up the cycle outcome on its next 20-second tick, and any
         # error is written to buy_now.last_error (visible on /trades).
