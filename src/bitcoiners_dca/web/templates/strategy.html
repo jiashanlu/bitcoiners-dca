@@ -74,10 +74,15 @@
   const evN = document.getElementById('every_n_hours');
   const out = document.getElementById('cycle_preview');
   if (!amt || !per || !freq || !out) return;
-  // Exchanges reject orders smaller than ~AED 40-50 (OKX BTC/USDT min,
-  // BitOasis BTC/AED min). Surface a clear warning before the user saves
-  // an impossible config.
-  const MIN_PER_CYCLE_AED = 50;
+  // Per-partner minimum order sizes (BTC-denominated, multiply by live
+  // BTC/AED to get the AED floor at any moment):
+  //   BitOasis BTC/AED:  0.000048 BTC  (empirically verified 2026-05-14)
+  //   OKX BTC/AED:       0.00001 BTC   (ccxt market.limits.amount.min)
+  // Cycles below the soft floor get partner-excluded by the smart router
+  // automatically — they don't "fail every cycle", they just route to the
+  // venues that can fill. Cycles below the hard floor can't route anywhere.
+  const HARD_FLOOR_BTC = 0.00001;     // OKX (smallest available venue)
+  const SOFT_FLOOR_BTC = 0.000048;    // BitOasis (largest of the direct floors)
   // Hard server-side ceiling — anything above this is refused on save.
   const MAX_PER_CYCLE_AED = 100000;
   // Soft ceiling — above this, save is refused unless a max_single_buy
@@ -117,18 +122,35 @@
       summary = '→ AED ' + perCycle.toFixed(2) + ' per cycle '
         + '(<strong>' + cyclesPerPeriod.toFixed(2) + ' ' + cad + ' cycles per ' + p.replace('ly', '') + '</strong>).';
     }
-    if (perCycle < MIN_PER_CYCLE_AED) {
-      out.style.color = 'var(--warn, #f0b000)';
-      summary += '<br><strong>⚠ Too small.</strong> Exchanges reject orders below ~AED '
-        + MIN_PER_CYCLE_AED + '. Either raise the budget, stretch the cadence (every 4-12 hours), '
-        + 'or pick a less frequent base frequency. Saving as-is will fail every cycle.';
-    } else if (perCycle > MAX_PER_CYCLE_AED) {
-      out.style.color = '#e86363';
+    // Track the strongest warning level the cycle triggers. Error beats
+    // warn beats no-color; partner-min and risk-cap checks are independent.
+    let color = '';
+    // Lower bound: partner minimums (need live BTC price to convert).
+    const price = window._btcAedPrice;
+    if (price && perCycle > 0) {
+      const hardFloorAed = HARD_FLOOR_BTC * price;
+      const softFloorAed = SOFT_FLOOR_BTC * price;
+      if (perCycle < hardFloorAed) {
+        color = '#e86363';
+        summary += '<br><strong>⛔ Below every partner\'s minimum.</strong> At today\'s BTC price, '
+          + 'no enabled exchange will fill orders under AED ' + hardFloorAed.toFixed(2) + ' '
+          + '(' + HARD_FLOOR_BTC + ' BTC). Raise the budget or stretch the cadence.';
+      } else if (perCycle < softFloorAed) {
+        color = 'var(--warn, #f0b000)';
+        summary += '<br><strong>⚠ Some partners will be excluded</strong> at this size '
+          + '(BitOasis needs ≥ AED ' + softFloorAed.toFixed(2) + ' today). Cycles will still '
+          + 'execute through OKX/Binance — check <a href="{{ prefix }}/routes-audit?amount='
+          + perCycle.toFixed(2) + '">Routes audit</a> to see which venues clear.';
+      }
+    }
+    // Upper bound: ceilings + soft caps.
+    if (perCycle > MAX_PER_CYCLE_AED) {
+      color = '#e86363';
       summary += '<br><strong>⛔ Above the hard ceiling (AED ' + MAX_PER_CYCLE_AED.toLocaleString()
         + ' / cycle).</strong> Save will be refused. If you genuinely need this size, '
         + 'split into multiple smaller cycles.';
     } else if (perCycle > SOFT_PER_CYCLE_AED) {
-      out.style.color = '#e86363';
+      color = '#e86363';
       // Daily/weekly intent vs hourly cycle is the classic trap. Highlight it.
       let dayIntent = '';
       if (f === 'hourly') {
@@ -138,9 +160,8 @@
       summary += '<br><strong>⚠ Large per-cycle amount.</strong> AED ' + perCycle.toFixed(0)
         + ' / cycle' + dayIntent + '. Set a <strong>Max single-buy cap</strong> below '
         + 'before saving — without it, Buy now or a misconfig can sweep your balance.';
-    } else {
-      out.style.color = '';
     }
+    out.style.color = color;
     // Show "≈ X sats" alongside the AED preview when we know current price.
     if (window._btcAedPrice && perCycle > 0) {
       const sats = Math.round((perCycle / window._btcAedPrice) * 1e8);
