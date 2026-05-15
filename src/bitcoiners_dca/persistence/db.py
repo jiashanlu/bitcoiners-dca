@@ -229,32 +229,39 @@ class Database:
         return Decimal(str(cur.fetchone()[0]))
 
     def btc_cost_basis_aed(self) -> Decimal:
-        """AED actually spent acquiring the BTC currently in inventory.
+        """AED cost basis of the BTC the bot has acquired.
 
-        Differs from `total_aed_spent` in that it does NOT inflate by
-        unused USDT pre-buys. Example:
+        Why this exists: `total_aed_spent` sums every AED outflow,
+        including USDT pre-buys for multi-hop routing. When the bot
+        carries unused USDT inventory, that inflates the denominator
+        and makes avg cost look artificially low vs spot.
 
-          - User buys 1000 USDT for 3677 AED to pre-fund 2-hop cycles.
-          - Bot has only converted ~300 USDT to BTC so far; 700 USDT sits
-            idle in the exchange account.
-          - `total_aed_spent` returns 3677 (all AED ever spent by the
-            bot), which over-states the cost basis of the BTC delivered.
-          - `btc_cost_basis_aed` returns ~1100 (3677 × 300/1000), the
-            AED-equivalent of the USDT that was actually converted, at
-            the bot's weighted-average USDT/AED purchase rate.
-
-        Math:
+        Methodology — approximate-cost-basis:
           - Direct BTC/AED buys: count `amount_quote` (AED) 1:1.
-          - BTC/USDT buys: convert `amount_quote` (USDT) → AED via the
-            bot's weighted-average USDT/AED purchase rate (= total AED
-            spent on USDT / total USDT bought). If the bot has no
-            USDT/AED buys, BTC/USDT trades are EXCLUDED from cost basis
-            — we have no audit trail for how those USDT got into the
-            account, so we can't honestly attribute an AED cost.
+          - BTC/USDT buys: convert `amount_quote` (USDT) → AED at the
+            bot's weighted-average USDT/AED purchase rate
+            (= total AED spent on USDT / total USDT bought).
+          - If bot has no USDT/AED history (e.g. user pre-funded all
+            their USDT externally), BTC/USDT trades are excluded — we
+            can't fabricate a rate.
+
+        Tradeoffs:
+          - If bot bought MORE USDT than it has spent on BTC, the
+            leftover USDT inventory is automatically excluded because
+            we multiply only `usdt_spent_on_btc` (not the full
+            `usdt_aed_spent`).
+          - If bot spent MORE USDT on BTC than it bought (because user
+            pre-funded USDT externally), we still attribute that excess
+            at the weighted rate. Strictly speaking those USDT cost the
+            bot nothing, but treating them as "free" produces an
+            unrealistically low avg cost — most users imagine those
+            USDT had AN AED cost in reality (just incurred outside the
+            bot). The weighted-rate approximation matches user
+            intuition.
 
         Returns 0 if no BTC has been bought yet.
         """
-        # Total AED spent on direct BTC/AED buys.
+        # Direct BTC/AED buys.
         cur = self._conn.execute(
             "SELECT COALESCE(SUM(CAST(amount_quote AS REAL)), 0) "
             "FROM trades WHERE side='buy' AND status='filled' "
@@ -262,7 +269,7 @@ class Database:
         )
         direct_aed = Decimal(str(cur.fetchone()[0]))
 
-        # Bot's weighted-average USDT/AED purchase rate.
+        # Bot's USDT/AED pool.
         cur = self._conn.execute(
             "SELECT "
             "  COALESCE(SUM(CAST(amount_quote AS REAL)), 0) AS aed_spent, "
@@ -274,7 +281,7 @@ class Database:
         usdt_aed_spent = Decimal(str(row[0]))
         usdt_bought    = Decimal(str(row[1]))
 
-        # Total USDT spent acquiring BTC.
+        # USDT consumed buying BTC.
         cur = self._conn.execute(
             "SELECT COALESCE(SUM(CAST(amount_quote AS REAL)), 0) "
             "FROM trades WHERE side='buy' AND status='filled' "
@@ -286,8 +293,8 @@ class Database:
             weighted_rate = usdt_aed_spent / usdt_bought
             via_usdt_aed = usdt_spent_on_btc * weighted_rate
         else:
-            # No bot-tracked USDT/AED buys, OR no BTC/USDT trades.
-            # In either case there's nothing to attribute via USDT.
+            # No bot-tracked USDT/AED buys, OR no BTC/USDT trades —
+            # nothing to attribute via the USDT channel.
             via_usdt_aed = Decimal(0)
 
         return direct_aed + via_usdt_aed

@@ -154,6 +154,29 @@ def test_cost_basis_skips_btc_usdt_when_no_usdt_aed_history(tmp_db):
     assert tmp_db.btc_cost_basis_aed() == Decimal("0")
 
 
+def test_cost_basis_attributes_pre_existing_usdt_at_weighted_rate(tmp_db):
+    """Bot spends MORE USDT on BTC than it bought via USDT/AED legs
+    (because user pre-funded USDT externally). Methodology choice:
+    attribute the excess at the bot's weighted USDT/AED rate too. Those
+    USDT cost the bot nothing IN ITS OWN ACCOUNTING, but the user paid
+    AED for them somewhere outside the bot — so treating them as free
+    produces an unrealistically low avg-cost number.
+
+    Setup:
+      - USDT/AED: 100 USDT for 370 AED (rate 3.70 AED/USDT).
+      - User had 30 USDT pre-existing in their OKX account.
+      - BTC/USDT: spent 130 USDT → 0.0004 BTC.
+
+    Expectation:
+      - cost_basis = 130 × 3.70 = 481 AED (attributes ALL USDT spent
+        on BTC at the bot's weighted rate).
+    """
+    tmp_db.record_trade(_hop("USDT/AED", "u-1", "370", "100"))
+    tmp_db.record_trade(_hop("BTC/USDT", "b-1", "130", "0.0004"))
+
+    assert tmp_db.btc_cost_basis_aed() == Decimal("481")
+
+
 # === Withdrawals ===
 
 def test_record_withdrawal_roundtrip(tmp_db):
