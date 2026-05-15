@@ -54,6 +54,31 @@ from bitcoiners_dca.web.jinja_env import make_jinja
 
 logger = logging.getLogger(__name__)
 
+# Background-task reference set. `asyncio.create_task()` returns a Task,
+# but if the only reference is the local variable it gets garbage-
+# collected before the body runs — the task vanishes silently. Adding
+# every fire-and-forget task here (with a done_callback that removes it
+# when finished) keeps a strong reference for the task's lifetime.
+_BG_TASKS: set = set()
+
+
+def _spawn_bg(coro):
+    """Schedule a coroutine fire-and-forget, holding a strong reference
+    so it isn't GC'd before completion. The done-callback both removes
+    the task from the set AND logs any unhandled exception (which a
+    naked create_task swallows silently)."""
+    import asyncio
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+
+    def _on_done(t):
+        _BG_TASKS.discard(t)
+        if not t.cancelled() and t.exception():
+            logger.exception("background task crashed", exc_info=t.exception())
+
+    task.add_done_callback(_on_done)
+    return task
+
 # Pro API base URL — matches the router's resolution. When set AND the
 # user has a Pro license key, /backtest tries the hosted /api/pro/backtest
 # endpoint first and falls back to the local engine on any failure.
@@ -1364,13 +1389,14 @@ def create_app(
         # cycle (exchange auth + market data + route + order placement +
         # notifications can take 30–300s; browsers/proxies give up at
         # ~100s). The cycle's outcome surfaces in the status-banner poll
-        # within 20s, and any error lands in /trades?error= or audit-log.
-        import asyncio
+        # within 20s, and any error lands in buy_now.last_error meta.
         cfg_path = state["config_path"]
 
         async def _run_buy_once_and_log():
+            logger.info("buy-now: starting background cycle")
             try:
                 await _buy_once(cfg_path, dry=False)
+                logger.info("buy-now: background cycle completed")
             except Exception as e:
                 logger.exception("buy-now cycle failed: %s", e)
                 _db().set_meta(
@@ -1378,7 +1404,7 @@ def create_app(
                     f"{datetime.now(timezone.utc).isoformat()} :: {str(e)[:200]}",
                 )
 
-        asyncio.create_task(_run_buy_once_and_log())
+        _spawn_bg(_run_buy_once_and_log())
         # Fire-and-forget: redirect immediately. The status-banner poll
         # picks up the cycle outcome on its next 20-second tick, and any
         # error is written to buy_now.last_error (visible on /trades).
