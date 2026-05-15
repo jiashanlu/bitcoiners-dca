@@ -11,6 +11,15 @@
     {% if bot_status.heartbeat_stale %}
       <span class="pill warn" style="margin-left:8px" title="Daemon hasn't checked in for >15 min">⚠ daemon stalled</span>
     {% endif %}
+    {% if bot_status.buy_now_age_seconds is not none %}
+      <span class="pill accent" style="margin-left:8px"
+            title="The cycle runs in the background. In maker-fallback mode it can wait up to 10 min for the limit order to fill, then falls back to taker.">
+        ⏳ Buy in flight · {{ bot_status.buy_now_age_seconds }}s
+      </span>
+    {% elif bot_status.buy_now_error %}
+      <span class="pill warn" style="margin-left:8px"
+            title="{{ bot_status.buy_now_error }}">⚠ Last buy-now failed</span>
+    {% endif %}
   </div>
   <div class="status-controls">
     {% if bot_status.state == "paused" %}
@@ -19,8 +28,11 @@
       </form>
     {% else %}
       <form method="post" action="{{ prefix }}/controls/buy-now" style="display:inline"
-            {% if bot_status.state == "live" %}onsubmit="return confirm('Place one real DCA buy right now? This will go through your exchange API key immediately.')"{% endif %}>
-        <button type="submit" class="btn-primary-sm" title="Run one DCA cycle right now (bypasses the cron schedule)">Buy now</button>
+            {% if bot_status.state == "live" and bot_status.buy_now_age_seconds is none %}onsubmit="return confirm('Place one real DCA buy right now? This will go through your exchange API key immediately.')"{% endif %}>
+        <button type="submit" class="btn-primary-sm"
+                {% if bot_status.buy_now_age_seconds is not none %}disabled aria-disabled="true" title="Buy already in flight — wait for it to finish before triggering another"{% else %}title="Run one DCA cycle right now (bypasses the cron schedule)"{% endif %}>
+          {% if bot_status.buy_now_age_seconds is not none %}Buying…{% else %}Buy now{% endif %}
+        </button>
       </form>
       <form method="post" action="{{ prefix }}/controls/pause" style="display:inline">
         <button type="submit" class="btn-secondary-sm">Pause</button>

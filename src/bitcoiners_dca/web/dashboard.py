@@ -433,9 +433,30 @@ def create_app(
             except Exception:
                 pass
 
+        # Buy-now progress: when the user clicks the button we set
+        # buy_now.started_at; the background task clears it on completion.
+        # The banner reads this to show "buy in flight (Ns ago)" so the
+        # user has feedback while a maker-mode order waits for fill.
+        buy_now_age = None
+        buy_now_error = None
+        try:
+            bn_raw = (_db().get_meta("buy_now.started_at") or "").strip()
+            if bn_raw:
+                bn_dt = datetime.fromisoformat(bn_raw)
+                if bn_dt.tzinfo is None:
+                    bn_dt = bn_dt.replace(tzinfo=timezone.utc)
+                buy_now_age = int((datetime.now(timezone.utc) - bn_dt).total_seconds())
+            err_raw = (_db().get_meta("buy_now.last_error") or "").strip()
+            if err_raw:
+                buy_now_error = err_raw
+        except Exception:
+            pass
+
         base = {
             "heartbeat_age_seconds": hb_age,
             "heartbeat_stale": hb_stale,
+            "buy_now_age_seconds": buy_now_age,  # None = no buy in flight
+            "buy_now_error": buy_now_error,
         }
         if paused:
             return {"state": "paused", "reason": reason, **base}
@@ -1385,35 +1406,51 @@ def create_app(
                 request,
                 f"/trades?error=Buy now blocked by risk caps: {'; '.join(decision.reasons)[:200]}",
             )
-        # Fire-and-forget so the browser doesn't block on the full DCA
-        # cycle (exchange auth + market data + route + order placement +
-        # notifications can take 30–300s; browsers/proxies give up at
-        # ~100s). The cycle's outcome surfaces in the status-banner poll
-        # within 20s, and any error lands in buy_now.last_error meta.
+        # Fire-and-forget — the cycle can take up to maker.timeout_seconds
+        # (default 10 min) when prefer_maker is on. Browsers + proxies give
+        # up at ~100s. We track progress in DB meta so the status banner
+        # (polls every 20s) can show "buy in flight" without keeping the
+        # request open.
         cfg_path = state["config_path"]
+        db = _db()
+        db.set_meta("buy_now.started_at", datetime.now(timezone.utc).isoformat())
+        db.set_meta("buy_now.last_error", "")  # clear any stale error
 
         async def _run_buy_once_and_log():
-            print("[buy-now] task body started", flush=True)
             logger.info("buy-now: starting background cycle")
             try:
                 await _buy_once(cfg_path, dry=False)
-                print("[buy-now] _buy_once returned cleanly", flush=True)
                 logger.info("buy-now: background cycle completed")
             except Exception as e:
-                print(f"[buy-now] CRASHED: {e!r}", flush=True)
                 logger.exception("buy-now cycle failed: %s", e)
                 _db().set_meta(
                     "buy_now.last_error",
                     f"{datetime.now(timezone.utc).isoformat()} :: {str(e)[:200]}",
                 )
+            finally:
+                _db().set_meta("buy_now.started_at", "")
 
-        print(f"[buy-now] spawning task, current _BG_TASKS size={len(_BG_TASKS)}", flush=True)
         _spawn_bg(_run_buy_once_and_log())
-        print(f"[buy-now] task spawned, _BG_TASKS size={len(_BG_TASKS)}", flush=True)
-        # Fire-and-forget: redirect immediately. The status-banner poll
-        # picks up the cycle outcome on its next 20-second tick, and any
-        # error is written to buy_now.last_error (visible on /trades).
-        return _redirect(request, "/trades?queued=1")
+
+        # Redirect back to where the user clicked from — Overview if
+        # that's where the button lives, /strategy if they clicked from
+        # there, etc. Same-origin path only (open-redirect guard).
+        return_to = "/"
+        ref = request.headers.get("referer", "")
+        if ref:
+            try:
+                from urllib.parse import urlparse
+                p = urlparse(ref)
+                if p.path and not p.path.startswith("//"):
+                    # Keep the path + query from the referer
+                    return_to = p.path + (("?" + p.query) if p.query else "")
+                    # Strip dca/console prefix added by bitcoiners-app proxy
+                    # — _redirect re-adds it from X-Forwarded-Prefix.
+                    if return_to.startswith("/dca/console"):
+                        return_to = return_to[len("/dca/console"):] or "/"
+            except Exception:
+                pass
+        return _redirect(request, return_to)
 
     # === JSON endpoints (kept for backward compat + CLI/scripting use) ===
 
