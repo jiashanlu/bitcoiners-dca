@@ -1316,11 +1316,21 @@ def create_app(
                 "dip_threshold_pct": str(form_raw.get("dip_threshold_pct", "-10")),
                 "dip_multiplier": str(form_raw.get("dip_multiplier", "2.0")),
             }
+            taker_fee_pct = Decimal(form["taker_fee_pct"])
+            # Clamp at 5% — anything higher silently produces ~0 BTC and is
+            # almost certainly a unit error (e.g. typing "1.5" meaning 1.5%
+            # instead of 0.015). Fail loud rather than running a useless
+            # backtest the user trusts.
+            if taker_fee_pct < 0 or taker_fee_pct > Decimal("0.05"):
+                raise ValueError(
+                    f"taker_fee_pct={taker_fee_pct} outside sane range "
+                    f"[0, 0.05]. 0.005 = 0.5%, not 0.5."
+                )
             cfg = BacktestConfig(
                 base_amount_aed=Decimal(form["amount_aed"]),
                 frequency=form["frequency"],
                 day_of_week=form["day_of_week"],
-                taker_fee_pct=Decimal(form["taker_fee_pct"]),
+                taker_fee_pct=taker_fee_pct,
                 dip_overlay_enabled=form["dip_overlay"],
                 dip_threshold_pct=Decimal(form["dip_threshold_pct"]),
                 dip_multiplier=Decimal(form["dip_multiplier"]),

@@ -41,8 +41,8 @@
     </div>
     <div class="form-row">
       <label>Taker fee % (decimal)</label>
-      <input type="text" name="taker_fee_pct" value="{{ form.taker_fee_pct }}" pattern="0\.[0-9]+|0">
-      <small>0.005 = 0.5%. Use 0.001 for OKX maker-mode estimate.</small>
+      <input type="number" name="taker_fee_pct" value="{{ form.taker_fee_pct }}" step="0.0001" min="0" max="0.05" required>
+      <small>0.005 = 0.5%. Use 0.001 for OKX maker-mode estimate. Capped at 5% (anything higher silently produces ~0 BTC).</small>
     </div>
     <div class="form-row">
       <label><input type="checkbox" name="dip_overlay" {% if form.dip_overlay %}checked{% endif %}> Enable buy-the-dip overlay</label>

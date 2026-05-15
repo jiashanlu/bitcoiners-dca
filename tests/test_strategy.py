@@ -224,3 +224,70 @@ async def test_auto_withdraw_disabled_by_default(router, base_config):
 
     assert ex.withdrawals == []
     assert result.withdrew_btc is None
+
+
+@pytest.mark.asyncio
+async def test_auto_withdraw_skips_when_recent_withdrawal_recorded(router, tmp_path):
+    """Regression: if a withdrawal in the same exchange/asset was recorded
+    in the last 60 min, skip the auto-withdraw instead of duplicating it
+    (defends against the crash-between-call-and-cycle-complete race).
+    """
+    from bitcoiners_dca.persistence.db import Database
+    from bitcoiners_dca.core.models import Withdrawal, WithdrawalStatus
+
+    db = Database(str(tmp_path / "dca.db"))
+    # Pre-record a recent withdrawal — the strategy should see this and
+    # bail out before calling withdraw_btc.
+    db.record_withdrawal(Withdrawal(
+        exchange="okx",
+        withdrawal_id="prior-1",
+        asset="BTC",
+        amount=Decimal("0.005"),
+        address="bc1qabc",
+        fee=Decimal("0.0001"),
+        status=WithdrawalStatus.PENDING,
+        txid=None,
+        created_at=datetime.now(timezone.utc),
+    ))
+
+    cfg = StrategyConfig(
+        base_amount_aed=Decimal("500"),
+        auto_withdraw_enabled=True,
+        auto_withdraw_address="bc1qabc",
+        auto_withdraw_threshold_btc=Decimal("0.001"),
+    )
+    ex = StubExchange("okx", ask="350000", btc_balance="0.01")
+    strategy = DCAStrategy(cfg, router, db=db)
+
+    result = await strategy.execute([ex])
+
+    # The cycle bought BTC normally, but auto-withdraw was suppressed.
+    assert ex.withdrawals == []
+    assert result.withdrew_btc is None
+    assert any("idempotency" in n for n in result.notes), \
+        f"expected idempotency note, got: {result.notes!r}"
+
+
+@pytest.mark.asyncio
+async def test_auto_withdraw_records_withdrawal_when_db_provided(router, tmp_path):
+    """Successful auto-withdraw should immediately persist a row so a
+    subsequent cycle's idempotency check has something to find.
+    """
+    from bitcoiners_dca.persistence.db import Database
+
+    db = Database(str(tmp_path / "dca.db"))
+    cfg = StrategyConfig(
+        base_amount_aed=Decimal("500"),
+        auto_withdraw_enabled=True,
+        auto_withdraw_address="bc1qabc",
+        auto_withdraw_threshold_btc=Decimal("0.001"),
+    )
+    ex = StubExchange("okx", ask="350000", btc_balance="0.01")
+    strategy = DCAStrategy(cfg, router, db=db)
+
+    result = await strategy.execute([ex])
+
+    assert len(ex.withdrawals) == 1
+    assert result.withdrew_btc is not None
+    # Idempotency check now sees the just-recorded withdrawal.
+    assert db.recent_withdrawal_exists("okx", "BTC", since_minutes=60) is True

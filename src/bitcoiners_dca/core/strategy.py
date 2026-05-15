@@ -167,12 +167,19 @@ class DCAStrategy:
         config: StrategyConfig,
         router: SmartRouter,
         overlays: Optional[list] = None,
+        db=None,
     ):
         self.config = config
         self.router = router
         # When overlays not provided, fall back to the legacy buy-the-dip path
         # driven by StrategyConfig fields. New code should pass overlays.
         self.overlays = overlays or self._legacy_overlays()
+        # Optional: Database for auto-withdraw idempotency. When provided,
+        # strategy persists every successful withdrawal and checks for a
+        # recent (last 60 min) withdrawal before initiating a new one — so
+        # a crash mid-withdraw can't trigger a duplicate on the next cycle.
+        # Tests don't pass db; behaviour is unchanged when None.
+        self.db = db
 
     def _legacy_overlays(self) -> list:
         from bitcoiners_dca.strategies import BuyTheDipOverlay
@@ -383,6 +390,18 @@ class DCAStrategy:
                 policy = self.config.auto_withdraw_exchanges.get(ex.name)
                 if not policy or not policy.get("enabled") or not policy.get("destination"):
                     continue
+                # Idempotency gate: if a withdrawal from this exchange was
+                # already recorded in the last 60 min, skip — a crash
+                # between calling withdraw_btc and the cycle finishing
+                # could otherwise drive a duplicate next cycle.
+                if self.db is not None and self.db.recent_withdrawal_exists(
+                    ex.name, "BTC", since_minutes=60
+                ):
+                    result.notes.append(
+                        f"Auto-withdraw from {ex.name} skipped: recent withdrawal "
+                        "already recorded within 60 min (idempotency)"
+                    )
+                    continue
                 threshold = Decimal(str(policy.get("threshold_btc", "0.001")))
                 network = policy.get("network", "bitcoin")
                 destination = policy["destination"]
@@ -405,6 +424,16 @@ class DCAStrategy:
                         address=destination,
                         network=network,
                     )
+                    # Persist immediately so a crash AFTER this call but
+                    # before the cycle completes still leaves a record for
+                    # the next cycle's idempotency gate to see.
+                    if self.db is not None:
+                        try:
+                            self.db.record_withdrawal(wd)
+                        except Exception as e:
+                            result.errors.append(
+                                f"Failed to persist withdrawal record from {ex.name}: {e}"
+                            )
                     result.withdrew_btc = (result.withdrew_btc or Decimal(0)) + withdraw_amount
                     result.withdrew_to_address = destination
                     result.notes.append(
@@ -421,25 +450,41 @@ class DCAStrategy:
         ):
             # Legacy path: single destination, fires only on final exchange.
             final_ex = exchange_map[result.orders[-1].exchange]
-            try:
-                btc_balance = await final_ex.get_balance("BTC")
-                if btc_balance and btc_balance.free >= self.config.auto_withdraw_threshold_btc:
-                    fees = await final_ex.get_fee_schedule(self.config.pair)
-                    withdraw_amount = btc_balance.free - fees.withdrawal_fee_btc
-                    if withdraw_amount > 0:
-                        wd = await final_ex.withdraw_btc(
-                            amount_btc=withdraw_amount,
-                            address=self.config.auto_withdraw_address,
-                        )
-                        result.withdrew_btc = withdraw_amount
-                        result.withdrew_to_address = self.config.auto_withdraw_address
-                        result.notes.append(
-                            f"Auto-withdrew {withdraw_amount} BTC from {final_ex.name} "
-                            f"(withdrawal_id={wd.withdrawal_id})"
-                        )
-            except Exception as e:
-                # Non-fatal: log but don't fail the whole cycle
-                result.errors.append(f"Auto-withdraw skipped: {e}")
+            # Idempotency gate (same rationale as the per-exchange path above).
+            if self.db is not None and self.db.recent_withdrawal_exists(
+                final_ex.name, "BTC", since_minutes=60
+            ):
+                result.notes.append(
+                    f"Auto-withdraw from {final_ex.name} skipped: recent withdrawal "
+                    "already recorded within 60 min (idempotency)"
+                )
+            else:
+                try:
+                    btc_balance = await final_ex.get_balance("BTC")
+                    if btc_balance and btc_balance.free >= self.config.auto_withdraw_threshold_btc:
+                        fees = await final_ex.get_fee_schedule(self.config.pair)
+                        withdraw_amount = btc_balance.free - fees.withdrawal_fee_btc
+                        if withdraw_amount > 0:
+                            wd = await final_ex.withdraw_btc(
+                                amount_btc=withdraw_amount,
+                                address=self.config.auto_withdraw_address,
+                            )
+                            if self.db is not None:
+                                try:
+                                    self.db.record_withdrawal(wd)
+                                except Exception as e:
+                                    result.errors.append(
+                                        f"Failed to persist withdrawal record from {final_ex.name}: {e}"
+                                    )
+                            result.withdrew_btc = withdraw_amount
+                            result.withdrew_to_address = self.config.auto_withdraw_address
+                            result.notes.append(
+                                f"Auto-withdrew {withdraw_amount} BTC from {final_ex.name} "
+                                f"(withdrawal_id={wd.withdrawal_id})"
+                            )
+                except Exception as e:
+                    # Non-fatal: log but don't fail the whole cycle
+                    result.errors.append(f"Auto-withdraw skipped: {e}")
 
         return result
 

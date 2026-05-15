@@ -255,8 +255,9 @@ def _build_overlays(cfg: AppConfig) -> list:
     return out
 
 
-def _build_strategy(cfg: AppConfig, router: SmartRouter) -> DCAStrategy:
+def _build_strategy(cfg: AppConfig, router: SmartRouter, db=None) -> DCAStrategy:
     return DCAStrategy(
+        db=db,
         config=StrategyConfig(
             base_amount_aed=cfg.strategy.amount_aed,
             frequency=cfg.strategy.frequency,
@@ -352,8 +353,10 @@ async def _buy_once(config_path: str, dry: bool):
         cfg.dry_run = True
     exchanges = _build_exchanges(cfg)
     router = _build_router(cfg)
-    strategy = _build_strategy(cfg, router)
     db = Database(cfg.persistence.db_path)
+    # Pass db so DCAStrategy can record withdrawals + run the
+    # idempotency gate against recent withdrawals.
+    strategy = _build_strategy(cfg, router, db=db)
     notifier = Notifier(cfg.notifications)
     market_data = MarketDataProvider(db=db)
     snap = market_data.snapshot()
@@ -527,8 +530,8 @@ async def _run_daemon(config_path: str):
         logging.info("exchanges configured — exiting idle loop, starting daemon")
 
     router = _build_router(cfg)
-    strategy = _build_strategy(cfg, router)
     db = Database(cfg.persistence.db_path)
+    strategy = _build_strategy(cfg, router, db=db)
     notifier = Notifier(cfg.notifications)
     monitor = ArbitrageMonitor(
         min_spread_pct=cfg.arbitrage.min_spread_pct,
@@ -543,7 +546,10 @@ async def _run_daemon(config_path: str):
         fresh_cfg = _load_runtime_config(config_path)
         fresh_exchanges = _build_exchanges(fresh_cfg)
         fresh_router = _build_router(fresh_cfg)
-        fresh_strategy = _build_strategy(fresh_cfg, fresh_router)
+        # Reuse the long-lived db connection so the rebuilt strategy
+        # shares the same SQLite handle (and so withdrawal records
+        # written by the scheduled cycle are visible to it).
+        fresh_strategy = _build_strategy(fresh_cfg, fresh_router, db=db)
         fresh_monitor = ArbitrageMonitor(
             min_spread_pct=fresh_cfg.arbitrage.min_spread_pct,
             slippage_buffer_pct=fresh_cfg.arbitrage.slippage_buffer_pct,
