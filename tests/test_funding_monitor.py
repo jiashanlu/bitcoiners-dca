@@ -70,3 +70,86 @@ def test_separate_instruments_have_independent_cooldowns(db):
     second = m.evaluate_alert(_reading("20", instrument="ETH-USDT-SWAP"))
     assert first is not None
     assert second is not None  # different instrument → independent cooldown
+
+
+# ─── Cadence derivation ────────────────────────────────────────────────
+#
+# Regression: 8h, 4h, and 1h funding intervals all annualize correctly.
+# The old code hardcoded 1095 settlements/year (8h-only); now we derive
+# from OKX's fundingTime/nextFundingTime fields. These tests exercise
+# `_fetch_okx` against a stub httpx client so we never touch the network.
+
+
+class _StubResponse:
+    def __init__(self, payload):
+        self._payload = payload
+        self.status_code = 200
+
+    def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        pass
+
+
+class _StubClient:
+    def __init__(self, payload):
+        self._payload = payload
+
+    async def get(self, url, headers=None):
+        return _StubResponse(self._payload)
+
+
+def _okx_payload(rate: str, ft_ms: int, nft_ms: int) -> dict:
+    return {
+        "code": "0",
+        "data": [{
+            "fundingRate": rate,
+            "fundingTime": str(ft_ms),
+            "nextFundingTime": str(nft_ms),
+        }],
+    }
+
+
+@pytest.mark.asyncio
+async def test_okx_cadence_8h_annualizes_at_1095_periods(db):
+    """A 0.01% per 8h rate should annualize to 0.01 × 1095 = ~10.95%."""
+    monitor = FundingMonitor(db=db)
+    ft = 1_700_000_000_000
+    nft = ft + 8 * 60 * 60 * 1000  # +8h
+    client = _StubClient(_okx_payload("0.0001", ft, nft))
+    reading = await monitor._fetch_okx(client, "BTC-USDT-SWAP")
+    # 0.0001 × (365 * 24 / 8) × 100 = 0.0001 × 1095 × 100 = 10.95
+    assert abs(reading.annualized_pct - Decimal("10.95")) < Decimal("0.01")
+
+
+@pytest.mark.asyncio
+async def test_okx_cadence_4h_annualizes_at_2190_periods(db):
+    """A 0.01% per 4h rate should annualize ~2× the 8h version (21.9%)."""
+    monitor = FundingMonitor(db=db)
+    ft = 1_700_000_000_000
+    nft = ft + 4 * 60 * 60 * 1000  # +4h
+    client = _StubClient(_okx_payload("0.0001", ft, nft))
+    reading = await monitor._fetch_okx(client, "BTC-USDT-SWAP")
+    # 0.0001 × 2190 × 100 = 21.9
+    assert abs(reading.annualized_pct - Decimal("21.9")) < Decimal("0.05")
+
+
+@pytest.mark.asyncio
+async def test_okx_cadence_falls_back_to_8h_when_times_missing(db):
+    """If OKX response is missing fundingTime/nextFundingTime, fall back
+    to the historical 8h default (1095 periods)."""
+    monitor = FundingMonitor(db=db)
+    nft = 1_700_000_000_000 + 8 * 60 * 60 * 1000
+    payload = {
+        "code": "0",
+        "data": [{
+            "fundingRate": "0.0001",
+            # `fundingTime` deliberately absent
+            "nextFundingTime": str(nft),
+        }],
+    }
+    client = _StubClient(payload)
+    reading = await monitor._fetch_okx(client, "BTC-USDT-SWAP")
+    # Falls back to 1095, same as the 8h case.
+    assert abs(reading.annualized_pct - Decimal("10.95")) < Decimal("0.01")
