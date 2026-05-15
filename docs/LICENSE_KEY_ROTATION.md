@@ -118,21 +118,29 @@ env, push a tag-only commit, let CI rebuild + ship.)
 For each tenant in `provisioned_containers` with `status='running'`:
 
 ```bash
-# On the tenants host:
+# On the tenants host (or any box that can reach the provisioner):
 TENANT_ID="<email-slug-uuid8>"
-NEW_TOKEN=$(curl -s -X POST http://localhost:8500/resign \
+curl -s -X POST http://localhost:8500/resign \
   -H "X-Provisioner-Secret: $PROVISIONER_SHARED_SECRET" \
   -H "Content-Type: application/json" \
-  -d "{\"tenant_id\": \"$TENANT_ID\"}" | jq -r '.token')
-
-# Manually update the tenant's config.yaml license.key to the new token,
-# then restart the tenant compose to pick it up.
+  -d "{\"tenant_id\": \"$TENANT_ID\"}" | jq .
 ```
 
-> **Note:** the `/resign` endpoint doesn't exist yet — this runbook documents
-> the intended flow. Adding it is a future task; for now, rotation requires
-> deleting + re-provisioning each tenant, which loses no data because the
-> tenant data dirs are preserved.
+`/resign` does the full flow inline:
+
+1. Reads the tenant's `config/config.yaml` to extract customer_email + tier
+2. Calls `scripts/generate_license.py issue` with whichever
+   `PROVISION_PRIVATE_KEY` the provisioner process is currently holding
+3. Substitutes the new token back into `config.yaml`'s `license.key`
+4. Returns the new token in the JSON response
+
+The bot daemon hot-reloads config on every cycle, so the next cycle picks
+up the new token automatically — **no docker compose restart needed**.
+
+If `/resign` returns 500 with "could not locate license.key", the tenant
+config drifted from the template (e.g. someone hand-edited the YAML).
+Fall back to deleting + re-provisioning that tenant — both options
+preserve trade history because the tenant data dir is kept.
 
 ### Step 6 — verify
 

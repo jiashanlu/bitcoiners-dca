@@ -232,6 +232,129 @@ def destroy(
     return {"tenant_id": body.tenant_id, "status": "destroyed", "data_preserved_at": str(tenant_dir)}
 
 
+@app.post("/resign")
+def resign(
+    body: LifecycleRequest,
+    x_provisioner_secret: Optional[str] = Header(default=None),
+) -> dict:
+    """Re-issue a license token for an existing tenant.
+
+    Used during license-key rotation (see docs/LICENSE_KEY_ROTATION.md).
+    Extracts the customer email + tier from the tenant's current config,
+    signs a fresh 1-year token with whichever private key the provisioner
+    process holds NOW, and writes the new token back to config.yaml's
+    `license.key`. The daemon hot-reloads config on every cycle, so no
+    docker restart is needed — the next cycle picks up the new token.
+
+    Idempotent: re-running on the same tenant re-issues again with a
+    fresh issued_at timestamp. That's fine; verification is signature-
+    based, not history-based.
+    """
+    _require_secret(x_provisioner_secret)
+    if not TENANT_ID_RE.match(body.tenant_id):
+        raise HTTPException(400, "tenant_id must be lowercase alphanumeric + dashes")
+
+    tenant_dir = TENANTS_DIR / body.tenant_id
+    cfg_path = tenant_dir / "config" / "config.yaml"
+    if not cfg_path.is_file():
+        raise HTTPException(404, f"tenant {body.tenant_id} not provisioned")
+
+    # Extract customer_email from the `# Tenant: <id> · Customer: <email>`
+    # comment provision.sh writes at the top of every config.yaml. Failing
+    # to find it is fatal — without an email we'd sign a token to "unknown"
+    # which the bot would reject as malformed.
+    customer_email: Optional[str] = None
+    tier: Optional[str] = None
+    try:
+        contents = cfg_path.read_text()
+    except OSError as e:
+        raise HTTPException(500, f"cannot read tenant config: {e}")
+
+    customer_match = re.search(
+        r"#\s*Tenant:\s*\S+\s*·\s*Customer:\s*(\S+)", contents
+    )
+    if customer_match:
+        customer_email = customer_match.group(1).strip()
+    # Tier lives under the `license:` block; conservative regex grabs the
+    # first `tier: <value>` line.
+    tier_match = re.search(r"^\s*tier:\s*(\w+)\s*$", contents, re.MULTILINE)
+    if tier_match:
+        tier = tier_match.group(1).strip()
+
+    if not customer_email or not tier:
+        raise HTTPException(
+            500,
+            "cannot parse customer_email or tier from tenant config; "
+            "rotation needs manual intervention",
+        )
+    if tier not in ("pro", "business"):
+        raise HTTPException(400, f"tier {tier!r} not signable (only pro/business)")
+
+    private_key_path = os.environ.get("PROVISION_PRIVATE_KEY", "")
+    if not private_key_path or not Path(private_key_path).is_file():
+        raise HTTPException(500, "PROVISION_PRIVATE_KEY env var missing or path invalid")
+
+    # 1-year expiry, matching provision.sh.
+    expires_iso = subprocess.check_output(
+        ["bash", "-c", "date -u -d '+1 year' +%Y-%m-%d 2>/dev/null || date -u -v+1y +%Y-%m-%d"],
+        text=True,
+    ).strip()
+
+    cmd = [
+        "python3",
+        str(HOSTED_DIR.parent / "scripts" / "generate_license.py"),
+        "issue",
+        "--private-key", private_key_path,
+        "--customer-id", customer_email,
+        "--tier", tier,
+        "--expires", expires_iso,
+        "--notes", f"resigned by /resign endpoint",
+    ]
+    try:
+        result = subprocess.run(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args
+            cmd,  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args
+            capture_output=True, text=True, check=True, timeout=30,
+        )
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(500, f"generate_license.py failed: {e.stderr.strip()[:500]}")
+    # Token is the last non-blank line of stdout (provision.sh uses the
+    # same parsing trick).
+    lines = [ln.strip() for ln in result.stdout.splitlines() if ln.strip()]
+    if not lines:
+        raise HTTPException(500, "generate_license.py produced no output")
+    new_token = lines[-1]
+
+    # Write the new token back. Replace the existing `key:` line under
+    # the `license:` block. Bounded to one substitution to avoid clobbering
+    # any future nested `key:` (e.g. exchange API keys).
+    new_contents, n_subs = re.subn(
+        r"(^\s*license:\s*\n(?:.*\n)*?\s*key:\s*)\".*?\"",
+        r'\1"' + new_token + '"',
+        contents,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if n_subs != 1:
+        raise HTTPException(
+            500,
+            "could not locate license.key in tenant config; manual edit required",
+        )
+    try:
+        cfg_path.write_text(new_contents)
+    except OSError as e:
+        raise HTTPException(500, f"cannot write tenant config: {e}")
+
+    log.info(f"RESIGN tenant={body.tenant_id} tier={tier} customer={customer_email}")
+    return {
+        "tenant_id": body.tenant_id,
+        "status": "resigned",
+        "tier": tier,
+        "customer_email": customer_email,
+        "expires_iso": expires_iso,
+        "token": new_token,
+    }
+
+
 # ─── Helpers ─────────────────────────────────────────────────────────────
 
 def _parse_port(stdout: str) -> Optional[int]:
