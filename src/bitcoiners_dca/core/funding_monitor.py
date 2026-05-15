@@ -29,8 +29,12 @@ from bitcoiners_dca.persistence.db import Database
 logger = logging.getLogger(__name__)
 
 
-# OKX funding settles every 8 hours → 1095 settlements per year.
-_OKX_FUNDINGS_PER_YEAR = Decimal(3 * 365)
+# Default cadence: 8h, used as a fallback when OKX's response doesn't
+# carry the timing fields needed to derive it. Most BTC-USDT-SWAP-style
+# instruments are 8h, but OKX has 4h and 1h variants too — annualizing
+# all of them at 8h would over-state annualized rates on shorter cadences.
+_DEFAULT_FUNDINGS_PER_YEAR = Decimal(3 * 365)
+_MS_PER_YEAR = Decimal(365 * 24 * 60 * 60 * 1000)
 
 
 @dataclass(frozen=True)
@@ -93,7 +97,20 @@ class FundingMonitor:
             raise RuntimeError(f"OKX funding API: {data.get('msg')}")
         d = data["data"][0]
         rate = Decimal(d["fundingRate"])
-        annualized = rate * _OKX_FUNDINGS_PER_YEAR * Decimal(100)
+        # Derive cadence from fundingTime / nextFundingTime when both
+        # are present. Falls back to the 8h default if either is missing
+        # or zero (older OKX responses, weird instruments).
+        try:
+            ft = int(d.get("fundingTime") or 0)
+            nft = int(d.get("nextFundingTime") or 0)
+            interval_ms = Decimal(nft - ft) if (ft and nft and nft > ft) else None
+        except (TypeError, ValueError):
+            interval_ms = None
+        if interval_ms and interval_ms > 0:
+            fundings_per_year = _MS_PER_YEAR / interval_ms
+        else:
+            fundings_per_year = _DEFAULT_FUNDINGS_PER_YEAR
+        annualized = rate * fundings_per_year * Decimal(100)
         settles = datetime.fromtimestamp(int(d["nextFundingTime"]) / 1000, tz=timezone.utc)
         return FundingReading(
             instrument=symbol,

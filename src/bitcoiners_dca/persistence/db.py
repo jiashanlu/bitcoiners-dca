@@ -186,33 +186,61 @@ class Database:
         self._conn.commit()
 
     def record_cycle(self, result: ExecutionResult) -> None:
-        self._conn.execute(
-            """INSERT INTO cycle_log
-               (timestamp, intended_amount_aed, overlay_applied, chosen_exchange,
-                order_id, success, notes, errors)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                result.timestamp.isoformat(),
-                str(result.intended_amount_aed),
-                result.overlay_applied,
+        # One transaction for the whole cycle. The previous implementation
+        # commit'd record_trade per hop then commit'd the cycle row at the
+        # end — if the daemon was killed between hops (OOM, container
+        # recycle, etc.) the DB ended up with partial trades but no
+        # cycle_log row, which makes reconciliation impossible. Wrapping
+        # in BEGIN/COMMIT means either everything lands or nothing does.
+        # Note: connection is opened with isolation_level=None (autocommit)
+        # so we explicitly drive the transaction with BEGIN here.
+        self._conn.execute("BEGIN")
+        try:
+            self._conn.execute(
+                """INSERT INTO cycle_log
+                   (timestamp, intended_amount_aed, overlay_applied, chosen_exchange,
+                    order_id, success, notes, errors)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    result.routing_decision.chosen.route.hops[-1].exchange
-                    if result.routing_decision else None
+                    result.timestamp.isoformat(),
+                    str(result.intended_amount_aed),
+                    result.overlay_applied,
+                    (
+                        result.routing_decision.chosen.route.hops[-1].exchange
+                        if result.routing_decision else None
+                    ),
+                    result.order.order_id if result.order else None,
+                    1 if (result.order and not result.errors) else 0,
+                    json.dumps(result.notes),
+                    json.dumps(result.errors),
                 ),
-                result.order.order_id if result.order else None,
-                1 if (result.order and not result.errors) else 0,
-                json.dumps(result.notes),
-                json.dumps(result.errors),
-            ),
-        )
-        # Persist EVERY hop, not just the final BTC-receiving one. For a
-        # two-hop AED→USDT→BTC route, this writes 2 rows so the AED leg
-        # (the actual stablecoin fee+price) is auditable + reflected in
-        # totals. The order_id is the primary key so INSERT OR REPLACE
-        # is naturally idempotent per leg.
-        for o in result.orders:
-            self.record_trade(o)
-        self._conn.commit()
+            )
+            # Persist EVERY hop, not just the final BTC-receiving one. For a
+            # two-hop AED→USDT→BTC route, this writes 2 rows so the AED leg
+            # (the actual stablecoin fee+price) is auditable + reflected in
+            # totals. The order_id is the primary key so INSERT OR REPLACE
+            # is naturally idempotent per leg.
+            for o in result.orders:
+                self._conn.execute(
+                    """INSERT OR REPLACE INTO trades
+                       (timestamp, exchange, order_id, pair, side, amount_quote,
+                        amount_base, price_avg, fee_quote, status, raw_json)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        o.created_at.isoformat(),
+                        o.exchange, o.order_id, o.pair, o.side.value,
+                        str(o.amount_quote),
+                        str(o.amount_base) if o.amount_base else None,
+                        str(o.price_filled_avg) if o.price_filled_avg else None,
+                        str(o.fee_quote),
+                        o.status.value,
+                        o.model_dump_json(),
+                    ),
+                )
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
 
     def get_meta(self, key: str) -> Optional[str]:
         cur = self._conn.execute("SELECT value FROM meta WHERE key = ?", (key,))

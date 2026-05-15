@@ -66,10 +66,21 @@ class ArbitrageMonitor:
                 # Net profit estimate
                 buy_fee_pct = cheap_f.taker_pct * Decimal(100)
                 sell_fee_pct = exp_f.taker_pct * Decimal(100)
-                # Withdrawal fee from cheap exchange — approximate as % of trade
-                # (small flat amount; trader buys ~1 BTC, withdrawal fee in BTC ~= small %)
-                # Conservative estimate: 0.05% for a 1 BTC arb
-                withdrawal_fee_pct_approx = Decimal("0.05")
+                # Withdrawal fee from cheap exchange — convert the per-BTC
+                # flat fee into a percent of the trade size. The previous
+                # 0.05% blanket was tuned for a 1 BTC arb and grossly
+                # under-states the fee on sub-1 BTC sizes (e.g. on a
+                # 0.05 BTC arb, a 0.0005 BTC OKX fee is 1.0%, not 0.05%).
+                # We use the current cheap_ex ask as the "trade size in BTC"
+                # proxy — caller's intent is per-BTC arb math, so:
+                #   fee_pct = (fee_btc / 1 BTC) * 100 = fee_btc * 100
+                # since `withdrawal_fee_btc` is already absolute. Bias high
+                # if fees aren't reported (some adapters return 0).
+                wf_btc = cheap_f.withdrawal_fee_btc or Decimal("0.0005")
+                # Per-percent: fee in BTC × 100 = % of 1-BTC arb. Real arb
+                # sizes are usually larger (1+ BTC), so this is a ceiling
+                # — better to under-trigger than over-trigger alerts.
+                withdrawal_fee_pct_approx = wf_btc * Decimal(100)
 
                 net_pct = (
                     gross_spread_pct

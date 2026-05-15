@@ -55,6 +55,7 @@ def _to_decimal(value) -> Decimal:
 
 class OKXExchange(Exchange):
     name = "okx"
+    supports_lightning_withdrawal = True  # OKX accepts BOLT11 invoices
 
     def __init__(self, api_key: str, api_secret: str, passphrase: str,
                  dry_run: bool = False):

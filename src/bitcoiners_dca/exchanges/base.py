@@ -50,6 +50,11 @@ class Exchange(ABC):
 
     name: str        # e.g. "okx", "binance", "bitoasis"
     quote_currency: str = "AED"  # default; some exchanges may be USDT-only
+    # Whether `withdraw_btc(..., network="lightning")` is implemented and
+    # actually expected to succeed against this venue. Default False; OKX
+    # overrides to True. The dashboard reads this to gate the LN field on
+    # the per-exchange withdrawal form (no more lying about LN support).
+    supports_lightning_withdrawal: bool = False
 
     # === IDENTITY / HEALTH ===
 

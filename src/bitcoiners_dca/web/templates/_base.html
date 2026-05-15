@@ -331,7 +331,7 @@ a { color: var(--accent); text-decoration: none; }
     <div class="flash warn" style="line-height:1.65">
       <strong>👋 Welcome to bitcoiners-dca.</strong> You're in <strong>dry-run mode</strong> right now — cycles fire on schedule but no real orders are placed. Run through this checklist:
       <ol style="margin:8px 0 0 1.4em">
-        <li>Pick a strategy on <a href="{{ prefix }}/strategy">Strategy</a> (frequency + budget). Each exchange has its own minimum order size (BitOasis ≈ AED 14, OKX ≈ AED 3 at current BTC price); the <a href="{{ prefix }}/routes-audit">Routes audit</a> page shows which venues your cycle clears.</li>
+        <li>Pick a strategy on <a href="{{ prefix }}/strategy">Strategy</a> (frequency + budget). Each exchange has its own minimum order size (roughly AED 50-100 covers all major venues today, but it drifts with the BTC price); the <a href="{{ prefix }}/routes-audit">Routes audit</a> page shows which venues your cycle clears in real time.</li>
         <li>Add your exchange API keys on <a href="{{ prefix }}/exchanges">Exchanges</a> (trade-only scope; never withdraw scope).</li>
         <li>(Optional but recommended) Set your <a href="{{ prefix }}/withdrawals">auto-withdraw destination</a> — your own hardware wallet address.</li>
         <li>Set a <strong>daily-spend risk cap</strong> on <a href="{{ prefix }}/strategy">Strategy</a> → Risk caps. Belt + braces.</li>

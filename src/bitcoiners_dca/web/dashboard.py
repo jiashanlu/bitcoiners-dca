@@ -387,6 +387,19 @@ def create_app(
         """Strip trailing slash; "" if not behind a reverse proxy."""
         return request.headers.get("x-forwarded-prefix", "").rstrip("/")
 
+    def _user_now() -> datetime:
+        """Current time in the user's configured timezone — same source
+        risk-manager + scheduler use. Used for `Refreshed at:` labels in
+        balances/prices partials so the dashboard never mixes UTC with
+        Asia/Dubai (or whatever the operator has set)."""
+        from zoneinfo import ZoneInfo
+        tz_name = _config().strategy.timezone or "Asia/Dubai"
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = ZoneInfo("Asia/Dubai")
+        return datetime.now(timezone.utc).astimezone(tz)
+
     def _redirect(request: Request, path: str) -> RedirectResponse:
         """303 redirect that honours the iframe-proxy prefix so the
         browser navigates to /dca/console/<path> instead of escaping to
@@ -995,7 +1008,7 @@ def create_app(
                         rows.append({"exchange": name, **b})
             _cache_set("balances", rows)
         return HTMLResponse(jinja.get_template("partials/balances_table.html").render(
-            balances=rows, now=datetime.utcnow(), prefix=_prefix(request),
+            balances=rows, now=_user_now(), prefix=_prefix(request),
         ))
 
     @app.get("/prices", response_class=HTMLResponse)
@@ -1016,7 +1029,7 @@ def create_app(
                 rows = entry[1]
         if rows is not None:
             return HTMLResponse(jinja.get_template("partials/prices_table.html").render(
-                prices=rows, pair=pair, now=datetime.utcnow(), prefix=_prefix(request),
+                prices=rows, pair=pair, now=_user_now(), prefix=_prefix(request),
             ))
         results = await asyncio.gather(
             *[_safe_get_ticker(ex, pair) for ex in _exchanges()],
@@ -1030,7 +1043,7 @@ def create_app(
             rows.append({"exchange": name, **t})
         _cache_set(f"prices:{pair}", rows)
         return HTMLResponse(jinja.get_template("partials/prices_table.html").render(
-            prices=rows, pair=pair, now=datetime.utcnow(), prefix=_prefix(request),
+            prices=rows, pair=pair, now=_user_now(), prefix=_prefix(request),
         ))
 
     @app.get("/trades", response_class=HTMLResponse)
@@ -1125,13 +1138,14 @@ def create_app(
         )))
 
     # Lightning capability per exchange — drives whether the network
-    # selector + LN destination is offered. Aligned with what each
-    # adapter's withdraw_btc() will actually accept.
-    _LIGHTNING_SUPPORT = {
-        "okx": True,
-        "binance": False,
-        "bitoasis": False,
-    }
+    # selector + LN destination is offered. Sourced from each adapter's
+    # `supports_lightning_withdrawal` class attribute so a new exchange
+    # can opt in by setting that flag on its class — no edit needed here.
+    def _supports_lightning(name: str) -> bool:
+        for ex in _exchanges():
+            if ex.name == name:
+                return bool(getattr(ex, "supports_lightning_withdrawal", False))
+        return False
 
     def _withdrawals_ctx_extra():
         cfg = _config()
@@ -1148,7 +1162,7 @@ def create_app(
             p = existing.get(name)
             policies.append({
                 "exchange": name,
-                "supports_lightning": _LIGHTNING_SUPPORT.get(name, False),
+                "supports_lightning": _supports_lightning(name),
                 "enabled": (p.enabled if p else False),
                 "destination": (p.destination if p else "") or "",
                 "network": (p.network if p else "bitcoin"),
@@ -1236,7 +1250,7 @@ def create_app(
             if (
                 enabled
                 and requested_network == "lightning"
-                and not _LIGHTNING_SUPPORT.get(name, False)
+                and not _supports_lightning(name)
             ):
                 return _refuse(
                     f"{name} doesn't support Lightning withdrawals. Use an "
@@ -1632,7 +1646,7 @@ def create_app(
     async def health():
         return {
             "status": "ok",
-            "now": datetime.utcnow().isoformat(),
+            "now": datetime.now(timezone.utc).isoformat(),
             "exchanges_configured": [ex.name for ex in _exchanges()],
         }
 
