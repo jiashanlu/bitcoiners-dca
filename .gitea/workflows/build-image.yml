@@ -89,16 +89,30 @@ jobs:
           scp -o StrictHostKeyChecking=no \
             -i /root/.ssh/deploy_key \
             dca.tar.gz provisioner.tar.gz root@${TARGET_HOST}:/tmp/
+          # Pull the host-side git clone before recreating the provisioner.
+          # The compose file + provision.sh + tenant compose template all
+          # live in /opt/bitcoiners-dca on the target — they're bind-mounted
+          # into the provisioner container, so a fresh image without a
+          # fresh source tree means new provisioning runs old code. This
+          # step makes the host's working tree match origin/<branch>:
+          #   main  → Hetzner /opt/bitcoiners-dca (origin/main)
+          #   dev   → home   /opt/bitcoiners-dca (origin/dev)
+          # `git reset --hard` is safe because no one edits these checkouts
+          # manually — they exist purely for the provisioner to read.
           ssh -o StrictHostKeyChecking=no \
             -i /root/.ssh/deploy_key \
             root@${TARGET_HOST} '
               gunzip -c /tmp/dca.tar.gz | docker load
               gunzip -c /tmp/provisioner.tar.gz | docker load
               rm /tmp/dca.tar.gz /tmp/provisioner.tar.gz
-              # Restart provisioner so it picks up its new image.
-              # Tenant containers stay on their currently-running image —
-              # operator (or resume flow) recreates them explicitly.
-              cd /opt/bitcoiners-dca/hosted && \
+              cd /opt/bitcoiners-dca
+              git fetch origin
+              branch="$(git rev-parse --abbrev-ref HEAD)"
+              git reset --hard "origin/${branch}"
+              echo "host repo now at $(git log -1 --oneline)"
+              # Restart provisioner so it picks up its new image AND any
+              # changes in the bind-mounted hosted/ tree.
+              cd hosted && \
                 IMAGE_TAG=bitcoiners-provisioner:latest \
                 docker compose -f docker-compose.provisioner.yml up -d --force-recreate
             '
