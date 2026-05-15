@@ -10,6 +10,9 @@
   <button type="submit">Recompute</button>
 </form>
 
+{% if amount_error %}
+<div class="flash warn">{{ amount_error }}</div>
+{% endif %}
 {% if error %}
 <div class="flash err">{{ error }}</div>
 {% endif %}

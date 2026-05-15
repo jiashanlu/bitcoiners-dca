@@ -11,11 +11,16 @@
   <p class="help">Free tier is genuinely useful (single-exchange DCA + tax CSV). Pro / Business unlock multi-exchange routing, advanced overlays, and more. See <a href="https://bitcoiners.ae/dca-bot" target="_blank">tiers</a>.</p>
   <div class="form-row">
     <label>Tier</label>
-    <select name="license_tier">
-      {% for t in ["free", "pro", "business"] %}
-      <option value="{{ t }}" {% if config.license.tier == t %}selected{% endif %}>{{ t }}</option>
-      {% endfor %}
-    </select>
+    <div>
+      <span class="pill {% if license_tier in ('pro', 'business') %}accent{% else %}muted{% endif %}">
+        {{ license_tier }}
+      </span>
+      <small style="display:block;margin-top:6px;color:var(--text-muted)">
+        Tier is derived from your validated license key below — invalid or
+        missing keys downgrade to Free automatically. To upgrade, paste a
+        Pro/Business token in the field below and save.
+      </small>
+    </div>
   </div>
   <div class="form-row">
     <label>License key</label>

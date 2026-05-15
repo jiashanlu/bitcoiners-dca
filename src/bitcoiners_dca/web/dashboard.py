@@ -1065,7 +1065,22 @@ def create_app(
 
     @app.get("/routes-audit", response_class=HTMLResponse)
     async def routes_audit_page(request: Request):
-        amount = Decimal(request.query_params.get("amount", "500"))
+        # Parse the cycle amount carefully — this route is linked from
+        # several places (welcome banner, strategy form warning) and used
+        # to 500 on garbage like `?amount=abc`, `?amount=`, `?amount=NaN`.
+        # Fall back to a sensible default + flash error rather than crash.
+        raw_amount = request.query_params.get("amount", "500")
+        amount_error: Optional[str] = None
+        try:
+            amount = Decimal(raw_amount)
+            if not amount.is_finite() or amount <= 0:
+                raise InvalidOperation
+        except (InvalidOperation, ValueError):
+            amount = Decimal("500")
+            amount_error = (
+                f"Invalid cycle amount {raw_amount!r}; showing routes for "
+                f"AED 500 instead."
+            )
         from bitcoiners_dca.core.router import SmartRouter
         cfg = _config()
         router = SmartRouter(
@@ -1100,9 +1115,13 @@ def create_app(
                     decision.alternatives = aed_routes[1:]
         except Exception as e:
             error = str(e)[:200]
+        # Surface the input-parse error inline too, separately from
+        # routing errors (avoids overwriting genuine router errors with
+        # "we used a fallback amount").
         return HTMLResponse(jinja.get_template("routes.html").render(_ctx(
             request, active="routes",
             amount=amount, decision=decision, error=error,
+            amount_error=amount_error,
         )))
 
     # Lightning capability per exchange — drives whether the network
@@ -1343,15 +1362,37 @@ def create_app(
     async def settings_page(request: Request):
         return HTMLResponse(jinja.get_template("settings.html").render(_ctx(
             request, active="settings",
+            license_tier=_license().tier.value,
             license_features=[f.value for f in _license().enabled_features],
         )))
 
     @app.post("/settings", response_class=HTMLResponse)
     async def settings_save(request: Request):
         form = await request.form()
+        # Derive tier from the validated key — do NOT trust a tier value
+        # from the form. Previously a `<select name="license_tier">` let
+        # any user save `tier=pro` without a corresponding key, unlocking
+        # Pro-tier overlays in the strategy form until the next process
+        # reload. Now: parse the new key, set tier to whatever it
+        # validates as, fall back to free on missing/invalid.
+        from bitcoiners_dca.core.license import (
+            LicenseManager, LicenseTier, LICENSE_PUBLIC_KEY_HEX,
+        )
+        submitted_key = form.get("license_key") or None
+        # `LicenseManager.from_config` already returns LicenseTier.FREE on
+        # any failure (missing, malformed, wrong-sig, expired). The
+        # `tier_str` param is the REQUESTED tier — but the manager only
+        # honors the request when the key actually validates to it. We
+        # pass "business" so the manager validates against the strongest
+        # tier the key claims; if the key is for Pro, it'll downgrade.
+        resolved_tier = LicenseManager.from_config(
+            tier_str="business",
+            license_key=submitted_key,
+            public_key_hex=LICENSE_PUBLIC_KEY_HEX,
+        ).tier.value
         patch = {
-            "license.tier": form.get("license_tier", "free"),
-            "license.key": form.get("license_key") or None,
+            "license.tier": resolved_tier,
+            "license.key": submitted_key,
             "notifications.telegram.enabled": form.get("tg_enabled") == "on",
             "notifications.telegram.chat_id":
                 form.get("tg_chat_id") or None,
