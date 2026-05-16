@@ -1,4 +1,4 @@
-<h2>Balances <span class="muted" style="font-size:11px;font-weight:normal">· refreshed {{ now.strftime('%H:%M:%S') }} UTC</span></h2>
+<h2>Balances <span class="muted" style="font-size:11px;font-weight:normal">· refreshed {{ now.strftime('%H:%M:%S %Z') }}</span></h2>
 {% if balances %}
 <table>
   <thead><tr><th>Exchange</th><th>Asset</th><th>Free</th><th>Used</th><th>Total</th></tr></thead>
