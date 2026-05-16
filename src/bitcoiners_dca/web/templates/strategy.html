@@ -11,10 +11,10 @@
   <p class="help">Tell us how much you want to spend over a period and how often to buy. We compute the per-cycle amount automatically.</p>
   <div class="form-row">
     <label>Budget</label>
-    <div style="display:flex;gap:8px;align-items:center">
-      <input type="number" min="1" step="1" name="budget_amount" id="budget_amount" value="{{ config.strategy.budget_amount }}" style="flex:1;max-width:160px">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <input type="number" min="1" step="1" name="budget_amount" id="budget_amount" value="{{ config.strategy.budget_amount }}" style="flex:1 1 120px;max-width:160px">
       <span>AED, per</span>
-      <select name="budget_period" id="budget_period" style="flex:1;max-width:140px">
+      <select name="budget_period" id="budget_period" style="flex:1 1 100px;max-width:140px">
         {% for p in ["cycle", "daily", "weekly", "monthly", "yearly"] %}
         <option value="{{ p }}" {% if config.strategy.budget_period == p %}selected{% endif %}>{{ p }}</option>
         {% endfor %}
