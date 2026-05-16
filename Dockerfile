@@ -34,6 +34,14 @@ RUN pip install --no-cache-dir --upgrade 'pip>=24.3' 'setuptools>=78.0' 'wheel>=
 COPY hosted/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
+# Chown /app to the dca user. Without this, runtime writes to
+# /app/.bitcoiners-dca-cache (Path.home() resolves to /app for the dca
+# user per useradd -d /app above) hit PermissionError because all the
+# COPY layers above ran as root. The entrypoint chowns bind-mounted
+# subdirs (data, config, reports) on each start, but the top-level
+# /app directory + image-layer files need a build-time chown.
+RUN chown -R dca:dca /app
+
 # Mount points: /app/config holds config.yaml; /app/data holds the
 # SQLite event log; /app/reports holds generated tax CSVs.
 VOLUME ["/app/config", "/app/data", "/app/reports"]
