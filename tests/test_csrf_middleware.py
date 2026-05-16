@@ -76,3 +76,59 @@ def test_post_with_xforwarded_host_matches_origin():
         },
     )
     assert r.status_code == 200
+
+
+def test_cf_access_header_without_origin_or_referer_allowed():
+    """Server-to-server style call via the bitcoiners-app proxy — the
+    proxy sets cf-access-authenticated-user-email and the upstream
+    HTMX/fetch chain may strip Origin. Should pass (the proxy already
+    validated the session)."""
+    c = TestClient(_app())
+    r = c.post(
+        "/post",
+        headers={"cf-access-authenticated-user-email": "ben@example.com"},
+    )
+    assert r.status_code == 200
+
+
+def test_cf_access_header_with_matching_origin_allowed():
+    c = TestClient(_app())
+    r = c.post(
+        "/post",
+        headers={
+            "cf-access-authenticated-user-email": "ben@example.com",
+            "origin": "https://app.bitcoiners.ae",
+            "x-forwarded-host": "app.bitcoiners.ae",
+        },
+    )
+    assert r.status_code == 200
+
+
+def test_cf_access_header_with_attacker_origin_blocked():
+    """Defense-in-depth: even with a valid CF Access header set by the
+    proxy, a same-site CSRF from attacker.example must still be
+    rejected if it somehow reaches the dashboard. The CF header alone
+    is no longer a get-out-of-jail card."""
+    c = TestClient(_app())
+    r = c.post(
+        "/post",
+        headers={
+            "cf-access-authenticated-user-email": "ben@example.com",
+            "origin": "https://attacker.example",
+        },
+    )
+    assert r.status_code == 403
+    detail = r.json()["detail"]
+    assert "cf-access-authenticated header present" in detail
+
+
+def test_cf_access_header_with_attacker_referer_blocked():
+    c = TestClient(_app())
+    r = c.post(
+        "/post",
+        headers={
+            "cf-access-authenticated-user-email": "ben@example.com",
+            "referer": "https://attacker.example/page",
+        },
+    )
+    assert r.status_code == 403

@@ -256,22 +256,14 @@ class _OriginCSRFMiddleware(BaseHTTPMiddleware):
         if request.method in self.SAFE_METHODS:
             return await call_next(request)
 
-        # Trust requests that came through bitcoiners-app's proxy. The proxy
-        # is server-side; only it can set this header. The proxy already
-        # enforces a valid Auth.js session before forwarding, which is the
-        # primary CSRF defense — a cross-site attacker can't initiate a
-        # POST that the proxy then "blesses" because they don't have the
-        # auth cookie for app.bitcoiners.ae.
-        if request.headers.get("cf-access-authenticated-user-email"):
-            return await call_next(request)
-
+        # Build the allowed-host set up front so the CF-header path below
+        # can also reuse it for its same-site Origin/Referer check.
         origin = request.headers.get("origin")
         referer = request.headers.get("referer")
         host = request.headers.get("host", "")
-        scheme = request.url.scheme
-        # The X-Forwarded-Prefix is set by the bitcoiners-app proxy; treat
-        # those requests as coming from the proxy host, not the upstream.
-        # We accept the proxy's forwarded values.
+        # The X-Forwarded-Prefix / X-Forwarded-Host are set by the
+        # bitcoiners-app proxy; treat those requests as coming from the
+        # proxy host, not the upstream.
         fwd_host = request.headers.get("x-forwarded-host")
 
         # Compare by hostname (case-insensitive, ignore port + scheme) so
@@ -280,6 +272,41 @@ class _OriginCSRFMiddleware(BaseHTTPMiddleware):
         # same registered domain, same browser-origin.
         allowed_hosts = {self._host_of(f"//{host}") for host in {host, fwd_host} if host}
         allowed_hosts.discard("")
+
+        # Trust requests that came through bitcoiners-app's proxy AND
+        # carry a same-site Origin/Referer. The CF header alone was the
+        # previous trust signal, but that lets a same-site CSRF attempt
+        # ride the proxy — bitcoiners-app's middleware already blocks
+        # those at the edge, but defense-in-depth says we don't rely on
+        # a single layer. Requirements when CF header is present:
+        #   - Origin (preferred) OR Referer matches our allowed_hosts
+        #   - OR no Origin/Referer is sent at all (some HTMX flows do
+        #     this from server-side fetches — proxy already validated
+        #     the session so the absence of these headers is
+        #     interpretable as "internal call").
+        cf_auth = request.headers.get("cf-access-authenticated-user-email")
+        if cf_auth:
+            if origin:
+                if self._host_of(origin) in allowed_hosts:
+                    return await call_next(request)
+                return JSONResponse(
+                    {"error": "csrf",
+                     "detail": "cf-access-authenticated header present but Origin "
+                               f"host {self._host_of(origin)!r} not in {allowed_hosts}"},
+                    status_code=403,
+                )
+            if referer:
+                if self._host_of(referer) in allowed_hosts:
+                    return await call_next(request)
+                return JSONResponse(
+                    {"error": "csrf",
+                     "detail": "cf-access-authenticated header present but Referer "
+                               f"host {self._host_of(referer)!r} not in {allowed_hosts}"},
+                    status_code=403,
+                )
+            # Neither Origin nor Referer — server-to-server style; the
+            # upstream proxy already validated the session.
+            return await call_next(request)
 
         if origin:
             if self._host_of(origin) not in allowed_hosts:
