@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, Form, HTTPException, Query, Request
+from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
@@ -363,6 +364,17 @@ def create_app(
     # Cf-Access-Authenticated-User-Email). Opt-in via env so self-host /
     # Free tier still works without it.
     app.add_middleware(_CFGateMiddleware)
+
+    # Serve vendored htmx + chart.js from /static. Hosting these locally
+    # (instead of unpkg / cdn.jsdelivr.net) keeps the iframed dashboard
+    # working under any CSP the parent bitcoiners-app sets AND avoids
+    # Brave Shields / privacy-extension blocks on those CDNs. The path
+    # passes through the bitcoiners-app proxy as /dca/console/static/...
+    # — templates reference it via `{{ prefix }}/static/...`.
+    _static_dir = Path(__file__).parent / "static"
+    if _static_dir.is_dir():
+        app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
+
     jinja = make_jinja()
     state: dict = {
         "config_path": str(config_path),
