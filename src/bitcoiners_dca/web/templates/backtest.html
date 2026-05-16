@@ -112,11 +112,11 @@
     </tr>
     {% for c in recent_cycles %}
     <tr>
-      <td>{{ c.day }}</td>
-      <td style="text-align:right">{{ "%.0f"|format(c.price_aed) }}</td>
-      <td style="text-align:right">{{ "%.2f"|format(c.aed_spent) }}</td>
-      <td style="text-align:right">{{ "%.8f"|format(c.btc_bought) }}</td>
-      <td>{% if c.overlay_applied %}✓ dip{% endif %}</td>
+      <td data-label="Date">{{ c.day }}</td>
+      <td data-label="Price (AED)" style="text-align:right">{{ "%.0f"|format(c.price_aed) }}</td>
+      <td data-label="AED spent" style="text-align:right">{{ "%.2f"|format(c.aed_spent) }}</td>
+      <td data-label="BTC bought" style="text-align:right">{{ "%.8f"|format(c.btc_bought) }}</td>
+      <td data-label="Overlay">{% if c.overlay_applied %}✓ dip{% endif %}</td>
     </tr>
     {% endfor %}
   </table>

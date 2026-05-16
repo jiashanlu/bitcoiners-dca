@@ -33,15 +33,15 @@
     <tbody>
     {% for r in recent %}
       <tr>
-        <td class="mono" style="font-size:12px">{{ r.local_ts }}</td>
-        <td>{{ r.exchange }}</td>
-        <td>
+        <td class="mono" data-label="When" style="font-size:12px">{{ r.local_ts }}</td>
+        <td data-label="Exchange">{{ r.exchange }}</td>
+        <td data-label="Route">
           {{ r.route }}
           {% if r.is_multi_hop %}<span class="pill muted" style="font-size:10px;margin-left:6px">multi-hop</span>{% endif %}
         </td>
-        <td class="mono">{{ r.spent|round(4) }} {{ r.spent_ccy }}</td>
-        <td class="mono">{{ r.received|round(8) }} {{ r.received_ccy }}</td>
-        <td class="mono">{{ r.effective_price|round(2) }} {{ r.price_pair }}</td>
+        <td class="mono" data-label="Spent">{{ r.spent|round(4) }} {{ r.spent_ccy }}</td>
+        <td class="mono" data-label="Received">{{ r.received|round(8) }} {{ r.received_ccy }}</td>
+        <td class="mono" data-label="Eff. price">{{ r.effective_price|round(2) }} {{ r.price_pair }}</td>
       </tr>
     {% endfor %}
     </tbody>

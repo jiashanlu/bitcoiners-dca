@@ -10,16 +10,16 @@
   <tbody>
   {% for t in trades %}
     <tr>
-      <td class="mono" style="font-size:12px">{{ t.local_ts }}</td>
-      <td>{{ t.exchange }}</td>
-      <td>
+      <td class="mono" data-label="When" style="font-size:12px">{{ t.local_ts }}</td>
+      <td data-label="Exchange">{{ t.exchange }}</td>
+      <td data-label="Route">
         {{ t.route }}
         {% if t.is_multi_hop %}<span class="pill muted" style="font-size:10px;margin-left:6px">multi-hop</span>{% endif %}
       </td>
-      <td class="mono">{{ t.spent|round(4) }} {{ t.spent_ccy }}</td>
-      <td class="mono">{{ t.received|round(8) }} {{ t.received_ccy }}</td>
-      <td class="mono">{{ t.effective_price|round(2) }} {{ t.price_pair }}</td>
-      <td><span class="pill {% if t.status == 'filled' %}ok{% elif t.status == 'cancelled' %}muted{% else %}warn{% endif %}">{{ t.status }}</span></td>
+      <td class="mono" data-label="Spent">{{ t.spent|round(4) }} {{ t.spent_ccy }}</td>
+      <td class="mono" data-label="Received">{{ t.received|round(8) }} {{ t.received_ccy }}</td>
+      <td class="mono" data-label="Eff. price">{{ t.effective_price|round(2) }} {{ t.price_pair }}</td>
+      <td data-label="Status"><span class="pill {% if t.status == 'filled' %}ok{% elif t.status == 'cancelled' %}muted{% else %}warn{% endif %}">{{ t.status }}</span></td>
     </tr>
   {% endfor %}
   </tbody>

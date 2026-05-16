@@ -5,11 +5,11 @@
   <tbody>
   {% for b in balances %}
     <tr>
-      <td>{{ b.exchange }}</td>
-      <td class="mono">{{ b.asset }}</td>
-      <td class="mono">{{ b.free|btc if b.asset == "BTC" else b.free|money }}</td>
-      <td class="mono">{{ b.used|btc if b.asset == "BTC" else b.used|money }}</td>
-      <td class="mono"><strong>{{ b.total|btc if b.asset == "BTC" else b.total|money }}</strong></td>
+      <td data-label="Exchange">{{ b.exchange }}</td>
+      <td class="mono" data-label="Asset">{{ b.asset }}</td>
+      <td class="mono" data-label="Free">{{ b.free|btc if b.asset == "BTC" else b.free|money }}</td>
+      <td class="mono" data-label="Used">{{ b.used|btc if b.asset == "BTC" else b.used|money }}</td>
+      <td class="mono" data-label="Total"><strong>{{ b.total|btc if b.asset == "BTC" else b.total|money }}</strong></td>
     </tr>
   {% endfor %}
   </tbody>

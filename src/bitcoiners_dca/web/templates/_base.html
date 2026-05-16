@@ -287,11 +287,149 @@ code, .mono {
 }
 a { color: var(--accent); text-decoration: none; }
 .empty { text-align: center; color: var(--text-muted); padding: 30px; }
+
+/* ─── Mobile nav: hamburger drawer ─────────────────────────────────
+   The desktop sidebar stacking on top of the content on narrow
+   viewports pushes real data below the fold and feels like "the
+   menu IS the page". Under 640px we hide the sidebar entirely and
+   surface a compact top-bar with a hamburger that toggles the nav
+   as an overlay drawer. */
+.mobile-topbar {
+  display: none;
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  background: #060606;
+  border-bottom: 1px solid var(--border);
+  padding: 10px 14px;
+  align-items: center;
+  justify-content: space-between;
+}
+.mobile-topbar .brand { font-size: 15px; font-weight: 800; letter-spacing: -0.02em; }
+.nav-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 0;
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  font-size: 22px;
+  font-weight: 400;
+  cursor: pointer;
+}
+.nav-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+@media (max-width: 640px) {
+  /* Layout: single-column with topbar above content. Sidebar
+     becomes an offscreen drawer revealed on toggle. */
+  .layout { grid-template-columns: 1fr; }
+  .mobile-topbar { display: flex; }
+
+  .sidebar {
+    position: fixed;
+    inset: 0 30% 0 0;          /* drawer eats 70% of viewport width */
+    z-index: 50;
+    background: #060606;
+    border-right: 1px solid var(--border);
+    border-bottom: none;
+    transform: translateX(-100%);
+    transition: transform 0.18s ease-out;
+    overflow-y: auto;
+  }
+  .sidebar.is-open { transform: translateX(0); }
+  /* Backdrop for tap-to-close */
+  .sidebar-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.5);
+    z-index: 49;
+  }
+  .sidebar.is-open + .sidebar-backdrop { display: block; }
+
+  /* Tighten desktop sidebar items inside the drawer */
+  .sidebar .brand { padding: 6px 24px 18px; }
+  .sidebar nav a { padding: 12px 24px; font-size: 15px; min-height: 44px; }
+
+  .main { padding: 16px 14px 32px; }
+
+  /* Touch targets: WCAG 2.5.5 ≥24px, Apple HIG ≥44px — 40px
+     midpoint for everything interactive in the dashboard. */
+  button, .btn, a.btn,
+  input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]),
+  select, textarea {
+    min-height: 40px;
+  }
+  input[type="checkbox"], input[type="radio"] {
+    width: 22px;
+    height: 22px;
+  }
+  /* Help-icon hit area without enlarging the visible glyph. */
+  .help-icon { display: inline-block; padding: 10px; }
+
+  /* Readability — 11px monospace renders as 10px after subpixel
+     rounding on mobile Safari/Brave. Bump the floor. */
+  .mono, code { font-size: 13px; }
+  .muted, p.help, .form-row small { font-size: 14px; }
+
+  /* ─── Tables → cards (CSS-only via data-label) ────────────────
+     Tables overflow up to 238px on a 393px viewport. Swap to a
+     stacked label/value card per row. Each <td> needs a
+     data-label="<column header>" attr in the partial — that's the
+     only template change required. */
+  .card > table,
+  .card > h2 + table,
+  .card > p + table,
+  .card > .subtitle + table {
+    /* targeting tables inside cards keeps this from hitting any
+       nested presentational table that doesn't have data-label */
+  }
+  table thead { display: none; }
+  table, table tbody, table tr, table td {
+    display: block;
+    width: 100%;
+  }
+  table tr {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin-bottom: 10px;
+    background: rgba(255,255,255,0.015);
+  }
+  table td {
+    border-bottom: none;
+    padding: 4px 0;
+    display: grid;
+    grid-template-columns: 110px 1fr;
+    gap: 12px;
+    align-items: baseline;
+    font-size: 13px;
+  }
+  table td::before {
+    content: attr(data-label);
+    color: var(--text-muted);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+  }
+  /* td with no data-label: render value full-width (e.g. error rows
+     with colspan, or summary footers) */
+  table td:not([data-label])::before { content: none; }
+  table td:not([data-label]) { grid-template-columns: 1fr; }
+}
 </style>
 </head>
 <body>
+<div class="mobile-topbar">
+  <div class="brand">🟧 bitcoiners-dca</div>
+  <button class="nav-toggle" type="button" aria-controls="sidebar-nav" aria-expanded="false" aria-label="Toggle navigation">☰</button>
+</div>
 <div class="layout">
-  <aside class="sidebar">
+  <aside class="sidebar" id="sidebar-nav">
     <div class="brand">🟧 bitcoiners-dca</div>
     <nav>
       <a href="{{ prefix }}/" {% if active == "overview" %}class="active"{% endif %}>Overview</a>
@@ -321,6 +459,7 @@ a { color: var(--accent); text-decoration: none; }
       {% endif %}
     </div>
   </aside>
+  <div class="sidebar-backdrop" data-nav-backdrop></div>
   <main class="main">
     {% if flash %}<div class="flash {{ flash.kind }}">{{ flash.message }}</div>{% endif %}
 
@@ -398,5 +537,27 @@ a { color: var(--accent); text-decoration: none; }
     {% block content %}{% endblock %}
   </main>
 </div>
+<script>
+  // Mobile nav drawer toggle — hamburger reveals the sidebar as an
+  // overlay; tapping a nav link or the backdrop closes it.
+  (function () {
+    var toggle = document.querySelector('.nav-toggle');
+    var sidebar = document.getElementById('sidebar-nav');
+    var backdrop = document.querySelector('[data-nav-backdrop]');
+    if (!toggle || !sidebar) return;
+    function close() {
+      sidebar.classList.remove('is-open');
+      toggle.setAttribute('aria-expanded', 'false');
+    }
+    toggle.addEventListener('click', function () {
+      var open = sidebar.classList.toggle('is-open');
+      toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    });
+    backdrop && backdrop.addEventListener('click', close);
+    sidebar.querySelectorAll('nav a').forEach(function (a) {
+      a.addEventListener('click', close);
+    });
+  })();
+</script>
 </body>
 </html>

@@ -5,14 +5,14 @@
   <tbody>
   {% for p in prices %}
     {% if p.error %}
-    <tr><td>{{ p.exchange }}</td><td colspan="4" class="muted" style="font-size:12px">{{ p.error }}</td></tr>
+    <tr><td data-label="Exchange">{{ p.exchange }}</td><td colspan="4" data-label="Error" class="muted" style="font-size:12px">{{ p.error }}</td></tr>
     {% else %}
     <tr>
-      <td>{{ p.exchange }}</td>
-      <td class="mono">{{ p.bid|money }}</td>
-      <td class="mono"><strong>{{ p.ask|money }}</strong></td>
-      <td class="mono">{{ p.last|money }}</td>
-      <td class="mono">{{ p.spread_pct }}</td>
+      <td data-label="Exchange">{{ p.exchange }}</td>
+      <td class="mono" data-label="Bid">{{ p.bid|money }}</td>
+      <td class="mono" data-label="Ask"><strong>{{ p.ask|money }}</strong></td>
+      <td class="mono" data-label="Last">{{ p.last|money }}</td>
+      <td class="mono" data-label="Spread %">{{ p.spread_pct }}</td>
     </tr>
     {% endif %}
   {% endfor %}

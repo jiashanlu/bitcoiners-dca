@@ -27,12 +27,12 @@
     {% set candidates = [decision.chosen] + decision.alternatives %}
     {% for c in candidates %}
       <tr>
-        <td>{{ loop.index }}</td>
-        <td>{{ c.route.label }}</td>
-        <td class="mono">{{ c.effective_price|money }} AED/BTC</td>
-        <td class="mono">{{ c.route.expected_output(amount)|btc }}</td>
-        <td class="mono">{% if c.min_input_amount > 0 %}≥ {{ c.min_input_amount|money }} AED{% else %}—{% endif %}</td>
-        <td class="mono">{% if c.quote_balance is none %}—{% else %}{{ c.quote_balance|money }} AED{% if c.quote_balance < amount %} <span class="pill warn">underfunded</span>{% endif %}{% endif %}</td>
+        <td data-label="Rank">{{ loop.index }}</td>
+        <td data-label="Route">{{ c.route.label }}</td>
+        <td class="mono" data-label="Eff. price">{{ c.effective_price|money }} AED/BTC</td>
+        <td class="mono" data-label="Expected BTC">{{ c.route.expected_output(amount)|btc }}</td>
+        <td class="mono" data-label="Min cycle">{% if c.min_input_amount > 0 %}≥ {{ c.min_input_amount|money }} AED{% else %}—{% endif %}</td>
+        <td class="mono" data-label="Balance">{% if c.quote_balance is none %}—{% else %}{{ c.quote_balance|money }} AED{% if c.quote_balance < amount %} <span class="pill warn">underfunded</span>{% endif %}{% endif %}</td>
       </tr>
     {% endfor %}
     </tbody>
@@ -48,9 +48,9 @@
     <tbody>
     {% for e in decision.excluded %}
       <tr>
-        <td>{{ e.route.label }}</td>
-        <td class="mono">≥ {{ e.min_input_amount|money }} AED at current price</td>
-        <td>{{ e.reason }}</td>
+        <td data-label="Route">{{ e.route.label }}</td>
+        <td class="mono" data-label="Partner minimum">≥ {{ e.min_input_amount|money }} AED at current price</td>
+        <td data-label="Reason">{{ e.reason }}</td>
       </tr>
     {% endfor %}
     </tbody>
@@ -67,9 +67,9 @@
     <tbody>
     {% for a in decision.cross_exchange_alerts %}
       <tr>
-        <td>{{ a.route.label }}</td>
-        <td class="mono">{{ a.effective_price|money }} AED/BTC</td>
-        <td class="mono">{{ a.route.expected_output(amount)|btc }}</td>
+        <td data-label="Route">{{ a.route.label }}</td>
+        <td class="mono" data-label="Eff. price">{{ a.effective_price|money }} AED/BTC</td>
+        <td class="mono" data-label="Expected BTC">{{ a.route.expected_output(amount)|btc }}</td>
       </tr>
     {% endfor %}
     </tbody>
