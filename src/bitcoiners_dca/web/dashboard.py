@@ -842,6 +842,8 @@ def create_app(
             "overlays.time_of_day.enabled": form.get("tod_enabled") == "on",
             "overlays.drawdown_aware.enabled": form.get("dd_enabled") == "on",
             "routing.enable_two_hop": form.get("two_hop") == "on",
+            "routing.prefer_intermediate_balance":
+                form.get("prefer_intermediate_balance") == "on",
             "routing.enable_cross_exchange_alerts": form.get("cross_alerts") == "on",
             "routing.preferred_exchange":
                 form.get("preferred_exchange") or None,
@@ -1151,6 +1153,9 @@ def create_app(
             cross_exchange_withdrawal_costs=cfg.routing.cross_exchange_withdrawal_costs,
             preferred_exchange=cfg.routing.preferred_exchange,
             preferred_bonus_pct=cfg.routing.preferred_bonus_pct,
+            prefer_intermediate_balance=cfg.routing.prefer_intermediate_balance,
+            prefer_intermediate_min=cfg.routing.prefer_intermediate_min,
+            prefer_intermediate_boost_pct=cfg.routing.prefer_intermediate_boost_pct,
         )
         decision = None
         error = None

@@ -199,17 +199,31 @@ class RoutingConfig(BaseModel):
     preferred_bonus_pct: Decimal = Decimal("0.5")
     exclude_if_spread_pct_above: Decimal = Decimal("2.0")
 
-    # Multi-hop routing — synthetic paths like AED → USDT → BTC on the same
-    # exchange. Beats direct BTC/AED on OKX by ~0.09% at current pricing.
+    # Multi-hop routing — synthetic paths like AED → USDT → BTC or AED →
+    # USDC → BTC on the same exchange. Beats direct BTC/AED on OKX by
+    # ~0.09% at current pricing; USDC pairs are typically tighter than
+    # USDT on some venues so worth including both.
     enable_two_hop: bool = False
-    intermediates: list[str] = Field(default_factory=lambda: ["USDT"])
+    intermediates: list[str] = Field(default_factory=lambda: ["USDT", "USDC"])
+
+    # When True and the user has idle USDT/USDC ≥ `prefer_intermediate_min`
+    # on an exchange, the router gives that exchange's intermediate-direct
+    # route (BTC/USDT or BTC/USDC paid from existing balance) a score
+    # boost equal to `prefer_intermediate_boost_pct`. Without this flag
+    # the existing balance is still considered, but only wins on raw
+    # effective-price ranking — which means a marginally cheaper
+    # BTC/AED route would beat it. Turning the flag on says "use my
+    # stablecoin balance first, even if direct AED is a touch cheaper."
+    prefer_intermediate_balance: bool = False
+    prefer_intermediate_min: Decimal = Decimal("10")  # units of intermediate
+    prefer_intermediate_boost_pct: Decimal = Decimal("1.0")  # multiplicative score nudge
 
     # Cross-exchange alerts — Telegram-notify when bridging via USDT
     # withdrawal beats every other route. Never auto-executed.
     enable_cross_exchange_alerts: bool = False
     cross_exchange_min_size_aed: Decimal = Decimal("25000")
     cross_exchange_withdrawal_costs: dict[str, Decimal] = Field(
-        default_factory=lambda: {"USDT": Decimal("1.5")}  # OKX TRC20
+        default_factory=lambda: {"USDT": Decimal("1.5"), "USDC": Decimal("1.5")}
     )
 
 

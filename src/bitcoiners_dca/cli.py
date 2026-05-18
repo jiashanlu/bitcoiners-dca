@@ -209,6 +209,9 @@ def _build_router(cfg: AppConfig) -> SmartRouter:
         enable_cross_exchange_alerts=cfg.routing.enable_cross_exchange_alerts,
         cross_exchange_min_size_aed=cfg.routing.cross_exchange_min_size_aed,
         cross_exchange_withdrawal_costs=cfg.routing.cross_exchange_withdrawal_costs,
+        prefer_intermediate_balance=cfg.routing.prefer_intermediate_balance,
+        prefer_intermediate_min=cfg.routing.prefer_intermediate_min,
+        prefer_intermediate_boost_pct=cfg.routing.prefer_intermediate_boost_pct,
     )
 
 

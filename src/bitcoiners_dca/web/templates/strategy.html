@@ -257,14 +257,26 @@
       <input type="checkbox" name="two_hop" {% if config.routing.enable_two_hop %}checked{% endif %}>
       Enable 2-hop synthetic routes
     </label>
-    <small>AED → USDT → BTC within the same exchange; often beats direct BTC/AED by ~0.1-0.4%.</small>
+    <small>AED → USDT → BTC <em>and</em> AED → USDC → BTC within the same exchange; the cheaper of the two wins. Often beats direct BTC/AED by ~0.1-0.4%.</small>
+  </div>
+  <div class="form-row">
+    <label>
+      <input type="checkbox" name="prefer_intermediate_balance" {% if config.routing.prefer_intermediate_balance %}checked{% endif %}>
+      Prefer existing USDT / USDC balance
+    </label>
+    <small>
+      When you have idle USDT or USDC on an exchange (≥ {{ config.routing.prefer_intermediate_min }} units),
+      use it to buy BTC directly before spending AED — even if the AED route is marginally cheaper.
+      Boosts the stable-direct route's score by {{ config.routing.prefer_intermediate_boost_pct }}%.
+      With this off, idle stables are still considered but only win on raw price.
+    </small>
   </div>
   <div class="form-row">
     <label>
       <input type="checkbox" name="cross_alerts" {% if config.routing.enable_cross_exchange_alerts %}checked{% endif %}>
       Cross-exchange alerts
     </label>
-    <small>Telegram alert when bridging via USDT-withdraw beats every other route. Manual execution only.</small>
+    <small>Telegram alert when bridging via USDT- or USDC-withdraw beats every other route. Manual execution only.</small>
   </div>
   <div class="form-row">
     <label>Preferred exchange</label>

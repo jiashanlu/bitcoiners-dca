@@ -153,15 +153,27 @@ class SmartRouter:
         enable_cross_exchange_alerts: bool = False,
         cross_exchange_min_size_aed: Decimal = Decimal("25000"),
         cross_exchange_withdrawal_costs: Optional[dict[str, Decimal]] = None,
+        prefer_intermediate_balance: bool = False,
+        prefer_intermediate_min: Decimal = Decimal("10"),
+        prefer_intermediate_boost_pct: Decimal = Decimal("1.0"),
     ):
         self.exclude_if_spread_pct_above = exclude_if_spread_pct_above
         self.preferred_exchange = preferred_exchange
         self.preferred_bonus_pct = preferred_bonus_pct
         self.enable_two_hop = enable_two_hop
-        self.intermediates = intermediates or ["USDT"]
+        self.intermediates = intermediates or ["USDT", "USDC"]
         self.enable_cross_exchange_alerts = enable_cross_exchange_alerts
         self.cross_exchange_min_size_aed = cross_exchange_min_size_aed
         self.cross_exchange_withdrawal_costs = cross_exchange_withdrawal_costs or {}
+        # Prefer existing stable-coin balance as the funding leg —
+        # turns on a small downward score nudge for intermediate-direct
+        # candidates (BTC/USDT or BTC/USDC paid from idle stable) so
+        # they win over BTC/AED direct even when raw effective-price
+        # ranking puts AED-direct marginally ahead. See score
+        # application in _enumerate_same_exchange.
+        self.prefer_intermediate_balance = prefer_intermediate_balance
+        self.prefer_intermediate_min = prefer_intermediate_min
+        self.prefer_intermediate_boost_pct = prefer_intermediate_boost_pct
 
     async def pick(
         self,
@@ -402,7 +414,7 @@ class SmartRouter:
                     inter_balance = md.balances.get(inter, Decimal(0))
                     direct_pair_via_inter = f"{target_asset}/{inter}"
                     if (
-                        inter_balance >= Decimal("10")
+                        inter_balance >= self.prefer_intermediate_min
                         and direct_pair_via_inter in md.tickers
                     ):
                         hop = TradeHop(
@@ -416,11 +428,25 @@ class SmartRouter:
                             hops=(hop,),
                             quote_balance=inter_balance,
                         )
-                        executable.append(self._score(
+                        candidate = self._score(
                             route, sample_amount,
                             md.tickers[direct_pair_via_inter].spread_pct,
                             market_data,
-                        ))
+                        )
+                        # "Prefer existing stable balance" — small downward
+                        # nudge on the route's score so it wins over a
+                        # marginally cheaper BTC/AED direct. Same shape as
+                        # the preferred-exchange bonus elsewhere. Score is
+                        # ranked ascending (lower = better), so multiply by
+                        # `1 - boost_pct/100`.
+                        if self.prefer_intermediate_balance:
+                            boost = Decimal(1) - (self.prefer_intermediate_boost_pct / Decimal(100))
+                            candidate.score = candidate.score * boost
+                            candidate.note = (
+                                (candidate.note + " · " if candidate.note else "")
+                                + f"prefer-{inter}-balance"
+                            )
+                        executable.append(candidate)
 
         # Cross-exchange routes (alerts only)
         if self.enable_cross_exchange_alerts:
