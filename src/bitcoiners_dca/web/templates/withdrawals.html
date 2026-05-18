@@ -173,7 +173,19 @@
       <input type="text" name="destination" required
         placeholder="lnbc… / you@getalby.com / bc1q…"
         autocomplete="off" spellcheck="false">
-      <small>BOLT11 invoice, Lightning Address, or on-chain BTC address. The bot auto-detects the network.</small>
+      <small>
+        BOLT11 invoice, Lightning Address, or on-chain BTC address. The bot auto-detects the network.<br>
+        <strong>OKX users:</strong> whitelist the destination in your OKX address book first
+        (<a href="https://www.okx.com/account/withdrawal-address" target="_blank" rel="noopener">withdrawal addresses</a>),
+        then enter the label you used in the field below. OKX rejects withdrawals to non-whitelisted addresses with error 58207.
+      </small>
+    </div>
+    <div class="form-row">
+      <label>OKX whitelist label</label>
+      <input type="text" name="whitelist_label"
+        placeholder="alby — optional, OKX only"
+        autocomplete="off" spellcheck="false">
+      <small>Match the label you set when adding this address to your OKX withdrawal address book. Ignored by other exchanges.</small>
     </div>
 
     <div class="form-row">

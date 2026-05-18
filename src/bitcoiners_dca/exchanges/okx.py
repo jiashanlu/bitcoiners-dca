@@ -419,11 +419,17 @@ class OKXExchange(Exchange):
           the address fingerprint — mismatches raise WithdrawalDeniedError.
         Returns (okx_chain, normalized_network_name).
         """
-        detected = detect_network(address)
+        # OKX accepts BOLT11 invoices, raw Lightning Addresses (LUD-16),
+        # and on-chain BTC addresses on their withdrawal endpoint. We
+        # strip an optional `:label` suffix before fingerprinting so the
+        # caller can pass `you@host:mylabel` for OKX's address-book
+        # whitelist matching.
+        addr_for_detect = address.split(":", 1)[0] if "@" in address else address
+        detected = detect_network(addr_for_detect)
         net = network.lower().strip()
 
         if not net:
-            if detected == WithdrawalNetwork.LIGHTNING:
+            if detected in (WithdrawalNetwork.LIGHTNING, WithdrawalNetwork.LIGHTNING_ADDRESS):
                 return OKX_CHAIN_LIGHTNING, "lightning"
             if detected == WithdrawalNetwork.BITCOIN:
                 return OKX_CHAIN_BITCOIN, "bitcoin"
@@ -433,10 +439,10 @@ class OKXExchange(Exchange):
             )
 
         if net in ("lightning", "ln", "bolt11"):
-            if detected != WithdrawalNetwork.LIGHTNING:
+            if detected not in (WithdrawalNetwork.LIGHTNING, WithdrawalNetwork.LIGHTNING_ADDRESS):
                 raise WithdrawalDeniedError(
-                    "OKX Lightning withdrawals require a BOLT11 invoice (lnbc…). "
-                    "LNURL and Lightning Addresses are not supported."
+                    "OKX Lightning withdrawals require a BOLT11 invoice (lnbc…) "
+                    "or a Lightning Address (you@host)."
                 )
             return OKX_CHAIN_LIGHTNING, "lightning"
 

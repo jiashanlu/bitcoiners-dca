@@ -1381,18 +1381,28 @@ def create_app(
                 f"Destination doesn't look like a Bitcoin address or Lightning target "
                 f"(detected={net.value}).")
 
-        # Lightning Address / LNURL → resolve to a BOLT11 invoice the
-        # exchange can pay. BOLT11 + on-chain go straight through.
+        # Lightning Address / LNURL handling: OKX accepts LN addresses
+        # directly (their UI lets users whitelist `you@host`-style
+        # addresses; pass the address through so OKX matches it against
+        # the whitelist). For exchanges that only accept BOLT11, fall
+        # back to LUD-16 resolve. On-chain destinations pass through.
         try:
             if net == _Net.LIGHTNING_ADDRESS or net == _Net.LNURL:
                 if not getattr(target, "supports_lightning_withdrawal", False):
                     return _back("err",
                         f"{ex_name} doesn't support Lightning withdrawals. Use an "
                         "on-chain BTC address or switch to OKX.")
-                # 1 BTC = 1e8 sat
-                amount_sat = int(amount_btc * Decimal("100000000"))
-                invoice = await _resolve_to_invoice(destination, amount_sat)
-                outgoing_destination = invoice
+                if ex_name == "okx":
+                    # OKX matches the LN address against the user's
+                    # whitelisted address book. Resolving to BOLT11
+                    # client-side would defeat that match and OKX returns
+                    # error 58207 ("Withdrawal address aren't on the
+                    # verified address list").
+                    outgoing_destination = destination
+                else:
+                    amount_sat = int(amount_btc * Decimal("100000000"))
+                    invoice = await _resolve_to_invoice(destination, amount_sat)
+                    outgoing_destination = invoice
                 outgoing_network = "lightning"
             elif net == _Net.LIGHTNING:
                 if not getattr(target, "supports_lightning_withdrawal", False):
@@ -1406,6 +1416,15 @@ def create_app(
                 outgoing_network = "bitcoin"
         except ValueError as e:
             return _back("err", f"Couldn't resolve destination: {e}")
+
+        # OKX whitelist label: when the user has tagged the destination
+        # in their OKX address book, we append `:<label>` so OKX matches
+        # the right whitelist entry. Without this, OKX may reject with
+        # 58207 even if the raw address is whitelisted (when the user
+        # has the "withdraw to verified addresses only" flag set).
+        whitelist_label = (form.get("whitelist_label") or "").strip()
+        if whitelist_label and ":" not in outgoing_destination:
+            outgoing_destination = f"{outgoing_destination}:{whitelist_label}"
 
         # Travel Rule recipient info (OKX requires this in regulated
         # regions like UAE; other exchanges ignore the kwarg).
