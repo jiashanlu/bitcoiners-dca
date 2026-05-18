@@ -134,4 +134,64 @@
 
 <button type="submit">Save</button>
 </form>
+
+{# ── One-shot manual withdrawal ──────────────────────────────────
+   Separate form from the auto-withdraw policy above. Posts to a
+   different endpoint that actually fires the withdraw RIGHT NOW.
+   Lightning Address support resolves via LUD-16 before sending the
+   BOLT11 to the exchange. #}
+<div class="card" style="margin-top:32px; border-color: var(--accent-soft)">
+  <h2 style="display:flex; align-items:center; gap:10px">
+    Withdraw now
+    <span class="pill warn" style="font-size:11px">live action — sends BTC immediately</span>
+  </h2>
+  <p class="help">
+    One-shot manual withdrawal. Pick the exchange, paste a BOLT11 invoice
+    (<code>lnbc…</code>), a Lightning Address (<code>you@getalby.com</code>),
+    or an on-chain BTC address. The bot triggers the withdrawal directly
+    via the exchange API. Use this to test a fresh destination before
+    enabling auto-withdraw above.
+  </p>
+
+  <form method="post" action="{{ prefix }}/withdrawals/withdraw-now"
+        onsubmit="return confirm('Send this withdrawal NOW? The exchange will move real BTC.');">
+    <div class="form-row">
+      <label>Exchange</label>
+      <select name="exchange" required>
+        {% for p in policies %}
+          <option value="{{ p.exchange }}"
+            data-supports-ln="{{ '1' if p.supports_lightning else '0' }}">
+            {{ p.exchange|capitalize }}{% if p.supports_lightning %} (LN + on-chain){% else %} (on-chain only){% endif %}
+          </option>
+        {% endfor %}
+      </select>
+      <small>Only exchanges with saved API credentials are listed.</small>
+    </div>
+
+    <div class="form-row">
+      <label>Destination</label>
+      <input type="text" name="destination" required
+        placeholder="lnbc… / you@getalby.com / bc1q…"
+        autocomplete="off" spellcheck="false">
+      <small>BOLT11 invoice, Lightning Address, or on-chain BTC address. The bot auto-detects the network.</small>
+    </div>
+
+    <div class="form-row">
+      <label>Amount (BTC)</label>
+      <input type="number" name="amount_btc" required
+        step="0.00000001" min="0.00000001" max="0.01"
+        placeholder="0.0001">
+      <small>
+        For Lightning: amount used to request the invoice from the
+        recipient. For BOLT11 invoices: must match the amount embedded
+        in the invoice. Max 0.01 BTC per call as a safety cap; change
+        the <code>max</code> attribute in the form if you need bigger.
+      </small>
+    </div>
+
+    <button type="submit" class="btn" style="background: var(--err); color: white">
+      Send withdrawal →
+    </button>
+  </form>
+</div>
 {% endblock %}

@@ -1303,6 +1303,113 @@ def create_app(
             request, active="withdrawals", flash=flash, **_withdrawals_ctx_extra(),
         )))
 
+    @app.post("/withdrawals/withdraw-now", response_class=HTMLResponse)
+    async def withdraw_now(request: Request):
+        """One-shot manual withdrawal. Resolves Lightning Address to a
+        BOLT11 invoice if needed, then calls the exchange's withdraw_btc.
+
+        Side-effects of running this on a live exchange: real BTC moves.
+        The dashboard form gates with a confirm() dialog; the route still
+        validates inputs server-side because nothing about the client can
+        be trusted.
+        """
+        from bitcoiners_dca.core.lightning import (
+            detect_network as _detect_network,
+            is_lightning as _is_ln,
+            resolve_to_invoice as _resolve_to_invoice,
+            WithdrawalNetwork as _Net,
+        )
+
+        def _back(kind: str, message: str):
+            return HTMLResponse(jinja.get_template("withdrawals.html").render(_ctx(
+                request, active="withdrawals",
+                flash={"kind": kind, "message": message},
+                **_withdrawals_ctx_extra(),
+            )))
+
+        form = await request.form()
+        ex_name = (form.get("exchange") or "").strip()
+        destination = (form.get("destination") or "").strip()
+        amount_raw = (form.get("amount_btc") or "").strip()
+
+        if not ex_name or not destination or not amount_raw:
+            return _back("err", "Exchange, destination, and amount are all required.")
+        try:
+            amount_btc = Decimal(amount_raw)
+        except InvalidOperation:
+            return _back("err", f"Amount '{amount_raw}' isn't a number.")
+        if amount_btc <= 0:
+            return _back("err", "Amount must be greater than zero.")
+        # Server-side cap mirrors the HTML max=0.01. Anyone bypassing the
+        # form attribute still hits this.
+        if amount_btc > Decimal("0.01"):
+            return _back("err", "Amount exceeds the 0.01 BTC safety cap for the manual flow.")
+
+        # Find the configured exchange adapter. Re-use the cached list so
+        # we hit the same credentials the bot uses for live cycles.
+        target = None
+        for ex in _exchanges():
+            if ex.name == ex_name:
+                target = ex
+                break
+        if target is None:
+            return _back("err",
+                f"Exchange '{ex_name}' isn't enabled or has no credentials saved.")
+
+        # Detect what was pasted and figure out what to send to the exchange.
+        net = _detect_network(destination)
+        if net == _Net.UNKNOWN:
+            return _back("err",
+                f"Destination doesn't look like a Bitcoin address or Lightning target "
+                f"(detected={net.value}).")
+
+        # Lightning Address / LNURL → resolve to a BOLT11 invoice the
+        # exchange can pay. BOLT11 + on-chain go straight through.
+        try:
+            if net == _Net.LIGHTNING_ADDRESS or net == _Net.LNURL:
+                if not getattr(target, "supports_lightning_withdrawal", False):
+                    return _back("err",
+                        f"{ex_name} doesn't support Lightning withdrawals. Use an "
+                        "on-chain BTC address or switch to OKX.")
+                # 1 BTC = 1e8 sat
+                amount_sat = int(amount_btc * Decimal("100000000"))
+                invoice = await _resolve_to_invoice(destination, amount_sat)
+                outgoing_destination = invoice
+                outgoing_network = "lightning"
+            elif net == _Net.LIGHTNING:
+                if not getattr(target, "supports_lightning_withdrawal", False):
+                    return _back("err",
+                        f"{ex_name} doesn't support Lightning withdrawals. Use an "
+                        "on-chain BTC address or switch to OKX.")
+                outgoing_destination = destination
+                outgoing_network = "lightning"
+            else:  # BITCOIN
+                outgoing_destination = destination
+                outgoing_network = "bitcoin"
+        except ValueError as e:
+            return _back("err", f"Couldn't resolve destination: {e}")
+
+        try:
+            withdrawal = await target.withdraw_btc(
+                amount_btc=amount_btc,
+                address=outgoing_destination,
+                network=outgoing_network,
+            )
+        except Exception as e:
+            log.exception("manual withdraw failed")
+            return _back("err", f"{ex_name} rejected the withdrawal: {e}")
+
+        # Surface the exchange's withdrawal ID + TXID so the user can
+        # cross-reference in the exchange UI / on-chain explorer.
+        detail = f"id={withdrawal.withdrawal_id}"
+        if getattr(withdrawal, "txid", None):
+            detail += f", txid={withdrawal.txid}"
+        return _back(
+            "ok",
+            f"Withdrawal submitted on {ex_name}: {amount_btc} BTC via {outgoing_network} → "
+            f"{(destination[:30] + '…') if len(destination) > 30 else destination} ({detail})",
+        )
+
     def _backtest_default_form(cfg) -> dict:
         # Pre-fill from live strategy config. Falls through to plain defaults
         # when fields are missing (e.g. very-new tenant with budget unset).
