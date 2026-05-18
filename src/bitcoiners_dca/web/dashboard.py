@@ -1414,7 +1414,13 @@ def create_app(
                 network=outgoing_network,
             )
         except Exception as e:
-            log.exception("manual withdraw failed")
+            # `logger` is the module-level binding; the original code
+            # referenced `log` which doesn't exist here — the NameError
+            # bubbled past the user-facing handler and the operator
+            # saw a blank-screen 500 instead of the exchange's actual
+            # rejection reason. Log full traceback for debugging, then
+            # surface the underlying message back to the user.
+            logger.exception("manual withdraw failed")
             return _back("err", f"{ex_name} rejected the withdrawal: {e}")
 
         # Surface the exchange's withdrawal ID + TXID so the user can
