@@ -39,6 +39,7 @@ from bitcoiners_dca.core.models import (
 from bitcoiners_dca.exchanges.base import (
     Exchange, ExchangeError, InsufficientBalanceError, WithdrawalDeniedError,
     make_bot_client_order_id,
+    split_fee_by_currency as _split_fee_by_currency,
 )
 
 logger = logging.getLogger(__name__)
@@ -280,25 +281,27 @@ class BinanceExchange(Exchange):
             "open": OrderStatus.PENDING, "closed": OrderStatus.FILLED,
             "canceled": OrderStatus.CANCELLED, "cancelled": OrderStatus.CANCELLED,
         }
+        fee_base, fee_quote = _split_fee_by_currency(raw.get("fee"), pair)
         return Order(
             exchange=self.name, order_id=str(raw.get("id") or ""), pair=pair,
             side=OrderSide(raw.get("side", "buy")), type=OrderType(raw.get("type", "market")),
             amount_quote=quote_amount, amount_base=_to_decimal(raw.get("filled")),
             price_filled_avg=_to_decimal(raw.get("average") or raw.get("price")),
-            fee_quote=_to_decimal(raw.get("fee", {}).get("cost") if isinstance(raw.get("fee"), dict) else 0),
+            fee_base=fee_base, fee_quote=fee_quote,
             status=status_map.get(raw.get("status", "open"), OrderStatus.PENDING),
             created_at=datetime.fromtimestamp(raw.get("timestamp", 0) / 1000, tz=timezone.utc) if raw.get("timestamp") else datetime.now(timezone.utc),
             filled_at=datetime.now(timezone.utc) if raw.get("status") == "closed" else None,
         )
 
     def _normalize_trade_as_order(self, trade: dict, pair: str) -> Order:
+        fee_base, fee_quote = _split_fee_by_currency(trade.get("fee"), pair)
         return Order(
             exchange=self.name, order_id=str(trade.get("order") or trade.get("id") or ""),
             pair=pair, side=OrderSide(trade.get("side", "buy")),
             type=OrderType.MARKET,
             amount_quote=_to_decimal(trade.get("cost")), amount_base=_to_decimal(trade.get("amount")),
             price_filled_avg=_to_decimal(trade.get("price")),
-            fee_quote=_to_decimal(trade.get("fee", {}).get("cost") if isinstance(trade.get("fee"), dict) else 0),
+            fee_base=fee_base, fee_quote=fee_quote,
             status=OrderStatus.FILLED,
             created_at=datetime.fromtimestamp(trade.get("timestamp", 0) / 1000, tz=timezone.utc),
             filled_at=datetime.fromtimestamp(trade.get("timestamp", 0) / 1000, tz=timezone.utc),

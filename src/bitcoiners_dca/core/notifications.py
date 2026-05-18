@@ -7,15 +7,59 @@ arbitrage monitor (opportunity alerts).
 from __future__ import annotations
 import logging
 import os
+from decimal import Decimal
 from typing import Optional
 
 import httpx
 
 log = logging.getLogger(__name__)
 
-from bitcoiners_dca.core.models import ArbitrageOpportunity
+from bitcoiners_dca.core.models import ArbitrageOpportunity, Order
 from bitcoiners_dca.core.strategy import ExecutionResult
 from bitcoiners_dca.utils.config import NotificationsConfig
+
+
+def _fmt_dec(value: Decimal, max_dp: int = 8) -> str:
+    """Render a Decimal as plain text — no scientific notation. Trims
+    trailing zeros after the decimal point. Tiny values stay readable
+    (0.00000035 instead of 3.5E-7)."""
+    if value == 0:
+        return "0"
+    quant = Decimal(10) ** -max_dp
+    s = format(value.quantize(quant), "f")
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
+    return s or "0"
+
+
+def _format_fee(order: Order) -> str:
+    """Render the order's fee in the right currency + a % of cycle cost.
+
+    Exchanges typically charge the fee in the *base* asset for buys
+    (e.g. OKX: fee in BTC, not AED). The previous version of this
+    notifier blindly labeled fee_quote as 'AED' and the scientific-
+    notation render (3.4824E-7) looked like a 20% fee on a 16 AED
+    cycle. The reality: that BTC value times BTC price is ~0.027 AED,
+    i.e. a 0.16% taker fee — what you'd expect.
+
+    Returns a string like '0.00000035 BTC (~0.03 AED, 0.16%)' or
+    '0.03 AED (0.18%)' depending on which fee field is populated.
+    """
+    if order.fee_base > 0 and order.price_filled_avg:
+        base, _, _ = (order.pair or "BTC/AED").upper().partition("/")
+        # Convert to quote terms via spot price for the % readout.
+        fee_in_quote = order.fee_base * order.price_filled_avg
+        pct = (fee_in_quote / order.amount_quote * Decimal(100)
+               ) if order.amount_quote else Decimal(0)
+        return (
+            f"{_fmt_dec(order.fee_base)} {base} "
+            f"(~{_fmt_dec(fee_in_quote, 4)} AED, {_fmt_dec(pct, 3)}%)"
+        )
+    if order.fee_quote > 0:
+        pct = (order.fee_quote / order.amount_quote * Decimal(100)
+               ) if order.amount_quote else Decimal(0)
+        return f"AED {_fmt_dec(order.fee_quote, 4)} ({_fmt_dec(pct, 3)}%)"
+    return "0 (no fee reported)"
 
 
 class Notifier:
@@ -95,9 +139,9 @@ class Notifier:
             msg += f" (overlay: {result.overlay_applied})"
         msg += (
             f"\n*Exchange:* {order.exchange}\n"
-            f"*Bought:* {order.amount_base or '?'} BTC "
-            f"@ AED {order.price_filled_avg or '?'}/BTC\n"
-            f"*Fee:* AED {order.fee_quote}\n"
+            f"*Bought:* {_fmt_dec(order.amount_base) if order.amount_base else '?'} BTC "
+            f"@ AED {_fmt_dec(order.price_filled_avg, 2) if order.price_filled_avg else '?'}/BTC\n"
+            f"*Fee:* {_format_fee(order)}\n"
             f"*Order ID:* `{order.order_id}`"
         )
         if result.withdrew_btc:

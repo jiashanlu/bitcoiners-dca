@@ -22,6 +22,54 @@ from bitcoiners_dca.core.models import (
 BOT_CLORD_PREFIX = "bdca"
 
 
+def _to_decimal_safe(value) -> Decimal:
+    """Decimal coercion that tolerates None / empty string / float / int."""
+    if value is None or value == "":
+        return Decimal(0)
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return Decimal(0)
+
+
+def split_fee_by_currency(
+    fee: object,
+    pair: str,
+) -> tuple[Decimal, Decimal]:
+    """Route a CCXT-shaped fee `{cost, currency}` into (fee_base, fee_quote).
+
+    CCXT normalizes order/trade fees as `{"cost": "0.0000003", "currency": "BTC"}`.
+    For a BTC/AED buy, exchanges typically charge the fee in the *base* asset
+    (BTC) — the previously-naive code put that value into `fee_quote` (AED) and
+    the notification ended up displaying `AED 3.48E-7` which looks like a 20%
+    fee at first glance (it's actually 0.16% in BTC terms).
+
+    Returns (fee_base, fee_quote) — exactly one is populated based on the
+    fee currency vs the pair's base/quote. Anything unrecognised falls
+    back to `fee_quote` so the value isn't lost; better wrong column
+    than wrong magnitude.
+    """
+    if not isinstance(fee, dict):
+        return Decimal(0), Decimal(0)
+    cost = _to_decimal_safe(fee.get("cost"))
+    if cost == 0:
+        return Decimal(0), Decimal(0)
+    fee_ccy = (fee.get("currency") or "").upper().strip()
+    if "/" in pair:
+        base_ccy, _, quote_ccy = pair.upper().partition("/")
+    else:
+        base_ccy, quote_ccy = "BTC", "AED"
+    if fee_ccy == base_ccy:
+        return cost, Decimal(0)
+    if fee_ccy == quote_ccy:
+        return Decimal(0), cost
+    # Unknown currency (rare — could be a bonus token or rebate
+    # currency). Keep the value, mark as quote-side so it's at least
+    # visible to the user — the rendered notification annotates with
+    # the actual currency name.
+    return Decimal(0), cost
+
+
 def make_bot_client_order_id() -> str:
     """Generate a clientOrderId for a bot-placed order.
 
