@@ -347,6 +347,22 @@ class OKXExchange(Exchange):
         else:
             fee_str = await self._fetch_btc_onchain_fee_str()
 
+        # OKX has separate Trading + Funding accounts; the withdrawal
+        # endpoint pulls from Funding only. DCA buys settle in Trading,
+        # so without an auto-transfer here you'd see error 58350
+        # "Insufficient balance" on every withdrawal even though the
+        # combined balance is fine. Move the shortfall over.
+        needed = amount_btc + _to_decimal(fee_str)
+        try:
+            await self._ensure_funding_balance("BTC", needed)
+        except ExchangeError:
+            raise
+        except Exception as e:
+            raise ExchangeError(
+                f"OKX withdraw failed before submission: couldn't move BTC from "
+                f"Trading to Funding ({e})"
+            ) from e
+
         try:
             params: dict = {"chain": chain, "fee": fee_str}
             # OKX-in-UAE (and other regulated regions) require Travel
@@ -381,6 +397,41 @@ class OKXExchange(Exchange):
             raise WithdrawalDeniedError(str(e)) from e
         except Exception as e:
             raise ExchangeError(f"OKX withdraw failed: {e}") from e
+
+    async def _ensure_funding_balance(self, ccy: str, needed: Decimal) -> None:
+        """Make the Funding account hold at least `needed` of `ccy`.
+
+        OKX splits balances across Trading + Funding sub-accounts. The
+        withdrawal endpoint only pulls from Funding, but everything the
+        bot buys lands in Trading. Without this auto-transfer, every
+        withdrawal hits 58350 "Insufficient balance" the first time it
+        runs against a freshly-bought balance.
+
+        We check Funding's `free` balance and, if short, transfer the
+        shortfall from Trading. If Trading + Funding combined still
+        can't cover it, the subsequent withdraw call will fail loudly
+        with the real shortfall — same as the previous behaviour, just
+        with a clearer error context.
+        """
+        try:
+            bal = await self._client.fetch_balance({"type": "funding"})
+        except Exception as e:
+            raise ExchangeError(f"couldn't read OKX Funding balance: {e}") from e
+        funding_free = _to_decimal((bal.get(ccy) or {}).get("free") or 0)
+        if funding_free >= needed:
+            return
+        shortfall = needed - funding_free
+        # ccxt.okx.transfer maps "trading"→"6→18" etc. behind the scenes;
+        # we use string codes so the adapter stays portable across ccxt
+        # versions.
+        try:
+            await self._client.transfer(
+                ccy, float(shortfall), "trading", "funding",
+            )
+        except Exception as e:
+            raise ExchangeError(
+                f"OKX Trading→Funding transfer of {shortfall} {ccy} failed: {e}"
+            ) from e
 
     async def _fetch_btc_onchain_fee_str(self) -> str:
         """Look up OKX's current advertised on-chain BTC withdrawal fee.
