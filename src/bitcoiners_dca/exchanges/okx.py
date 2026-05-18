@@ -350,12 +350,16 @@ class OKXExchange(Exchange):
         try:
             params: dict = {"chain": chain, "fee": fee_str}
             # OKX-in-UAE (and other regulated regions) require Travel
-            # Rule recipient info per FATF rules. ccxt forwards the
-            # rcvrInfo object directly to OKX's /asset/withdrawal endpoint
-            # as JSON. Skipping the param triggers OKX error 58237.
+            # Rule recipient info per FATF rules. ccxt forwards `params`
+            # as part of the request body, which it JSON-encodes itself.
+            # Passing the rcvr_info dict directly lets ccxt nest it as a
+            # JSON object under rcvrInfo. We tried json.dumps()-ing it
+            # first and OKX rejected with code 50002 "JSON syntax error"
+            # because the rcvrInfo value showed up as a quoted string
+            # rather than a nested object.
+            # Skipping the param entirely triggers OKX error 58237.
             if rcvr_info:
-                import json as _json
-                params["rcvrInfo"] = _json.dumps(rcvr_info)
+                params["rcvrInfo"] = rcvr_info
             raw = await self._client.withdraw(
                 code="BTC",
                 amount=float(amount_btc),
