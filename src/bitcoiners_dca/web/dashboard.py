@@ -1333,8 +1333,6 @@ def create_app(
         """
         from bitcoiners_dca.core.lightning import (
             detect_network as _detect_network,
-            is_lightning as _is_ln,
-            resolve_to_invoice as _resolve_to_invoice,
             WithdrawalNetwork as _Net,
         )
 
@@ -1374,57 +1372,22 @@ def create_app(
             return _back("err",
                 f"Exchange '{ex_name}' isn't enabled or has no credentials saved.")
 
-        # Detect what was pasted and figure out what to send to the exchange.
+        # On-chain BTC only. UAE exchanges (OKX UAE, BitOasis, Binance
+        # UAE) don't expose Lightning withdrawals via their API surface
+        # — even OKX, whose adapter advertises supports_lightning_
+        # withdrawal=True for the global product, doesn't surface LN in
+        # the UAE region. Refuse anything that doesn't fingerprint as a
+        # plain BTC address so the user gets a clear error instead of
+        # a confusing exchange-side rejection.
         net = _detect_network(destination)
-        if net == _Net.UNKNOWN:
+        if net != _Net.BITCOIN:
             return _back("err",
-                f"Destination doesn't look like a Bitcoin address or Lightning target "
-                f"(detected={net.value}).")
-
-        # Lightning Address / LNURL handling: OKX accepts LN addresses
-        # directly (their UI lets users whitelist `you@host`-style
-        # addresses; pass the address through so OKX matches it against
-        # the whitelist). For exchanges that only accept BOLT11, fall
-        # back to LUD-16 resolve. On-chain destinations pass through.
-        try:
-            if net == _Net.LIGHTNING_ADDRESS or net == _Net.LNURL:
-                if not getattr(target, "supports_lightning_withdrawal", False):
-                    return _back("err",
-                        f"{ex_name} doesn't support Lightning withdrawals. Use an "
-                        "on-chain BTC address or switch to OKX.")
-                if ex_name == "okx":
-                    # OKX matches the LN address against the user's
-                    # whitelisted address book. Resolving to BOLT11
-                    # client-side would defeat that match and OKX returns
-                    # error 58207 ("Withdrawal address aren't on the
-                    # verified address list").
-                    outgoing_destination = destination
-                else:
-                    amount_sat = int(amount_btc * Decimal("100000000"))
-                    invoice = await _resolve_to_invoice(destination, amount_sat)
-                    outgoing_destination = invoice
-                outgoing_network = "lightning"
-            elif net == _Net.LIGHTNING:
-                if not getattr(target, "supports_lightning_withdrawal", False):
-                    return _back("err",
-                        f"{ex_name} doesn't support Lightning withdrawals. Use an "
-                        "on-chain BTC address or switch to OKX.")
-                outgoing_destination = destination
-                outgoing_network = "lightning"
-            else:  # BITCOIN
-                outgoing_destination = destination
-                outgoing_network = "bitcoin"
-        except ValueError as e:
-            return _back("err", f"Couldn't resolve destination: {e}")
-
-        # OKX whitelist label: when the user has tagged the destination
-        # in their OKX address book, we append `:<label>` so OKX matches
-        # the right whitelist entry. Without this, OKX may reject with
-        # 58207 even if the raw address is whitelisted (when the user
-        # has the "withdraw to verified addresses only" flag set).
-        whitelist_label = (form.get("whitelist_label") or "").strip()
-        if whitelist_label and ":" not in outgoing_destination:
-            outgoing_destination = f"{outgoing_destination}:{whitelist_label}"
+                f"Destination doesn't look like an on-chain BTC address "
+                f"(detected={net.value}). The bot's UAE exchanges only "
+                "support on-chain withdrawals — paste a bc1q… / bc1p… / "
+                "1… / 3… address.")
+        outgoing_destination = destination
+        outgoing_network = "bitcoin"
 
         # Travel Rule recipient info (OKX requires this in regulated
         # regions like UAE; other exchanges ignore the kwarg).

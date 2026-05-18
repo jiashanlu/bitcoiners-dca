@@ -137,20 +137,19 @@
 
 {# ── One-shot manual withdrawal ──────────────────────────────────
    Separate form from the auto-withdraw policy above. Posts to a
-   different endpoint that actually fires the withdraw RIGHT NOW.
-   Lightning Address support resolves via LUD-16 before sending the
-   BOLT11 to the exchange. #}
+   different endpoint that fires the withdrawal RIGHT NOW. On-chain
+   BTC only — the UAE exchanges we support (OKX UAE, BitOasis,
+   Binance UAE) don't expose Lightning withdrawals via API. #}
 <div class="card" style="margin-top:32px; border-color: var(--accent-soft)">
   <h2 style="display:flex; align-items:center; gap:10px">
     Withdraw now
     <span class="pill warn" style="font-size:11px">live action — sends BTC immediately</span>
   </h2>
   <p class="help">
-    One-shot manual withdrawal. Pick the exchange, paste a BOLT11 invoice
-    (<code>lnbc…</code>), a Lightning Address (<code>you@getalby.com</code>),
-    or an on-chain BTC address. The bot triggers the withdrawal directly
-    via the exchange API. Use this to test a fresh destination before
-    enabling auto-withdraw above.
+    One-shot manual withdrawal. Pick the exchange, paste an on-chain
+    BTC address (<code>bc1q…</code> / <code>bc1p…</code>), enter the
+    amount. Use this to test a fresh destination before enabling
+    auto-withdraw above.
   </p>
 
   <form method="post" action="{{ prefix }}/withdrawals/withdraw-now"
@@ -159,10 +158,7 @@
       <label>Exchange</label>
       <select name="exchange" required>
         {% for p in policies %}
-          <option value="{{ p.exchange }}"
-            data-supports-ln="{{ '1' if p.supports_lightning else '0' }}">
-            {{ p.exchange|capitalize }}{% if p.supports_lightning %} (LN + on-chain){% else %} (on-chain only){% endif %}
-          </option>
+          <option value="{{ p.exchange }}">{{ p.exchange|capitalize }}</option>
         {% endfor %}
       </select>
       <small>Only exchanges with saved API credentials are listed.</small>
@@ -171,21 +167,14 @@
     <div class="form-row">
       <label>Destination</label>
       <input type="text" name="destination" required
-        placeholder="lnbc… / you@getalby.com / bc1q…"
+        placeholder="bc1q…"
         autocomplete="off" spellcheck="false">
       <small>
-        BOLT11 invoice, Lightning Address, or on-chain BTC address. The bot auto-detects the network.<br>
-        <strong>OKX users:</strong> whitelist the destination in your OKX address book first
-        (<a href="https://www.okx.com/account/withdrawal-address" target="_blank" rel="noopener">withdrawal addresses</a>),
-        then enter the label you used in the field below. OKX rejects withdrawals to non-whitelisted addresses with error 58207.
+        On-chain BTC address from your hardware wallet. <strong>Most exchanges
+        require you to whitelist the address in their UI first</strong> —
+        OKX rejects with code 58207, BitOasis with a similar error. Add the
+        address to the exchange's address book before withdrawing here.
       </small>
-    </div>
-    <div class="form-row">
-      <label>OKX whitelist label</label>
-      <input type="text" name="whitelist_label"
-        placeholder="alby — optional, OKX only"
-        autocomplete="off" spellcheck="false">
-      <small>Match the label you set when adding this address to your OKX withdrawal address book. Ignored by other exchanges.</small>
     </div>
 
     <div class="form-row">
