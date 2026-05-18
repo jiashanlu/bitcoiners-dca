@@ -24,6 +24,7 @@ The legacy `use_uae_endpoint` constructor argument is a no-op kept for
 backward compatibility with older config files. We always use binance.com.
 """
 from __future__ import annotations
+import json
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -227,11 +228,6 @@ class BinanceExchange(Exchange):
     async def withdraw_btc(self, amount_btc: Decimal, address: str,
                            network: str = "bitcoin",
                            rcvr_info: Optional[dict] = None) -> Withdrawal:
-        # Binance UAE's API doesn't currently demand Travel-Rule recipient
-        # info on the withdraw endpoint the way OKX does. We accept the
-        # kwarg so the abstract Exchange.withdraw_btc signature is
-        # satisfied uniformly and ignore it here.
-        del rcvr_info
         from bitcoiners_dca.core.lightning import is_lightning
         if is_lightning(address) or network.lower() in ("lightning", "ln", "bolt11"):
             raise WithdrawalDeniedError(
@@ -245,8 +241,31 @@ class BinanceExchange(Exchange):
                 asset="BTC", amount=amount_btc, address=address, fee=Decimal("0.0002"),
                 status=WithdrawalStatus.PENDING, created_at=datetime.now(timezone.utc),
             )
+
+        binance_network = "BTC" if network == "bitcoin" else network
+
+        # UAE local entity (ADGM) requires the Travel Rule questionnaire
+        # — calling /sapi/v1/capital/withdraw/apply directly returns
+        # -4104 "Travel rule restrictions". Probe questionnaire-requirements
+        # first; if it returns a non-empty payload, route through
+        # /sapi/v1/localentity/withdraw/apply with the questionnaire JSON.
         try:
-            params = {"network": "BTC" if network == "bitcoin" else network}
+            requirements = await self._fetch_questionnaire_requirements(
+                coin="BTC", network=binance_network,
+                address=address, amount=str(amount_btc),
+            )
+        except Exception as e:
+            logger.warning("Binance questionnaire-requirements probe failed: %s", e)
+            requirements = None
+
+        if self._requirements_indicate_travel_rule(requirements):
+            return await self._withdraw_via_localentity(
+                amount_btc=amount_btc, address=address,
+                network=binance_network, rcvr_info=rcvr_info,
+            )
+
+        try:
+            params = {"network": binance_network}
             raw = await self._client.withdraw(
                 code="BTC", amount=float(amount_btc), address=address, params=params,
             )
@@ -258,9 +277,113 @@ class BinanceExchange(Exchange):
                 txid=raw.get("txid"),
             )
         except ccxt_async.PermissionDenied as e:
+            # Fallback: if the standard endpoint rejects with the
+            # Travel-Rule error, retry through localentity. Covers the
+            # case where questionnaire-requirements was unreachable.
+            msg = str(e)
+            if "-4104" in msg or "travel rule" in msg.lower() or "travel-rule" in msg.lower():
+                logger.info("Binance returned Travel-Rule restriction; retrying via localentity")
+                return await self._withdraw_via_localentity(
+                    amount_btc=amount_btc, address=address,
+                    network=binance_network, rcvr_info=rcvr_info,
+                )
             raise WithdrawalDeniedError(str(e)) from e
         except Exception as e:
             raise ExchangeError(f"Binance withdraw failed: {e}") from e
+
+    async def _fetch_questionnaire_requirements(self, coin: str, network: str,
+                                                address: str, amount: str) -> dict:
+        """GET /sapi/v1/localentity/questionnaire-requirements.
+
+        Returns the questionnaire shape the local entity wants for this
+        specific destination, or an empty/NIL payload when Travel Rule
+        does not apply (e.g. small amount, non-regulated jurisdiction).
+        """
+        params = {
+            "coin": coin, "network": network,
+            "address": address, "amount": amount,
+        }
+        method = getattr(self._client, "sapiGetLocalentityQuestionnaireRequirements", None)
+        if method is not None:
+            return await method(params)
+        return await self._client.request(
+            path="localentity/questionnaire-requirements",
+            api="sapi", method="GET", params=params,
+        )
+
+    @staticmethod
+    def _requirements_indicate_travel_rule(requirements) -> bool:
+        # The endpoint returns NIL/empty when Travel Rule does not apply,
+        # and a dict carrying questionnaire metadata when it does. Treat
+        # any non-empty dict/list as "yes, route through localentity".
+        if requirements is None:
+            return False
+        if isinstance(requirements, (dict, list)):
+            return bool(requirements)
+        return False
+
+    async def _withdraw_via_localentity(self, amount_btc: Decimal, address: str,
+                                        network: str,
+                                        rcvr_info: Optional[dict]) -> Withdrawal:
+        """POST /sapi/v1/localentity/withdraw/apply with the UAE questionnaire.
+
+        UAE (ADGM) questionnaire fields per Binance docs:
+          isAddressOwner: 1=send to myself, 2=send to another beneficiary
+          sendTo:         1=private wallet, 2=another VASP
+          bnfType / bnfName / country / city: required only when
+                                              isAddressOwner=2
+        """
+        questionnaire = self._build_uae_questionnaire(rcvr_info)
+        params = {
+            "coin": "BTC",
+            "network": network,
+            "address": address,
+            "amount": str(amount_btc),
+            "questionnaire": json.dumps(questionnaire),
+        }
+        try:
+            method = getattr(self._client, "sapiPostLocalentityWithdrawApply", None)
+            if method is not None:
+                raw = await method(params)
+            else:
+                raw = await self._client.request(
+                    path="localentity/withdraw/apply",
+                    api="sapi", method="POST", params=params,
+                )
+        except ccxt_async.PermissionDenied as e:
+            raise WithdrawalDeniedError(str(e)) from e
+        except Exception as e:
+            raise ExchangeError(f"Binance localentity withdraw failed: {e}") from e
+
+        return Withdrawal(
+            exchange=self.name,
+            withdrawal_id=str(raw.get("trId") or raw.get("id") or ""),
+            asset="BTC", amount=amount_btc, address=address,
+            fee=Decimal("0.0002"),
+            status=WithdrawalStatus.PENDING,
+            created_at=datetime.now(timezone.utc),
+        )
+
+    @staticmethod
+    def _build_uae_questionnaire(rcvr_info: Optional[dict]) -> dict:
+        # Self-custody is the default — most users send to their own
+        # hardware wallet. Caller can flip via addressOwnerSelf=False in
+        # rcvr_info to declare a third-party private-wallet recipient.
+        rcvr_info = rcvr_info or {}
+        is_self = bool(rcvr_info.get("addressOwnerSelf", True))
+        q: dict = {
+            "isAddressOwner": 1 if is_self else 2,
+            "sendTo": 1,  # private wallet (we already block VASP routes)
+        }
+        if not is_self:
+            first = (rcvr_info.get("rcvrFirstName") or "").strip()
+            last = (rcvr_info.get("rcvrLastName") or "").strip()
+            q["bnfType"] = 0  # individual
+            q["bnfName"] = (f"{first} {last}").strip() or "Beneficiary"
+            country = (rcvr_info.get("rcvrCountry") or "AE")
+            q["country"] = country.lower()[:2]
+            q["city"] = (rcvr_info.get("rcvrCountrySubDivision") or "Dubai").strip()
+        return q
 
     async def get_withdrawal(self, withdrawal_id: str) -> Withdrawal:
         raw_list = await self._client.fetch_withdrawals(code="BTC", limit=50)

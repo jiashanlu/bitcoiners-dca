@@ -1446,12 +1446,16 @@ def create_app(
         outgoing_destination = destination
         outgoing_network = "bitcoin"
 
-        # Travel Rule recipient info (OKX requires this in regulated
-        # regions like UAE; other exchanges ignore the kwarg).
+        # Travel Rule recipient info. OKX UAE always requires it. Binance
+        # UAE (ADGM) also requires it via /sapi/v1/localentity/withdraw/
+        # apply — the adapter routes there automatically. BitOasis ignores
+        # the kwarg.
         rcvr_first = (form.get("rcvr_first_name") or "").strip()
         rcvr_last = (form.get("rcvr_last_name") or "").strip()
         rcvr_country = (form.get("rcvr_country") or "").strip().upper()[:2]
         rcvr_subdiv = (form.get("rcvr_country_subdivision") or "").strip()
+        # Checkbox; absent in form payload when unchecked.
+        is_self_custody = (form.get("address_owner_self") or "").lower() in ("1", "on", "true", "yes")
         rcvr_info: Optional[dict] = None
         if rcvr_first and rcvr_last and rcvr_country:
             rcvr_info = {
@@ -1459,6 +1463,9 @@ def create_app(
                 "rcvrFirstName": rcvr_first,
                 "rcvrLastName": rcvr_last,
                 "rcvrCountry": rcvr_country,
+                # Drives Binance UAE questionnaire (isAddressOwner=1 vs 2)
+                # and is harmless for OKX/BitOasis (they ignore it).
+                "addressOwnerSelf": is_self_custody,
             }
             if rcvr_subdiv:
                 rcvr_info["rcvrCountrySubDivision"] = rcvr_subdiv

@@ -209,11 +209,24 @@
       </small>
     </div>
 
-    {# UAE Travel Rule: OKX requires the recipient's name + country on
-       every withdrawal. Self-custody = your own name + country. #}
+    {# UAE Travel Rule: OKX and Binance UAE (ADGM) both demand recipient
+       info on every withdrawal. Self-custody = sending to your own
+       wallet (the common case). Binance routes through
+       /sapi/v1/localentity/withdraw/apply with isAddressOwner=1 when
+       self-custody is ticked. #}
     <h3 style="margin:24px 0 8px; font-size:14px; color:var(--text-muted); font-weight:600">
       Recipient info (Travel Rule)
     </h3>
+    <div class="form-row">
+      <label style="display:flex; align-items:center; gap:8px; cursor:pointer">
+        <input type="checkbox" name="address_owner_self" value="1" checked
+          style="width:auto; height:auto; margin:0">
+        <span>This is my own wallet (self-custody)</span>
+      </label>
+      <small>Uncheck when sending to someone else. Determines whether
+        Binance treats you as the beneficiary (isAddressOwner=1) or
+        records a third-party beneficiary.</small>
+    </div>
     <div class="form-row">
       <label>First name</label>
       <input type="text" name="rcvr_first_name" required placeholder="Benjamin"
