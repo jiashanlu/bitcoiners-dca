@@ -1194,6 +1194,56 @@ def create_app(
                 return bool(getattr(ex, "supports_lightning_withdrawal", False))
         return False
 
+    @app.get("/api/withdrawable-btc")
+    async def api_withdrawable_btc(ex: str = ""):
+        """Live BTC available to withdraw on a given exchange.
+
+        Powers the Withdraw-now form's balance display + slider. Reads
+        each adapter's live BTC balance, then for OKX combines Trading +
+        Funding sub-account free balances (the adapter auto-transfers
+        from Trading to Funding inside withdraw_btc, so the user's
+        meaningful "available" is the sum). For Binance and BitOasis
+        the single `free` field already reflects what's withdrawable.
+        """
+        name = (ex or "").strip().lower()
+        target = None
+        for adapter in _exchanges():
+            if adapter.name == name:
+                target = adapter
+                break
+        if target is None:
+            return {"exchange": name, "available_btc": "0", "note": "not configured"}
+        try:
+            if name == "okx":
+                # OKX-specific: sum across Trading + Funding via the raw
+                # ccxt client (the adapter's get_balances returns Trading
+                # only, which would underreport for users who manually
+                # parked BTC in Funding).
+                client = getattr(target, "_client", None)
+                if client is None:
+                    raise RuntimeError("OKX client missing")
+                trading = await client.fetch_balance({"type": "trading"})
+                funding = await client.fetch_balance({"type": "funding"})
+                t = (trading.get("BTC") or {}).get("free") or 0
+                f = (funding.get("BTC") or {}).get("free") or 0
+                avail = Decimal(str(t)) + Decimal(str(f))
+                return {
+                    "exchange": name,
+                    "available_btc": format(avail, "f"),
+                    "note": f"Trading {t} + Funding {f}",
+                }
+            # Generic adapter path.
+            balances = await target.get_balances()
+            for b in balances:
+                if b.asset == "BTC":
+                    return {
+                        "exchange": name,
+                        "available_btc": format(b.free, "f"),
+                    }
+            return {"exchange": name, "available_btc": "0", "note": "no BTC balance"}
+        except Exception as e:
+            return {"exchange": name, "available_btc": "0", "note": f"err: {type(e).__name__}"}
+
     def _withdrawals_ctx_extra():
         cfg = _config()
         # ExchangesConfig is a Pydantic model with one field per supported
@@ -1356,10 +1406,12 @@ def create_app(
             return _back("err", f"Amount '{amount_raw}' isn't a number.")
         if amount_btc <= 0:
             return _back("err", "Amount must be greater than zero.")
-        # Server-side cap mirrors the HTML max=0.01. Anyone bypassing the
-        # form attribute still hits this.
-        if amount_btc > Decimal("0.01"):
-            return _back("err", "Amount exceeds the 0.01 BTC safety cap for the manual flow.")
+        # Server-side cap matches the UI's documented 1 BTC limit on
+        # the manual flow. Anyone bypassing the form attribute still
+        # hits this. Auto-withdraw uses its own threshold-based cap
+        # configured per-exchange in the policy section above.
+        if amount_btc > Decimal("1"):
+            return _back("err", "Amount exceeds the 1 BTC safety cap for the manual flow.")
 
         # Find the configured exchange adapter. Re-use the cached list so
         # we hit the same credentials the bot uses for live cycles.

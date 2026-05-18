@@ -179,14 +179,33 @@
 
     <div class="form-row">
       <label>Amount (BTC)</label>
-      <input type="number" name="amount_btc" required
-        step="0.00000001" min="0.00000001" max="0.01"
-        placeholder="0.0001">
+      <div style="display:grid; grid-template-columns: 1fr; gap:8px">
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+          <input type="number" name="amount_btc" id="amount_btc" required
+            step="0.00000001" min="0.00000001"
+            placeholder="0.0001"
+            style="flex:1; min-width:140px">
+          <button type="button" id="btn_max"
+            style="padding:8px 14px; background:transparent; color:var(--text);
+                   border:1px solid var(--border); border-radius:6px; cursor:pointer;
+                   font-size:13px; white-space:nowrap">
+            Max
+          </button>
+        </div>
+        <div style="display:flex; gap:10px; align-items:center">
+          <input type="range" id="amount_pct" min="0" max="100" step="1" value="0"
+            style="flex:1">
+          <span id="amount_pct_label" class="mono" style="min-width:48px; text-align:right">0%</span>
+        </div>
+        <div id="balance_line" class="muted" style="font-size:13px">
+          Available: <span id="balance_value" class="mono">—</span> BTC
+          <span id="balance_status" style="margin-left:8px"></span>
+        </div>
+      </div>
       <small>
-        For Lightning: amount used to request the invoice from the
-        recipient. For BOLT11 invoices: must match the amount embedded
-        in the invoice. Max 0.01 BTC per call as a safety cap; change
-        the <code>max</code> attribute in the form if you need bigger.
+        Pick a percentage with the slider, type a value, or click Max
+        (Max subtracts ~0.0001 BTC for the network fee). Hard server-
+        side cap of 1 BTC per manual call.
       </small>
     </div>
 
@@ -224,4 +243,83 @@
     </button>
   </form>
 </div>
+
+<script>
+// Withdraw-now: live exchange balance + slider/max amount picker.
+// Fetches /api/withdrawable-btc when the exchange dropdown changes,
+// keeps the slider + amount input in sync, and the Max button fills
+// the amount with balance minus an estimated network fee.
+(function () {
+  const form = document.querySelector('form[action$="/withdrawals/withdraw-now"]');
+  if (!form) return;
+  const exSel = form.querySelector('select[name="exchange"]');
+  const amtInput = document.getElementById('amount_btc');
+  const slider = document.getElementById('amount_pct');
+  const sliderLbl = document.getElementById('amount_pct_label');
+  const balValue = document.getElementById('balance_value');
+  const balStatus = document.getElementById('balance_status');
+  const btnMax = document.getElementById('btn_max');
+  // Fee buffer matches the conservative default in core/lightning + okx
+  // adapters — ~0.0001 BTC covers OKX's on-chain BTC withdrawal fee and
+  // similar on Binance / BitOasis. Slightly aggressive but the safer
+  // bias for a "Max" click than overestimating and surprising the user.
+  const FEE_BUFFER = 0.0001;
+  // Hard server-side cap as documented; mirror in the slider math.
+  const HARD_CAP = 1.0;
+  let currentBalance = null;
+
+  const prefix = {{ prefix|tojson }} || "";
+
+  async function fetchBalance() {
+    const ex = exSel.value;
+    balValue.textContent = '…';
+    balStatus.textContent = '';
+    try {
+      const r = await fetch(`${prefix}/api/withdrawable-btc?ex=${encodeURIComponent(ex)}`, {
+        headers: { 'Accept': 'application/json' },
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const j = await r.json();
+      const v = parseFloat(j.available_btc || 0);
+      currentBalance = isFinite(v) ? v : 0;
+      balValue.textContent = currentBalance.toFixed(8);
+      if (j.note) balStatus.textContent = `· ${j.note}`;
+    } catch (e) {
+      currentBalance = null;
+      balValue.textContent = '?';
+      balStatus.textContent = `· couldn't read (${e.message})`;
+    }
+  }
+
+  function applyPct(pct) {
+    sliderLbl.textContent = `${pct}%`;
+    if (currentBalance == null || currentBalance <= 0) return;
+    const target = Math.max(0, Math.min(currentBalance * (pct / 100), HARD_CAP));
+    // 8 sat precision matches the input step
+    amtInput.value = target.toFixed(8);
+  }
+
+  function syncSliderFromAmount() {
+    if (currentBalance == null || currentBalance <= 0) return;
+    const v = parseFloat(amtInput.value || 0);
+    if (!isFinite(v)) return;
+    const pct = Math.round(Math.max(0, Math.min((v / currentBalance) * 100, 100)));
+    slider.value = pct;
+    sliderLbl.textContent = `${pct}%`;
+  }
+
+  exSel.addEventListener('change', fetchBalance);
+  slider.addEventListener('input', () => applyPct(parseInt(slider.value, 10)));
+  amtInput.addEventListener('input', syncSliderFromAmount);
+  btnMax.addEventListener('click', () => {
+    if (currentBalance == null) return;
+    const max = Math.max(0, Math.min(currentBalance - FEE_BUFFER, HARD_CAP));
+    amtInput.value = max.toFixed(8);
+    syncSliderFromAmount();
+  });
+
+  // Initial fetch on page load.
+  fetchBalance();
+})();
+</script>
 {% endblock %}
