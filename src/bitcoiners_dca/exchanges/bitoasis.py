@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, AsyncIterator, Optional
 
 import httpx
@@ -78,10 +78,23 @@ def _to_bitoasis_pair(canonical: str) -> str:
 
 
 def _dec(value: Any, default: str = "0") -> Decimal:
-    """Robust Decimal conversion: handles None, int, float, str."""
+    """Robust Decimal conversion: handles None, int, float, str, and the
+    occasional `{amount, currency}` / `{value, ccy}` dict BitOasis ships
+    on fee fields. Falls back to `default` on anything that doesn't
+    parse, so the caller doesn't crash on the response after the
+    withdrawal has already been accepted server-side.
+    """
     if value is None or value == "":
         return Decimal(default)
-    return Decimal(str(value))
+    if isinstance(value, dict):
+        for key in ("amount", "value", "cost"):
+            if key in value:
+                return _dec(value[key], default)
+        return Decimal(default)
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return Decimal(default)
 
 
 def _parse_iso(value: Any) -> datetime:
