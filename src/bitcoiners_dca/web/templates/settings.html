@@ -46,9 +46,39 @@
     <small>Cycle results · arbitrage alerts · error escalation.</small>
   </div>
   <div class="form-row">
-    <label>Telegram chat ID</label>
-    <input name="tg_chat_id" value="{{ config.notifications.telegram.chat_id or '' }}" placeholder="123456789">
-    <small>Message <code>@userinfobot</code> on Telegram to find yours. Bot token comes from the <code>TG_BOT_TOKEN</code> env var.</small>
+    <label>Bot token</label>
+    <input name="tg_bot_token" type="password"
+      value="{% if tg_token_saved %}***{% endif %}"
+      placeholder="123456789:AAHabc...">
+    <small>
+      Create a bot via <a href="https://t.me/BotFather" target="_blank" rel="noopener"><code>@BotFather</code></a>
+      → <code>/newbot</code> → copy the token. Stored encrypted in your tenant's secret store, never in the YAML config.
+      Leave as <code>***</code> to keep the saved token unchanged.
+    </small>
+  </div>
+  <div class="form-row">
+    <label>Your chat ID</label>
+    <input name="tg_chat_id" value="{{ config.notifications.telegram.chat_id or '' }}" placeholder="1031335295">
+    <small>
+      <strong>Not the bot's ID.</strong> Send <code>/start</code> to your bot first so it can DM you,
+      then message <a href="https://t.me/userinfobot" target="_blank" rel="noopener"><code>@userinfobot</code></a>
+      to find your own user ID (e.g. <code>1031335295</code>) and paste it here.
+    </small>
+  </div>
+  {# Live test fires a one-shot message via the saved token + chat_id. #}
+  <div class="form-row" style="grid-template-columns: 1fr">
+    <form method="post" action="{{ prefix }}/settings/telegram-test"
+          style="margin:0; display:inline-block">
+      <button type="submit" class="btn secondary"
+              {% if not tg_token_saved %}disabled title="Save a bot token first"{% endif %}>
+        Send test message
+      </button>
+    </form>
+    {% if tg_token_saved %}
+      <small style="margin-top:6px; color: var(--text-muted)">Token is saved. Click to verify the chat ID is right too.</small>
+    {% else %}
+      <small style="margin-top:6px; color: var(--text-muted)">Save a token above before testing.</small>
+    {% endif %}
   </div>
 </div>
 

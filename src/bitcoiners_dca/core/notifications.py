@@ -22,6 +22,37 @@ class Notifier:
     def __init__(self, config: NotificationsConfig):
         self.config = config
 
+    def _resolve_telegram_token(self) -> Optional[str]:
+        """Look up the Telegram bot token in this order:
+
+          1. SecretStore — what the dashboard's `/settings` form writes.
+             Encrypted at rest, lives in the tenant's SQLite DB.
+          2. Env var named by config.telegram.bot_token_env (default
+             `TG_BOT_TOKEN`) — for operator-provisioned tenants and
+             local dev where SecretStore may not be wired up.
+
+        Either path returns the raw token string; both being unset
+        returns None and the caller skips silently.
+        """
+        # SecretStore first. Lazy-import + try/except so this module stays
+        # usable in contexts without a configured DB (CLI smoke tests,
+        # unit tests). The default config path resolves to the tenant's
+        # config.yaml via DCA_CONFIG env or the bot's runtime working
+        # directory.
+        try:
+            from bitcoiners_dca.persistence.secrets import SecretStore
+            from bitcoiners_dca.utils.config import load_config
+            cfg_path = os.environ.get("DCA_CONFIG") or "/app/config/config.yaml"
+            cfg = load_config(cfg_path)
+            store = SecretStore(cfg.persistence.db_path)
+            stored = store.get("telegram.bot_token")
+            if stored:
+                return stored
+        except Exception as e:  # SecretStore unavailable, DB missing, etc.
+            log.debug("telegram token: SecretStore lookup failed: %s", e)
+        # Env fallback.
+        return os.environ.get(self.config.telegram.bot_token_env) or None
+
     async def notify_cycle(self, result: ExecutionResult) -> None:
         """Send a DCA cycle summary to all enabled channels."""
         msg = self._format_cycle_message(result)
@@ -92,7 +123,7 @@ class Notifier:
             await self._send_email(text)
 
     async def _send_telegram(self, text: str) -> None:
-        token = os.environ.get(self.config.telegram.bot_token_env)
+        token = self._resolve_telegram_token()
         chat_id = self.config.telegram.chat_id
         if not token or not chat_id:
             log.debug("telegram notify skipped: token or chat_id missing")

@@ -1520,10 +1520,12 @@ def create_app(
 
     @app.get("/settings", response_class=HTMLResponse)
     async def settings_page(request: Request):
+        sec = _secrets()
         return HTMLResponse(jinja.get_template("settings.html").render(_ctx(
             request, active="settings",
             license_tier=_license().tier.value,
             license_features=[f.value for f in _license().enabled_features],
+            tg_token_saved=bool(sec and sec.get("telegram.bot_token")),
         )))
 
     @app.post("/settings", response_class=HTMLResponse)
@@ -1562,9 +1564,69 @@ def create_app(
             "dry_run": form.get("dry_run") == "on",
         }
         flash = _apply_patch(state["config_path"], patch, _refresh_config)
+
+        # Telegram bot token lives in SecretStore (encrypted at rest), not
+        # in the YAML config. The redacted placeholder `***` means "keep
+        # what's already saved" — don't blow it away when the user re-saves
+        # the rest of the page.
+        tg_token = (form.get("tg_bot_token") or "").strip()
+        sec = _secrets()
+        if sec is not None and tg_token and tg_token != "***":
+            sec.set("telegram.bot_token", tg_token)
+            flash = {
+                "kind": flash.get("kind", "ok") if isinstance(flash, dict) else "ok",
+                "message": (
+                    flash.get("message", "Saved.") if isinstance(flash, dict) else "Saved."
+                ) + " Telegram bot token stored.",
+            }
+
         return HTMLResponse(jinja.get_template("settings.html").render(_ctx(
             request, active="settings", flash=flash,
             license_features=[f.value for f in _license().enabled_features],
+            tg_token_saved=bool(sec and sec.get("telegram.bot_token")),
+        )))
+
+    @app.post("/settings/telegram-test", response_class=HTMLResponse)
+    async def telegram_test(request: Request):
+        """Fire a one-shot test message to the configured chat_id using
+        the saved bot token. Surfaces success/failure as a flash so the
+        operator can iterate without redeploying.
+        """
+        from bitcoiners_dca.core.notifications import Notifier
+        cfg = _config()
+        sec = _secrets()
+        token = (sec.get("telegram.bot_token") if sec else None) \
+            or os.environ.get(cfg.notifications.telegram.bot_token_env or "TG_BOT_TOKEN") \
+            or ""
+        chat_id = cfg.notifications.telegram.chat_id
+        if not token:
+            flash = {"kind": "err", "message": "No bot token saved. Paste one in the Telegram card and click Save first."}
+        elif not chat_id:
+            flash = {"kind": "err", "message": "No chat_id set. Add yours in the Telegram card and click Save first."}
+        else:
+            # Build a notifier whose token resolution prefers SecretStore.
+            n = Notifier(cfg.notifications)
+            # The notifier reads from env, so monkey-patch the env for this call.
+            prev = os.environ.get("TG_BOT_TOKEN")
+            os.environ["TG_BOT_TOKEN"] = token
+            try:
+                await n._send_telegram(
+                    "🧪 *bitcoiners-dca test*\n\nIf you see this, your bot token "
+                    "and chat ID are wired correctly. Trading alerts will land here."
+                )
+                flash = {"kind": "ok", "message": f"Test message sent to chat {chat_id}. Check Telegram."}
+            except Exception as e:
+                flash = {"kind": "err", "message": f"Test failed: {e}"}
+            finally:
+                if prev is None:
+                    os.environ.pop("TG_BOT_TOKEN", None)
+                else:
+                    os.environ["TG_BOT_TOKEN"] = prev
+
+        return HTMLResponse(jinja.get_template("settings.html").render(_ctx(
+            request, active="settings", flash=flash,
+            license_features=[f.value for f in _license().enabled_features],
+            tg_token_saved=bool(sec and sec.get("telegram.bot_token")),
         )))
 
     # === Lifecycle controls ===
