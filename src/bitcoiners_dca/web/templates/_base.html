@@ -323,6 +323,11 @@ a { color: var(--accent); text-decoration: none; }
 }
 .nav-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
+/* Backdrop is only rendered as a tap-to-close veil under the drawer on
+   narrow viewports. Without an explicit default-hidden rule the empty
+   div claims a grid cell on desktop and shoves <main> into a new row. */
+.sidebar-backdrop { display: none; }
+
 @media (max-width: 640px) {
   /* Layout: single-column with topbar above content. Sidebar
      becomes an offscreen drawer revealed on toggle. */
