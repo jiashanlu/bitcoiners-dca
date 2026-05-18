@@ -1407,11 +1407,29 @@ def create_app(
         except ValueError as e:
             return _back("err", f"Couldn't resolve destination: {e}")
 
+        # Travel Rule recipient info (OKX requires this in regulated
+        # regions like UAE; other exchanges ignore the kwarg).
+        rcvr_first = (form.get("rcvr_first_name") or "").strip()
+        rcvr_last = (form.get("rcvr_last_name") or "").strip()
+        rcvr_country = (form.get("rcvr_country") or "").strip().upper()[:2]
+        rcvr_subdiv = (form.get("rcvr_country_subdivision") or "").strip()
+        rcvr_info: Optional[dict] = None
+        if rcvr_first and rcvr_last and rcvr_country:
+            rcvr_info = {
+                "walletType": "private",  # self-custody — supports "exchange" later if needed
+                "rcvrFirstName": rcvr_first,
+                "rcvrLastName": rcvr_last,
+                "rcvrCountry": rcvr_country,
+            }
+            if rcvr_subdiv:
+                rcvr_info["rcvrCountrySubDivision"] = rcvr_subdiv
+
         try:
             withdrawal = await target.withdraw_btc(
                 amount_btc=amount_btc,
                 address=outgoing_destination,
                 network=outgoing_network,
+                rcvr_info=rcvr_info,
             )
         except Exception as e:
             # `logger` is the module-level binding; the original code

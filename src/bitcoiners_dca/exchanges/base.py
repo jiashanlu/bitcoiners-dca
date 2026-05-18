@@ -306,8 +306,17 @@ class Exchange(ABC):
         amount_btc: Decimal,
         address: str,
         network: str = "bitcoin",  # or "lightning" for some exchanges
+        rcvr_info: Optional[dict] = None,
     ) -> Withdrawal:
         """Withdraw BTC to an external address.
+
+        `rcvr_info` is a dict carrying Travel Rule recipient info that
+        some exchanges (notably OKX in regulated regions like UAE) demand
+        per local KYC/AML rules. Shape expected by OKX:
+          {"walletType": "private",
+           "rcvrFirstName": "...", "rcvrLastName": "...",
+           "rcvrCountry": "AE", "rcvrCountrySubDivision": "Dubai"}
+        Exchanges that don't require it ignore the kwarg.
 
         The DCA bot's auto-withdraw uses this. Implementations should:
         - Check that the address is whitelisted (per-exchange policy)

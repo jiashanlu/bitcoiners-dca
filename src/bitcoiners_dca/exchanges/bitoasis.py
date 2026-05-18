@@ -446,7 +446,12 @@ class BitOasisExchange(Exchange):
         amount_btc: Decimal,
         address: str,
         network: str = "bitcoin",
+        rcvr_info: Optional[dict] = None,
     ) -> Withdrawal:
+        # BitOasis collects Travel-Rule info at the address-whitelist
+        # step in their UI, not via the withdrawal API call. Kwarg is
+        # accepted to honour the abstract signature, ignored here.
+        del rcvr_info
         from bitcoiners_dca.core.lightning import is_lightning
         if is_lightning(address) or network.lower() in ("lightning", "ln", "bolt11"):
             raise WithdrawalDeniedError(

@@ -225,7 +225,13 @@ class BinanceExchange(Exchange):
         return [self._normalize_trade_as_order(t, pair) for t in raw]
 
     async def withdraw_btc(self, amount_btc: Decimal, address: str,
-                           network: str = "bitcoin") -> Withdrawal:
+                           network: str = "bitcoin",
+                           rcvr_info: Optional[dict] = None) -> Withdrawal:
+        # Binance UAE's API doesn't currently demand Travel-Rule recipient
+        # info on the withdraw endpoint the way OKX does. We accept the
+        # kwarg so the abstract Exchange.withdraw_btc signature is
+        # satisfied uniformly and ignore it here.
+        del rcvr_info
         from bitcoiners_dca.core.lightning import is_lightning
         if is_lightning(address) or network.lower() in ("lightning", "ln", "bolt11"):
             raise WithdrawalDeniedError(

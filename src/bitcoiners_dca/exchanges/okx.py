@@ -311,6 +311,7 @@ class OKXExchange(Exchange):
         amount_btc: Decimal,
         address: str,
         network: str = "bitcoin",
+        rcvr_info: Optional[dict] = None,
     ) -> Withdrawal:
         """Withdraw BTC. Auto-detects Lightning when `address` is a BOLT11 invoice.
 
@@ -347,7 +348,14 @@ class OKXExchange(Exchange):
             fee_str = await self._fetch_btc_onchain_fee_str()
 
         try:
-            params = {"chain": chain, "fee": fee_str}
+            params: dict = {"chain": chain, "fee": fee_str}
+            # OKX-in-UAE (and other regulated regions) require Travel
+            # Rule recipient info per FATF rules. ccxt forwards the
+            # rcvrInfo object directly to OKX's /asset/withdrawal endpoint
+            # as JSON. Skipping the param triggers OKX error 58237.
+            if rcvr_info:
+                import json as _json
+                params["rcvrInfo"] = _json.dumps(rcvr_info)
             raw = await self._client.withdraw(
                 code="BTC",
                 amount=float(amount_btc),

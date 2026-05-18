@@ -189,6 +189,35 @@
       </small>
     </div>
 
+    {# UAE Travel Rule: OKX requires the recipient's name + country on
+       every withdrawal. Self-custody = your own name + country. #}
+    <h3 style="margin:24px 0 8px; font-size:14px; color:var(--text-muted); font-weight:600">
+      Recipient info (Travel Rule)
+    </h3>
+    <div class="form-row">
+      <label>First name</label>
+      <input type="text" name="rcvr_first_name" required placeholder="Benjamin"
+        autocomplete="given-name">
+      <small>Your own first name for self-custody, or the recipient's first name otherwise.</small>
+    </div>
+    <div class="form-row">
+      <label>Last name</label>
+      <input type="text" name="rcvr_last_name" required placeholder="Bois"
+        autocomplete="family-name">
+    </div>
+    <div class="form-row">
+      <label>Country</label>
+      <input type="text" name="rcvr_country" required value="AE" maxlength="2"
+        style="text-transform:uppercase" autocomplete="country">
+      <small>ISO 3166-1 alpha-2 (AE, US, GB, …). UAE residents leave as AE.</small>
+    </div>
+    <div class="form-row">
+      <label>Emirate / State</label>
+      <input type="text" name="rcvr_country_subdivision" value="Dubai"
+        placeholder="Dubai">
+      <small>Optional but recommended — OKX accepts the emirate name for UAE residents.</small>
+    </div>
+
     <button type="submit" class="btn" style="background: var(--err); color: white">
       Send withdrawal →
     </button>
