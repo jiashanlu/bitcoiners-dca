@@ -335,8 +335,19 @@ class OKXExchange(Exchange):
                 status=WithdrawalStatus.PENDING,
                 created_at=datetime.now(timezone.utc),
             )
+        # ccxt's okx.withdraw() requires `fee` in params or it errors:
+        # "okx withdraw() requires a 'fee' string parameter". OKX charges
+        # 0 for Lightning. For on-chain, fee is dynamic; query the
+        # exchange's current network fee for BTC-Bitcoin and pass that.
+        # Falls back to a conservative default if the lookup fails so
+        # the call doesn't hard-error on a transient network blip.
+        if normalized_network == "lightning":
+            fee_str = "0"
+        else:
+            fee_str = await self._fetch_btc_onchain_fee_str()
+
         try:
-            params = {"chain": chain}
+            params = {"chain": chain, "fee": fee_str}
             raw = await self._client.withdraw(
                 code="BTC",
                 amount=float(amount_btc),
@@ -358,6 +369,34 @@ class OKXExchange(Exchange):
             raise WithdrawalDeniedError(str(e)) from e
         except Exception as e:
             raise ExchangeError(f"OKX withdraw failed: {e}") from e
+
+    async def _fetch_btc_onchain_fee_str(self) -> str:
+        """Look up OKX's current advertised on-chain BTC withdrawal fee.
+
+        ccxt's `fetch_currencies()` returns per-network metadata including
+        a `fee` field for each chain. We pull the `BTC-Bitcoin` network's
+        fee; fall back to a conservative default if the lookup fails so
+        a transient network blip doesn't block all on-chain withdrawals.
+        OKX's standard on-chain BTC fee in 2026 is around 0.00005 BTC.
+        """
+        try:
+            currencies = await self._client.fetch_currencies()
+            btc = (currencies or {}).get("BTC") or {}
+            networks = btc.get("networks") or {}
+            # ccxt normalizes the network key; look for both "Bitcoin"
+            # and the OKX raw form, since adapters disagree on the key.
+            for key in ("Bitcoin", "BTC", "BTC-Bitcoin"):
+                net = networks.get(key)
+                if net and net.get("fee") is not None:
+                    return str(net["fee"])
+            # Some ccxt versions surface fee at the top level of the
+            # currency dict rather than per-network.
+            if btc.get("fee") is not None:
+                return str(btc["fee"])
+        except Exception:
+            pass
+        # Conservative default — typical OKX BTC-Bitcoin withdrawal fee.
+        return "0.0001"
 
     @staticmethod
     def _resolve_chain(address: str, network: str) -> tuple[str, str]:
