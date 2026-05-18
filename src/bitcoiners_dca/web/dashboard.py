@@ -274,6 +274,20 @@ class _OriginCSRFMiddleware(BaseHTTPMiddleware):
         allowed_hosts = {self._host_of(f"//{host}") for host in {host, fwd_host} if host}
         allowed_hosts.discard("")
 
+        # When the dashboard is iframed inside app.bitcoiners.ae/dca/console,
+        # the browser sends Origin/Referer = app.bitcoiners.ae — that's the
+        # iframe parent, not the tenant's own host. The /dca/console proxy
+        # forwards the request to the tenant, so the tenant sees a Referer
+        # host that doesn't match its own hostname and used to 403 it.
+        # DCA_TRUSTED_PROXY_HOSTS (comma-separated) widens allowed_hosts
+        # for these legitimate proxy-forwarded requests; only honoured when
+        # the CF-access-authenticated header is also present (that header
+        # is what the proxy sets to vouch for the user).
+        proxy_hosts_env = os.environ.get("DCA_TRUSTED_PROXY_HOSTS", "")
+        trusted_proxy_hosts = {
+            h.strip().lower() for h in proxy_hosts_env.split(",") if h.strip()
+        }
+
         # Trust requests that came through bitcoiners-app's proxy AND
         # carry a same-site Origin/Referer. The CF header alone was the
         # previous trust signal, but that lets a same-site CSRF attempt
@@ -287,22 +301,26 @@ class _OriginCSRFMiddleware(BaseHTTPMiddleware):
         #     interpretable as "internal call").
         cf_auth = request.headers.get("cf-access-authenticated-user-email")
         if cf_auth:
+            # Trusted proxy hosts widen the allowed set only when the CF
+            # auth header is present — i.e., the request demonstrably
+            # came through the bitcoiners-app proxy.
+            cf_allowed_hosts = allowed_hosts | trusted_proxy_hosts
             if origin:
-                if self._host_of(origin) in allowed_hosts:
+                if self._host_of(origin) in cf_allowed_hosts:
                     return await call_next(request)
                 return JSONResponse(
                     {"error": "csrf",
                      "detail": "cf-access-authenticated header present but Origin "
-                               f"host {self._host_of(origin)!r} not in {allowed_hosts}"},
+                               f"host {self._host_of(origin)!r} not in {cf_allowed_hosts}"},
                     status_code=403,
                 )
             if referer:
-                if self._host_of(referer) in allowed_hosts:
+                if self._host_of(referer) in cf_allowed_hosts:
                     return await call_next(request)
                 return JSONResponse(
                     {"error": "csrf",
                      "detail": "cf-access-authenticated header present but Referer "
-                               f"host {self._host_of(referer)!r} not in {allowed_hosts}"},
+                               f"host {self._host_of(referer)!r} not in {cf_allowed_hosts}"},
                     status_code=403,
                 )
             # Neither Origin nor Referer — server-to-server style; the

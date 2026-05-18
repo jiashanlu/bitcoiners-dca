@@ -78,6 +78,13 @@ services:
       # Belt-and-suspenders on top of the ufw allow-list — if either layer
       # is misconfigured, requests fail closed.
       DCA_REQUIRE_CF_HEADER: "1"
+      # CSRF middleware whitelists these hosts as valid Origin/Referer
+      # in addition to the tenant's own hostname. The bot dashboard is
+      # iframed inside `app.bitcoiners.ae/dca/console/`, so legitimate
+      # form POSTs from the iframe arrive with Origin/Referer set to
+      # the parent host, not the tenant's. Only honoured when the
+      # cf-access-authenticated-user-email header is also present.
+      DCA_TRUSTED_PROXY_HOSTS: "app.bitcoiners.ae,dev-app.bitcoiners.ae"
     ports:
       # Bind to the LAN. bitcoiners-app (on a different LXC) reaches the
       # dashboard at http://<tenants-lxc-lan-ip>:${TENANT_DASH_PORT}/.
