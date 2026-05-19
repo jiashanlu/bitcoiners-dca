@@ -207,10 +207,12 @@
         </div>
       </div>
       <small>
-        Pick a percentage with the slider, type a value, or click Max
-        (Max = balance minus the on-chain fee — the exchange debits
-        amount + fee, so requesting the full balance would fail).
-        Hard server-side cap of 1 BTC per manual call.
+        Pick a percentage with the slider, type a value, or click Max.
+        Fee model differs per exchange: OKX and BitOasis debit
+        <code>amount + fee</code> from your balance (Max subtracts the fee),
+        while Binance debits exactly <code>amount</code> and nets the fee
+        from what reaches the destination (Max = full balance). Hard
+        server-side cap of 1 BTC per manual call.
       </small>
     </div>
 
@@ -277,11 +279,16 @@
   const balValue = document.getElementById('balance_value');
   const balStatus = document.getElementById('balance_status');
   const btnMax = document.getElementById('btn_max');
-  // Per-exchange on-chain BTC withdrawal fee. The exchange debits
-  // `amount + fee` from balance, so passing the full balance fails with
-  // "insufficient funds". Max sends `balance - fee` — the true ceiling
-  // that will actually leave the exchange.
-  const MAX_FEE_BTC = { okx: 0.0002, binance: 0.0002, bitoasis: 0.0003 };
+  // Per-exchange fee model for the Max button.
+  //  - OKX: debits `amount + fee` from balance, so Max must subtract
+  //    the fee or the request errors with "insufficient funds".
+  //  - Binance: debits exactly `amount`, the fee comes out of what the
+  //    destination receives. Max = balance (no subtraction) — otherwise
+  //    the fee gets stranded in the exchange account.
+  //  - BitOasis: same `amount + fee` model as OKX (treat conservatively
+  //    until proven otherwise).
+  // BTC values are the per-exchange on-chain fee; 0 means "don't subtract".
+  const MAX_FEE_BTC = { okx: 0.0002, binance: 0, bitoasis: 0.0003 };
   const HARD_CAP = 1.0;
   let currentBalance = null;
   // Set when the user clicks Max; cleared on any manual edit. Lets the
@@ -318,11 +325,15 @@
       const v = parseFloat(j.available_btc || 0);
       currentBalance = isFinite(v) ? v : 0;
       const fee = feeFor(ex);
-      const sendable = Math.max(0, currentBalance - fee);
       balValue.textContent = currentBalance.toFixed(8);
-      balStatus.textContent = j.note
-        ? `· ${j.note}`
-        : `· max sendable ${sendable.toFixed(8)} after ${fee} fee`;
+      if (j.note) {
+        balStatus.textContent = `· ${j.note}`;
+      } else if (fee > 0) {
+        const sendable = Math.max(0, currentBalance - fee);
+        balStatus.textContent = `· max request ${sendable.toFixed(8)} (fee ${fee} added on top)`;
+      } else {
+        balStatus.textContent = `· max request = full balance (fee netted from destination)`;
+      }
       setControlsEnabled(true);
     } catch (e) {
       currentBalance = null;
