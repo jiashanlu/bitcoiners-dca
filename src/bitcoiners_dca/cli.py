@@ -1140,6 +1140,31 @@ def risk(
     db.close()
 
 
+def _unwrap_retry_error(exc: BaseException) -> str:
+    """Surface the real cause of a tenacity RetryError.
+
+    `tenacity` wraps the last attempted exception in its own RetryError,
+    whose str() reads like `RetryError[<Future at 0x... state=finished
+    raised ExchangeError>]` — meaningless to a user trying to debug bad
+    credentials. Reach through the chain and return the underlying
+    exception's message.
+    """
+    from tenacity import RetryError
+    cur: BaseException = exc
+    seen: set[int] = set()
+    while isinstance(cur, RetryError) and id(cur) not in seen:
+        seen.add(id(cur))
+        inner = getattr(cur, "last_attempt", None)
+        if inner is not None and getattr(inner, "exception", None):
+            try:
+                cur = inner.exception()
+            except Exception:
+                break
+        else:
+            break
+    return f"{type(cur).__name__}: {cur}"
+
+
 @app.command()
 def validate(
     config_path: str = typer.Option("./config.yaml", "--config", "-c"),
@@ -1225,7 +1250,7 @@ async def _validate(config_path: str, skip_network: bool) -> int:
                 await ex.health_check()
                 row(ex.name, "health_check", "PASS", "auth + connectivity OK")
             except Exception as e:
-                row(ex.name, "health_check", "FAIL", str(e)[:80])
+                row(ex.name, "health_check", "FAIL", _unwrap_retry_error(e)[:80])
             finally:
                 await ex.close()
     else:
