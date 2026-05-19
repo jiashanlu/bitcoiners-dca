@@ -204,8 +204,9 @@
       </div>
       <small>
         Pick a percentage with the slider, type a value, or click Max
-        (Max fills 90% of your balance — leaves a buffer for fees and
-        future cycles). Hard server-side cap of 1 BTC per manual call.
+        (Max = balance minus the on-chain fee — the exchange debits
+        amount + fee, so requesting the full balance would fail).
+        Hard server-side cap of 1 BTC per manual call.
       </small>
     </div>
 
@@ -324,11 +325,16 @@
   exSel.addEventListener('change', fetchBalance);
   slider.addEventListener('input', () => applyPct(parseInt(slider.value, 10)));
   amtInput.addEventListener('input', syncSliderFromAmount);
+  // Per-exchange on-chain BTC withdrawal fee. The exchange debits
+  // `amount + fee` from balance, so requesting the full balance fails
+  // with "insufficient funds". Max sends `balance - fee` — that's the
+  // true maximum that will actually leave the exchange.
+  const MAX_FEE_BTC = { okx: 0.0002, binance: 0.0002, bitoasis: 0.0003 };
   btnMax.addEventListener('click', () => {
     if (currentBalance == null) return;
-    // 90% of balance leaves a comfortable buffer for network-fee drift +
-    // future cycles that haven't withdrawn yet. Hard server cap still applies.
-    const max = Math.max(0, Math.min(currentBalance * 0.9, HARD_CAP));
+    const ex = exSel.value;
+    const fee = MAX_FEE_BTC[ex] ?? 0.0003;
+    const max = Math.max(0, Math.min(currentBalance - fee, HARD_CAP));
     amtInput.value = max.toFixed(8);
     syncSliderFromAmount();
   });
