@@ -841,6 +841,16 @@ def create_app(
             "overlays.volatility_weighted.enabled": form.get("vol_enabled") == "on",
             "overlays.time_of_day.enabled": form.get("tod_enabled") == "on",
             "overlays.drawdown_aware.enabled": form.get("dd_enabled") == "on",
+            "overlays.onchain_smart_trigger.enabled": form.get("ost_enabled") == "on",
+            "overlays.onchain_smart_trigger.metric": form.get("ost_metric") or "mvrv_z",
+            "overlays.onchain_smart_trigger.boost_below": str(form.get("ost_boost_below", "-1.0")),
+            # Clamp multipliers to [0.5, 2.0] on the server too — even if
+            # the HTML min/max attributes get bypassed.
+            "overlays.onchain_smart_trigger.boost_multiplier":
+                str(_clamp_multiplier(form.get("ost_boost_mult", "1.5"))),
+            "overlays.onchain_smart_trigger.dampen_above": str(form.get("ost_dampen_above", "2.0")),
+            "overlays.onchain_smart_trigger.dampen_multiplier":
+                str(_clamp_multiplier(form.get("ost_dampen_mult", "0.5"))),
             "routing.enable_two_hop": form.get("two_hop") == "on",
             "routing.prefer_intermediate_balance":
                 form.get("prefer_intermediate_balance") == "on",
@@ -1971,6 +1981,20 @@ def _redact(value: str) -> str:
     if not value:
         return ""
     return "••••••••"
+
+
+def _clamp_multiplier(raw, lo=Decimal("0.5"), hi=Decimal("2.0")) -> Decimal:
+    """Clamp on-chain-overlay multipliers to a safe range. DCA cycles must
+    never blow up to 5x or zero out on a misclick. Returns 1.0 on garbage."""
+    try:
+        v = Decimal(str(raw).strip())
+    except (InvalidOperation, ValueError):
+        return Decimal("1.0")
+    if v < lo:
+        return lo
+    if v > hi:
+        return hi
+    return v
 
 
 def _parse_risk_cap(raw) -> Optional[str]:

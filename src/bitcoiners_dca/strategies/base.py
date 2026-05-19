@@ -26,6 +26,10 @@ class OverlayContext:
     price_ath_aed: Optional[Decimal] = None
     realized_vol_30d_pct: Optional[Decimal] = None   # annualized %
     hourly_spread_history: Optional[dict[int, Decimal]] = None  # hour-of-day → median spread%
+    # On-chain metric snapshot supplied by the strategy when smart-trigger
+    # overlays are enabled. Keys mirror the internal metric names in
+    # `bitcoiners_dca.core.onchain.SUPPORTED_METRICS` (mvrv, mvrv_z, …).
+    onchain_signals: Optional[dict[str, Decimal]] = None
 
 
 @dataclass

@@ -153,11 +153,28 @@ class DrawdownOverlayConfig(BaseModel):
     ])
 
 
+class OnchainSmartTriggerOverlayConfig(BaseModel):
+    """Boost / dampen the cycle based on a BRK on-chain metric.
+
+    `metric` is one of: mvrv, mvrv_z (default), sopr_1w, pi_cycle.
+    Buy `boost_multiplier`x the base amount when the metric ≤ `boost_below`;
+    buy `dampen_multiplier`x when ≥ `dampen_above`; otherwise no change.
+    Multipliers are clamped to [0.5, 2.0] in the overlay itself.
+    """
+    enabled: bool = False
+    metric: Literal["mvrv", "mvrv_z", "sopr_1w", "pi_cycle"] = "mvrv_z"
+    boost_below: Decimal = Decimal("-1.0")
+    boost_multiplier: Decimal = Decimal("1.5")
+    dampen_above: Decimal = Decimal("2.0")
+    dampen_multiplier: Decimal = Decimal("0.5")
+
+
 class OverlaysConfig(BaseModel):
     buy_the_dip: DipOverlayConfig = Field(default_factory=DipOverlayConfig)
     volatility_weighted: VolatilityWeightedOverlayConfig = Field(default_factory=VolatilityWeightedOverlayConfig)
     time_of_day: TimeOfDayOverlayConfig = Field(default_factory=TimeOfDayOverlayConfig)
     drawdown_aware: DrawdownOverlayConfig = Field(default_factory=DrawdownOverlayConfig)
+    onchain_smart_trigger: OnchainSmartTriggerOverlayConfig = Field(default_factory=OnchainSmartTriggerOverlayConfig)
 
 
 class MakerConfig(BaseModel):

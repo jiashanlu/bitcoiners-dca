@@ -239,6 +239,7 @@ class DCAStrategy:
             if current_quotes:
                 current_price = min(current_quotes, key=lambda t: t.ask).ask
             extra = market_context or {}
+            onchain_signals = await self._maybe_fetch_onchain_signals(extra)
             ctx = OverlayContext(
                 now=datetime.now(timezone.utc),
                 base_amount_aed=self.config.base_amount_aed,
@@ -248,6 +249,7 @@ class DCAStrategy:
                 price_ath_aed=extra.get("price_ath_aed"),
                 realized_vol_30d_pct=extra.get("realized_vol_30d_pct"),
                 hourly_spread_history=extra.get("hourly_spread_history"),
+                onchain_signals=onchain_signals,
             )
             applied_notes: list[str] = []
             for overlay in self.overlays:
@@ -683,3 +685,36 @@ class DCAStrategy:
         tasks = [ex.get_ticker(self.config.pair) for ex in exchanges]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         return [r for r in results if not isinstance(r, Exception)]
+
+    async def _maybe_fetch_onchain_signals(self, extra: dict) -> Optional[dict]:
+        # Skip the network call unless an overlay actually needs it. Look
+        # for any overlay class whose name starts with "onchain_" — keeps
+        # the strategy decoupled from the specific overlay registry.
+        wants_onchain = any(
+            getattr(ov, "name", "").startswith("onchain_") for ov in self.overlays
+        )
+        if not wants_onchain:
+            return None
+        # Caller may pre-supply signals (back-tests, tests) — respect those.
+        supplied = extra.get("onchain_signals")
+        if supplied is not None:
+            return supplied
+        try:
+            from bitcoiners_dca.core.onchain import (
+                get_default_client, OnchainSignalError, SUPPORTED_METRICS,
+            )
+            client = get_default_client()
+            wanted = {getattr(ov, "metric", None) for ov in self.overlays}
+            wanted.discard(None)
+            wanted = {m for m in wanted if m in SUPPORTED_METRICS}
+            signals: dict = {}
+            for metric in wanted:
+                try:
+                    signals[metric] = await client.get(metric)
+                except OnchainSignalError:
+                    # Bot must keep DCA'ing even if BRK is unreachable.
+                    pass
+            return signals or None
+        except Exception:
+            logger.exception("on-chain signal fetch failed unexpectedly")
+            return None

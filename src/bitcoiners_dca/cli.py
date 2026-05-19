@@ -219,8 +219,8 @@ def _build_overlays(cfg: AppConfig) -> list:
     """Construct the active overlay stack from config + license filter has
     already disabled any not-allowed-on-this-tier overlay configs."""
     from bitcoiners_dca.strategies import (
-        BuyTheDipOverlay, DrawdownOverlay, TimeOfDayOverlay,
-        VolatilityWeightedOverlay,
+        BuyTheDipOverlay, DrawdownOverlay, OnchainSmartTriggerOverlay,
+        TimeOfDayOverlay, VolatilityWeightedOverlay,
     )
     from bitcoiners_dca.strategies.drawdown import DrawdownTier
 
@@ -254,6 +254,15 @@ def _build_overlays(cfg: AppConfig) -> list:
                 DrawdownTier(t.threshold_pct, t.multiplier)
                 for t in cfg.overlays.drawdown_aware.tiers
             ],
+        ))
+    ost_cfg = getattr(cfg.overlays, "onchain_smart_trigger", None)
+    if ost_cfg is not None and ost_cfg.enabled:
+        out.append(OnchainSmartTriggerOverlay(
+            metric=ost_cfg.metric,
+            boost_below=ost_cfg.boost_below,
+            boost_multiplier=ost_cfg.boost_multiplier,
+            dampen_above=ost_cfg.dampen_above,
+            dampen_multiplier=ost_cfg.dampen_multiplier,
         ))
     return out
 

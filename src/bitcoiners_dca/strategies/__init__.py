@@ -8,6 +8,7 @@ market state:
   - volatility_weighted : reduce N when realized volatility is high
   - time_of_day  : skip cycles that aren't at the cheapest hour of day
   - drawdown     : multiply N when BTC is meaningfully off ATH
+  - onchain_smart_trigger : multiply N from a BRK on-chain metric band
 
 Overlays are composable. Each overlay returns an `OverlayResult` describing
 the modification + a human-readable note for the audit log. The strategy
@@ -22,6 +23,7 @@ from bitcoiners_dca.strategies.base import (
 )
 from bitcoiners_dca.strategies.dip import BuyTheDipOverlay
 from bitcoiners_dca.strategies.drawdown import DrawdownOverlay
+from bitcoiners_dca.strategies.onchain import OnchainSmartTriggerOverlay
 from bitcoiners_dca.strategies.time_of_day import TimeOfDayOverlay
 from bitcoiners_dca.strategies.volatility import VolatilityWeightedOverlay
 
@@ -31,6 +33,7 @@ __all__ = [
     "StrategyOverlay",
     "BuyTheDipOverlay",
     "DrawdownOverlay",
+    "OnchainSmartTriggerOverlay",
     "TimeOfDayOverlay",
     "VolatilityWeightedOverlay",
 ]

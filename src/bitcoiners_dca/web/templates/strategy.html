@@ -356,9 +356,53 @@
     <small>Multiply buys when BTC is meaningfully below ATH (default tiers: -20% / -40% / -60%).</small>
   </div>
 
+  <h3 style="margin-top:24px;font-size:14px;color:var(--text);">
+    On-chain smart triggers
+    {% if pro_locked %}<span class="pro-lock">🔒 Pro</span>{% endif %}
+  </h3>
+  <div class="form-row{% if pro_locked %} locked{% endif %}">
+    <label>
+      <input type="checkbox" name="ost_enabled"
+        {% if config.overlays.onchain_smart_trigger.enabled and not pro_locked %}checked{% endif %}
+        {% if pro_locked %}disabled{% endif %}>
+      Enabled
+    </label>
+    <small>Boost / dampen the cycle based on a Bitcoin Research Kit on-chain metric. Data source: bitview.space (BRK), swappable via <code>BRK_API_BASE</code>.</small>
+  </div>
+  <div class="form-row{% if pro_locked %} locked{% endif %}">
+    <label>Metric</label>
+    <select name="ost_metric" {% if pro_locked %}disabled{% endif %}>
+      {% for m, label in [("mvrv_z","MVRV-Z (default — best DCA signal)"), ("mvrv","MVRV"), ("sopr_1w","SOPR 1w"), ("pi_cycle","Pi-Cycle Top")] %}
+        <option value="{{ m }}" {% if config.overlays.onchain_smart_trigger.metric == m %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="form-row{% if pro_locked %} locked{% endif %}">
+    <label>Boost when metric ≤</label>
+    <input type="number" step="0.1" name="ost_boost_below"
+      value="{{ config.overlays.onchain_smart_trigger.boost_below }}"
+      {% if pro_locked %}disabled{% endif %}>
+    <label>Boost multiplier (×)</label>
+    <input type="number" step="0.1" min="0.5" max="2.0" name="ost_boost_mult"
+      value="{{ config.overlays.onchain_smart_trigger.boost_multiplier }}"
+      {% if pro_locked %}disabled{% endif %}>
+    <small>Clamped server-side to [0.5×, 2.0×]. Sample defaults for MVRV-Z: boost ≤ -1.0 by 1.5×.</small>
+  </div>
+  <div class="form-row{% if pro_locked %} locked{% endif %}">
+    <label>Dampen when metric ≥</label>
+    <input type="number" step="0.1" name="ost_dampen_above"
+      value="{{ config.overlays.onchain_smart_trigger.dampen_above }}"
+      {% if pro_locked %}disabled{% endif %}>
+    <label>Dampen multiplier (×)</label>
+    <input type="number" step="0.1" min="0.5" max="2.0" name="ost_dampen_mult"
+      value="{{ config.overlays.onchain_smart_trigger.dampen_multiplier }}"
+      {% if pro_locked %}disabled{% endif %}>
+    <small>Sample defaults for MVRV-Z: dampen ≥ 2.0 by 0.5×.</small>
+  </div>
+
   {% if pro_locked %}
   <p class="upgrade-pitch">
-    Volatility-weighted, time-of-day, and drawdown-aware overlays are part of the Pro tier.
+    Volatility-weighted, time-of-day, drawdown-aware and on-chain smart-trigger overlays are part of the Pro tier.
     <a href="https://bitcoiners.ae/dca-bot" target="_blank" rel="noopener">Upgrade →</a>
   </p>
   {% endif %}
