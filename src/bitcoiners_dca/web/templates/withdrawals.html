@@ -204,8 +204,8 @@
       </div>
       <small>
         Pick a percentage with the slider, type a value, or click Max
-        (Max subtracts ~0.0001 BTC for the network fee). Hard server-
-        side cap of 1 BTC per manual call.
+        (Max fills 90% of your balance — leaves a buffer for fees and
+        future cycles). Hard server-side cap of 1 BTC per manual call.
       </small>
     </div>
 
@@ -326,7 +326,9 @@
   amtInput.addEventListener('input', syncSliderFromAmount);
   btnMax.addEventListener('click', () => {
     if (currentBalance == null) return;
-    const max = Math.max(0, Math.min(currentBalance - FEE_BUFFER, HARD_CAP));
+    // 90% of balance leaves a comfortable buffer for network-fee drift +
+    // future cycles that haven't withdrawn yet. Hard server cap still applies.
+    const max = Math.max(0, Math.min(currentBalance * 0.9, HARD_CAP));
     amtInput.value = max.toFixed(8);
     syncSliderFromAmount();
   });
