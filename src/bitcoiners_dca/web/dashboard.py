@@ -1259,6 +1259,75 @@ def create_app(
         except Exception as e:
             return {"exchange": name, "available_btc": "0", "note": f"err: {type(e).__name__}"}
 
+    @app.get("/api/withdrawal-destinations")
+    async def api_withdrawal_destinations(ex: str = ""):
+        """Address book + Binance whitelist for the destination picker.
+
+        Returns:
+          {
+            "exchange": "binance",
+            "destinations": [
+              {"address": "bc1q...", "network": "bitcoin",
+               "label": "Hardware wallet", "source": "manual",
+               "last_used_at": "2026-05-19T..."},
+              ...
+            ]
+          }
+        Sources are merged and de-duplicated by (address, network), with
+        the most recent label winning. Binance also pulls
+        /sapi/v1/capital/withdraw/address/list (the only exchange that
+        exposes a whitelist surface).
+        """
+        name = (ex or "").strip().lower()
+        if not name:
+            return {"exchange": "", "destinations": []}
+        try:
+            local = _db().list_destinations(name, limit=50)
+        except Exception:
+            logger.exception("list_destinations failed")
+            local = []
+
+        merged: dict[tuple[str, str], dict] = {}
+        for row in local:
+            key = (row["address"], row["network"])
+            merged[key] = row
+
+        if name == "binance":
+            target = None
+            for adapter in _exchanges():
+                if adapter.name == "binance":
+                    target = adapter
+                    break
+            if target is not None:
+                try:
+                    whitelist = await target.get_withdrawal_whitelist("BTC")
+                    for entry in whitelist:
+                        key = (entry["address"], entry["network"])
+                        if key in merged:
+                            # Mark existing entry as also whitelisted; keep
+                            # last_used_at from the local row.
+                            merged[key]["whitelisted"] = True
+                            if entry.get("label") and not merged[key].get("label"):
+                                merged[key]["label"] = entry["label"]
+                        else:
+                            merged[key] = {
+                                "exchange": name,
+                                "address": entry["address"],
+                                "network": entry["network"],
+                                "label": entry.get("label"),
+                                "source": "binance_whitelist",
+                                "whitelisted": True,
+                                "last_used_at": None,
+                            }
+                except Exception:
+                    logger.exception("Binance whitelist fetch failed")
+
+        out = list(merged.values())
+        # Most-recently-used first; whitelist-only entries (no last_used_at)
+        # sort after recents.
+        out.sort(key=lambda r: (r.get("last_used_at") or ""), reverse=True)
+        return {"exchange": name, "destinations": out}
+
     def _withdrawals_ctx_extra():
         cfg = _config()
         # ExchangesConfig is a Pydantic model with one field per supported
@@ -1382,6 +1451,21 @@ def create_app(
             "auto_withdraw.exchanges": per_exchange,
         }
         flash = _apply_patch(state["config_path"], patch, _refresh_config)
+        # Mirror each configured destination into the address book so it
+        # auto-completes on the Withdraw-now form too.
+        try:
+            db = _db()
+            for ex_name, entry in per_exchange.items():
+                dst = (entry.get("destination") or "").strip()
+                if dst:
+                    db.record_destination(
+                        exchange=ex_name,
+                        address=dst,
+                        network=entry.get("network") or "bitcoin",
+                        source="auto_withdraw",
+                    )
+        except Exception:
+            logger.exception("record_destination from auto-withdraw save failed")
         return HTMLResponse(jinja.get_template("withdrawals.html").render(_ctx(
             request, active="withdrawals", flash=flash, **_withdrawals_ctx_extra(),
         )))
@@ -1496,6 +1580,19 @@ def create_app(
             # surface the underlying message back to the user.
             logger.exception("manual withdraw failed")
             return _back("err", f"{ex_name} rejected the withdrawal: {e}")
+
+        # Save the address into the local address book so the next
+        # withdrawal can auto-complete it. Failure here must NEVER
+        # surface to the user — the withdrawal itself already succeeded.
+        try:
+            _db().record_destination(
+                exchange=ex_name,
+                address=outgoing_destination,
+                network=outgoing_network,
+                source="manual",
+            )
+        except Exception:
+            logger.exception("record_destination after manual withdraw failed")
 
         # Surface the exchange's withdrawal ID + TXID so the user can
         # cross-reference in the exchange UI / on-chain explorer.

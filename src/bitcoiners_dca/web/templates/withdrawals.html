@@ -166,14 +166,18 @@
 
     <div class="form-row">
       <label>Destination</label>
-      <input type="text" name="destination" required
-        placeholder="bc1q…"
+      <input type="text" name="destination" id="destination_input" required
+        placeholder="bc1q…" list="destination_options"
         autocomplete="off" spellcheck="false">
+      <datalist id="destination_options"></datalist>
+      <div id="destination_picker" class="muted" style="font-size:13px; margin-top:6px"></div>
       <small>
         On-chain BTC address from your hardware wallet. <strong>Most exchanges
         require you to whitelist the address in their UI first</strong> —
         OKX rejects with code 58207, BitOasis with a similar error. Add the
         address to the exchange's address book before withdrawing here.
+        Previously-used addresses on this bot autocomplete; Binance addresses
+        you've whitelisted at Binance also appear.
       </small>
     </div>
 
@@ -354,7 +358,61 @@
     sliderLbl.textContent = `${pct}%`;
   }
 
-  exSel.addEventListener('change', fetchBalance);
+  // Destination address-book + Binance whitelist surface.
+  const dstInput = document.getElementById('destination_input');
+  const dstList = document.getElementById('destination_options');
+  const dstPicker = document.getElementById('destination_picker');
+
+  function shortAddr(a) {
+    if (!a || a.length < 18) return a;
+    return a.slice(0, 10) + '…' + a.slice(-6);
+  }
+
+  async function fetchDestinations() {
+    const ex = exSel.value;
+    dstList.innerHTML = '';
+    dstPicker.innerHTML = '';
+    try {
+      const r = await fetch(`${prefix}/api/withdrawal-destinations?ex=${encodeURIComponent(ex)}`,
+        { headers: { 'Accept': 'application/json' } });
+      if (!r.ok) return;
+      const j = await r.json();
+      const items = j.destinations || [];
+      for (const d of items) {
+        const opt = document.createElement('option');
+        opt.value = d.address;
+        const tag = d.whitelisted ? 'whitelisted at Binance'
+                                  : (d.source === 'auto_withdraw' ? 'auto-withdraw config' : 'recent');
+        opt.label = (d.label ? `${d.label} · ` : '') + tag;
+        dstList.appendChild(opt);
+      }
+      if (items.length === 0) {
+        dstPicker.textContent = 'No saved addresses for this exchange yet — paste one to start the address book.';
+        return;
+      }
+      // Render chip-row of pickable addresses (visible alternative to the
+      // datalist, which only shows on focus on some browsers).
+      const chips = document.createElement('div');
+      chips.style.cssText = 'display:flex; flex-wrap:wrap; gap:6px; margin-top:4px';
+      for (const d of items.slice(0, 6)) {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.style.cssText = 'background:transparent; border:1px solid var(--border); ' +
+          'border-radius:6px; padding:4px 10px; font-size:12px; cursor:pointer; ' +
+          'color:var(--text); font-family:var(--font-mono, monospace)';
+        const badge = d.whitelisted ? ' ✓' : '';
+        chip.textContent = (d.label ? d.label + ' · ' : '') + shortAddr(d.address) + badge;
+        chip.title = d.address + (d.whitelisted ? ' (whitelisted at Binance)' : '');
+        chip.addEventListener('click', () => { dstInput.value = d.address; });
+        chips.appendChild(chip);
+      }
+      dstPicker.appendChild(chips);
+    } catch (e) {
+      // Silent — the input still works as a plain text field.
+    }
+  }
+
+  exSel.addEventListener('change', () => { fetchBalance(); fetchDestinations(); });
   slider.addEventListener('input', () => applyPct(parseInt(slider.value, 10)));
   amtInput.addEventListener('input', () => {
     maxClicked = false;
@@ -372,6 +430,7 @@
   // first fetch can't no-op.
   setControlsEnabled(false);
   fetchBalance();
+  fetchDestinations();
 })();
 </script>
 {% endblock %}

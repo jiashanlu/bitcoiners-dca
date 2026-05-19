@@ -370,6 +370,42 @@ class BinanceExchange(Exchange):
             created_at=datetime.now(timezone.utc),
         )
 
+    async def get_withdrawal_whitelist(self, coin: str = "BTC") -> list[dict]:
+        """List addresses pre-whitelisted at Binance for `coin` withdrawals.
+
+        GET /sapi/v1/capital/withdraw/address/list — Binance is the only
+        UAE-supported exchange that exposes this surface (OKX + BitOasis
+        return 404 on every variant we tried). Returns a list of
+        {address, network, label} dicts so the dashboard can render
+        a 'Whitelisted at Binance' picker.
+        """
+        try:
+            method = getattr(self._client, "sapiGetCapitalWithdrawAddressList", None)
+            if method is not None:
+                raw = await method({})
+            else:
+                raw = await self._client.request(
+                    path="capital/withdraw/address/list",
+                    api="sapi", method="GET", params={},
+                )
+        except Exception as e:
+            logger.warning("Binance whitelist fetch failed: %s", e)
+            return []
+        out: list[dict] = []
+        for entry in raw or []:
+            entry_coin = entry.get("coin") or entry.get("asset") or ""
+            if coin and entry_coin and entry_coin.upper() != coin.upper():
+                continue
+            address = entry.get("address") or entry.get("addr") or ""
+            if not address:
+                continue
+            out.append({
+                "address": address,
+                "network": (entry.get("network") or "bitcoin").lower(),
+                "label": entry.get("name") or entry.get("addressTag") or None,
+            })
+        return out
+
     async def _signed_post_sapi(self, path: str, params: dict) -> dict:
         """POST a Binance sapi endpoint, signing the body with rawencode.
 

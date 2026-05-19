@@ -89,6 +89,21 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS withdrawal_destinations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    exchange TEXT NOT NULL,
+    address TEXT NOT NULL,
+    network TEXT NOT NULL DEFAULT 'bitcoin',
+    label TEXT,
+    -- manual | auto_withdraw | binance_whitelist
+    source TEXT NOT NULL DEFAULT 'manual',
+    first_used_at TEXT NOT NULL,
+    last_used_at TEXT NOT NULL,
+    UNIQUE(exchange, address, network)
+);
+CREATE INDEX IF NOT EXISTS idx_destinations_ex_last
+    ON withdrawal_destinations(exchange, last_used_at DESC);
 """
 
 
@@ -241,6 +256,51 @@ class Database:
         except Exception:
             self._conn.execute("ROLLBACK")
             raise
+
+    def record_destination(
+        self,
+        exchange: str,
+        address: str,
+        network: str = "bitcoin",
+        label: Optional[str] = None,
+        source: str = "manual",
+    ) -> None:
+        """Upsert a withdrawal destination — bumps last_used_at on duplicates.
+
+        Source tags where the address came from:
+          - 'manual'            user pasted into the Withdraw-now form
+          - 'auto_withdraw'     saved as the auto-withdraw destination
+          - 'binance_whitelist' pulled from Binance's whitelist API
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        self._conn.execute(
+            """INSERT INTO withdrawal_destinations
+                 (exchange, address, network, label, source,
+                  first_used_at, last_used_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(exchange, address, network) DO UPDATE SET
+                 last_used_at = excluded.last_used_at,
+                 label = COALESCE(excluded.label, label),
+                 -- Don't downgrade a whitelist-sourced row to manual.
+                 source = CASE
+                   WHEN source = 'binance_whitelist' THEN source
+                   ELSE excluded.source
+                 END""",
+            (exchange, address, network, label, source, now, now),
+        )
+        self._conn.commit()
+
+    def list_destinations(self, exchange: str, limit: int = 20) -> list[dict]:
+        cur = self._conn.execute(
+            """SELECT exchange, address, network, label, source,
+                      first_used_at, last_used_at
+               FROM withdrawal_destinations
+               WHERE exchange = ?
+               ORDER BY last_used_at DESC
+               LIMIT ?""",
+            (exchange, limit),
+        )
+        return [dict(row) for row in cur.fetchall()]
 
     def get_meta(self, key: str) -> Optional[str]:
         cur = self._conn.execute("SELECT value FROM meta WHERE key = ?", (key,))
