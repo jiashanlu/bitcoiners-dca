@@ -24,6 +24,7 @@ The legacy `use_uae_endpoint` constructor argument is a no-op kept for
 backward compatibility with older config files. We always use binance.com.
 """
 from __future__ import annotations
+import hashlib
 import json
 import logging
 from datetime import datetime, timezone
@@ -346,10 +347,15 @@ class BinanceExchange(Exchange):
             if method is not None:
                 raw = await method(params)
             else:
-                raw = await self._client.request(
-                    path="localentity/withdraw/apply",
-                    api="sapi", method="POST", params=params,
-                )
+                # ccxt 4.5 doesn't know `localentity/withdraw/apply`, so its
+                # generic sign() falls into the default sapi branch that
+                # urlencode()s the body. Binance's withdraw endpoints expect
+                # rawencode (no percent-escaping of the JSON questionnaire's
+                # `{`/`"`/`:`), so the server-side HMAC re-computation fails
+                # with -1022 "Signature for this request is not valid".
+                # Sign + POST manually using the same convention ccxt uses
+                # for `capital/withdraw/apply`.
+                raw = await self._signed_post_sapi("localentity/withdraw/apply", params)
         except ccxt_async.PermissionDenied as e:
             raise WithdrawalDeniedError(str(e)) from e
         except Exception as e:
@@ -363,6 +369,35 @@ class BinanceExchange(Exchange):
             status=WithdrawalStatus.PENDING,
             created_at=datetime.now(timezone.utc),
         )
+
+    async def _signed_post_sapi(self, path: str, params: dict) -> dict:
+        """POST a Binance sapi endpoint, signing the body with rawencode.
+
+        Mirrors what ccxt's binance.sign() does for `capital/withdraw/apply`:
+          - body = rawencode({timestamp, recvWindow, **params}) + '&signature=' + hmac
+          - Content-Type: application/x-www-form-urlencoded
+          - X-MBX-APIKEY header
+        Use this for any sapi POST whose path isn't in ccxt's
+        rawencode-allowlist (e.g. `localentity/withdraw/apply`).
+        """
+        c = self._client
+        extended: dict = c.extend({"timestamp": c.nonce()}, params)
+        recv_window = c.safe_integer(c.options, "recvWindow")
+        if recv_window is not None:
+            extended["recvWindow"] = recv_window
+        query = c.rawencode(extended)
+        signature = c.hmac(
+            c.encode(query), c.encode(c.secret), hashlib.sha256
+        )
+        body = f"{query}&signature={signature}"
+        url = c.urls["api"]["sapi"] + "/" + path
+        headers = {
+            "X-MBX-APIKEY": c.apiKey,
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        # ccxt's fetch() handles the HTTP round-trip + JSON parse + error
+        # mapping (raises PermissionDenied on Binance error codes, etc.)
+        return await c.fetch(url, method="POST", headers=headers, body=body)
 
     @staticmethod
     def _build_uae_questionnaire(rcvr_info: Optional[dict]) -> dict:
