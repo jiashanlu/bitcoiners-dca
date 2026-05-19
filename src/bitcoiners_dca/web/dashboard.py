@@ -1604,7 +1604,17 @@ def create_app(
         # Try the hosted Pro API first if configured + the user has a Pro
         # license. Any failure (network, 4xx/5xx, stub:true) falls back
         # silently to the local engine — same pattern as router.pick().
-        remote_result = await _remote_backtest(_license().key, cfg, points)
+        # LicenseManager doesn't carry the raw token (only the parsed
+        # claims), so read the key straight from config.
+        license_token = getattr(getattr(cfg, "license", None), "key", None)
+        try:
+            remote_result = await _remote_backtest(license_token, cfg, points)
+        except Exception:
+            # A buggy remote-API client must NEVER black-screen the page.
+            # The local backtest engine is the source of truth; any
+            # remote failure just means "use local".
+            logger.exception("remote backtest call raised; falling back to local engine")
+            remote_result = None
         result = remote_result if remote_result is not None else run_backtest(cfg, points)
         baseline = naive_baseline(cfg, points) if form["dip_overlay"] else None
         # Show last 30 cycles in the recent table; full history available

@@ -131,14 +131,22 @@ class Notifier:
             return f"⚠️ *DCA cycle skipped* — no order placed.\n" + "\n".join(result.notes)
 
         order = result.order
+        # Prefer the chosen route's label (e.g. "okx: AED→USDT→BTC"). It
+        # already encodes the exchange + every hop, so it replaces the
+        # old standalone Exchange line. Fall back to order.exchange for
+        # buy-now / non-routed paths.
+        route_label = None
+        chosen = getattr(getattr(result, "routing_decision", None), "chosen", None)
+        if chosen is not None:
+            route_label = chosen.route.label
         msg = (
             f"✅ *DCA cycle executed*\n\n"
-            f"*Amount:* AED {result.intended_amount_aed}"
+            f"*Amount:* AED {result.intended_amount_aed}\n"
         )
         if result.overlay_applied:
-            msg += f" (overlay: {result.overlay_applied})"
+            msg += f"*Overlay:* {result.overlay_applied}\n"
         msg += (
-            f"\n*Exchange:* {order.exchange}\n"
+            f"*Route:* {route_label or order.exchange}\n"
             f"*Bought:* {_fmt_dec(order.amount_base) if order.amount_base else '?'} BTC "
             f"@ AED {_fmt_dec(order.price_filled_avg, 2) if order.price_filled_avg else '?'}/BTC\n"
             f"*Fee:* {_format_fee(order)}\n"
