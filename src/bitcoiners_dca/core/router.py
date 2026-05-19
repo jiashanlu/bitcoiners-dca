@@ -277,6 +277,19 @@ class SmartRouter:
                     continue
                 pairs_to_try.append(f"{inter}/{quote_ccy}")        # hop 1
                 pairs_to_try.append(f"{target_asset}/{inter}")     # hop 2
+        # 3-hop cross-stable pairs (USDT/USDC, USDC/USDT, …). Required
+        # so the enumerator can chain AED→i1→i2→BTC even when the
+        # venue doesn't list the direct target/i1 pair. Cheap to add —
+        # exchanges 404 on missing tickers and the gather step ignores
+        # those without bubbling up an error.
+        if self.enable_two_hop:
+            for i1 in self.intermediates:
+                if i1 == quote_ccy or i1 == target_asset:
+                    continue
+                for i2 in self.intermediates:
+                    if i2 == i1 or i2 == quote_ccy or i2 == target_asset:
+                        continue
+                    pairs_to_try.append(f"{i2}/{i1}")
         pairs_to_try = list(dict.fromkeys(pairs_to_try))  # de-dup, preserve order
 
         # Also fetch balances for every intermediate (USDT, etc.) — we
@@ -447,6 +460,51 @@ class SmartRouter:
                                 + f"prefer-{inter}-balance"
                             )
                         executable.append(candidate)
+
+            # Same-exchange three-hop via two distinct intermediates,
+            # e.g. AED→USDC→USDT→BTC. Captures the rare case where a
+            # venue lists every leg of a chain but not the direct
+            # target/quote or target/<single-intermediate> pair, OR
+            # where the chained price beats the 2-hop alternatives
+            # despite the extra fee drag. On BitOasis specifically,
+            # AED→USDC→USDT→BTC is the only way to spend USDC since
+            # BitOasis has no BTC/USDC. Cubic enumeration but small N
+            # (3 intermediates → 6 ordered pairs) and gated on
+            # enable_two_hop so single-hop users pay zero cost.
+            if self.enable_two_hop:
+                for i1 in self.intermediates:
+                    if i1 == quote_ccy or i1 == target_asset:
+                        continue
+                    leg1 = f"{i1}/{quote_ccy}"
+                    if leg1 not in md.tickers:
+                        continue
+                    for i2 in self.intermediates:
+                        if i2 == i1 or i2 == quote_ccy or i2 == target_asset:
+                            continue
+                        leg2 = f"{i2}/{i1}"
+                        leg3 = f"{target_asset}/{i2}"
+                        if leg2 not in md.tickers or leg3 not in md.tickers:
+                            continue
+                        hops = (
+                            TradeHop(md.exchange.name, leg1, "buy",
+                                     md.tickers[leg1].ask, md.taker_pct),
+                            TradeHop(md.exchange.name, leg2, "buy",
+                                     md.tickers[leg2].ask, md.taker_pct),
+                            TradeHop(md.exchange.name, leg3, "buy",
+                                     md.tickers[leg3].ask, md.taker_pct),
+                        )
+                        route = TradeRoute(
+                            hops=hops,
+                            quote_balance=md.balances.get(quote_ccy),
+                        )
+                        max_spread = max(
+                            md.tickers[leg1].spread_pct,
+                            md.tickers[leg2].spread_pct,
+                            md.tickers[leg3].spread_pct,
+                        )
+                        executable.append(self._score(
+                            route, sample_amount, max_spread, market_data,
+                        ))
 
         # Cross-exchange routes (alerts only)
         if self.enable_cross_exchange_alerts:

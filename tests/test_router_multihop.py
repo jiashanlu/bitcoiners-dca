@@ -122,6 +122,50 @@ async def test_two_hop_skipped_when_intermediate_pair_absent():
 
 
 @pytest.mark.asyncio
+async def test_three_hop_emitted_when_legs_present():
+    """BitOasis-shaped case: AED→USDC→USDT→BTC chained on one venue.
+
+    Confirms 3-hop enumeration produces a candidate when all three legs
+    are listed (and skipping any leg suppresses it). The chosen route is
+    whichever ranks cheapest after fees — the assertion here is only
+    that 3-hop participates in the candidate set, not that it wins.
+    """
+    bo = MultiPairFakeExchange("bitoasis", markets={
+        "BTC/AED":   ("301050", "300628"),
+        "USDT/AED":  ("3.665", "3.664"),
+        "USDC/AED":  ("3.665", "3.664"),
+        "USDT/USDC": ("1.001", "0.999"),
+        "BTC/USDT":  ("81934.6", "81934.5"),
+    }, taker="0.0015", balances={"AED": "100000"})
+
+    router = SmartRouter(enable_two_hop=True, intermediates=["USDT", "USDC"])
+    decision = await router.pick([bo], required_quote_amount=Decimal("500"))
+
+    all_routes = [decision.chosen] + decision.alternatives
+    three_hop = [r for r in all_routes if len(r.route.hops) == 3]
+    assert len(three_hop) >= 1, "expected ≥1 three-hop candidate, got none"
+    assert "AED→USDC→USDT→BTC" in three_hop[0].route.label \
+        or "AED→USDT→USDC→BTC" in three_hop[0].route.label
+
+
+@pytest.mark.asyncio
+async def test_three_hop_skipped_when_middle_leg_missing():
+    """No USDT/USDC pair → no 3-hop candidate even though USDC/AED exists."""
+    bo = MultiPairFakeExchange("bitoasis", markets={
+        "BTC/AED":  ("301050", "300628"),
+        "USDT/AED": ("3.665", "3.664"),
+        "USDC/AED": ("3.665", "3.664"),
+        "BTC/USDT": ("81934.6", "81934.5"),
+        # No USDT/USDC and no BTC/USDC → 3-hop has no valid chain.
+    }, taker="0.0015", balances={"AED": "100000"})
+
+    router = SmartRouter(enable_two_hop=True, intermediates=["USDT", "USDC"])
+    decision = await router.pick([bo], required_quote_amount=Decimal("500"))
+    all_routes = [decision.chosen] + decision.alternatives
+    assert not any(len(r.route.hops) == 3 for r in all_routes)
+
+
+@pytest.mark.asyncio
 async def test_router_compares_across_exchanges_and_intra_exchange_2hop():
     """OKX has 2-hop. BitOasis only has direct (with worse fees).
     Best route should be OKX 2-hop."""
