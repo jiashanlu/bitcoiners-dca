@@ -262,7 +262,7 @@
 // Withdraw-now: live exchange balance + slider/max amount picker.
 // Fetches /api/withdrawable-btc when the exchange dropdown changes,
 // keeps the slider + amount input in sync, and the Max button fills
-// the amount with balance minus an estimated network fee.
+// the amount with `balance - per-exchange on-chain fee`.
 (function () {
   const form = document.querySelector('form[action$="/withdrawals/withdraw-now"]');
   if (!form) return;
@@ -273,21 +273,38 @@
   const balValue = document.getElementById('balance_value');
   const balStatus = document.getElementById('balance_status');
   const btnMax = document.getElementById('btn_max');
-  // Fee buffer matches the conservative default in core/lightning + okx
-  // adapters — ~0.0001 BTC covers OKX's on-chain BTC withdrawal fee and
-  // similar on Binance / BitOasis. Slightly aggressive but the safer
-  // bias for a "Max" click than overestimating and surprising the user.
-  const FEE_BUFFER = 0.0001;
-  // Hard server-side cap as documented; mirror in the slider math.
+  // Per-exchange on-chain BTC withdrawal fee. The exchange debits
+  // `amount + fee` from balance, so passing the full balance fails with
+  // "insufficient funds". Max sends `balance - fee` — the true ceiling
+  // that will actually leave the exchange.
+  const MAX_FEE_BTC = { okx: 0.0002, binance: 0.0002, bitoasis: 0.0003 };
   const HARD_CAP = 1.0;
   let currentBalance = null;
+  // Set when the user clicks Max; cleared on any manual edit. Lets the
+  // slider visually show 100% even though the underlying amount is
+  // `balance - fee` (which would otherwise round to e.g. 81% on small
+  // balances where the fee is a meaningful fraction).
+  let maxClicked = false;
 
   const prefix = {{ prefix|tojson }} || "";
+
+  function setControlsEnabled(on) {
+    [amtInput, slider, btnMax].forEach(el => { el.disabled = !on; });
+    slider.style.opacity = on ? '1' : '0.5';
+    btnMax.style.opacity = on ? '1' : '0.5';
+    btnMax.style.cursor = on ? 'pointer' : 'not-allowed';
+  }
+
+  function feeFor(ex) {
+    return MAX_FEE_BTC[ex] ?? 0.0003;
+  }
 
   async function fetchBalance() {
     const ex = exSel.value;
     balValue.textContent = '…';
-    balStatus.textContent = '';
+    balStatus.textContent = '(loading balance)';
+    setControlsEnabled(false);
+    currentBalance = null;
     try {
       const r = await fetch(`${prefix}/api/withdrawable-btc?ex=${encodeURIComponent(ex)}`, {
         headers: { 'Accept': 'application/json' },
@@ -296,12 +313,19 @@
       const j = await r.json();
       const v = parseFloat(j.available_btc || 0);
       currentBalance = isFinite(v) ? v : 0;
+      const fee = feeFor(ex);
+      const sendable = Math.max(0, currentBalance - fee);
       balValue.textContent = currentBalance.toFixed(8);
-      if (j.note) balStatus.textContent = `· ${j.note}`;
+      balStatus.textContent = j.note
+        ? `· ${j.note}`
+        : `· max sendable ${sendable.toFixed(8)} after ${fee} fee`;
+      setControlsEnabled(true);
     } catch (e) {
       currentBalance = null;
       balValue.textContent = '?';
       balStatus.textContent = `· couldn't read (${e.message})`;
+      // Leave controls disabled — interacting without a balance produces
+      // silent no-ops which look like the form is broken.
     }
   }
 
@@ -309,14 +333,22 @@
     sliderLbl.textContent = `${pct}%`;
     if (currentBalance == null || currentBalance <= 0) return;
     const target = Math.max(0, Math.min(currentBalance * (pct / 100), HARD_CAP));
-    // 8 sat precision matches the input step
     amtInput.value = target.toFixed(8);
+    maxClicked = false;
   }
 
   function syncSliderFromAmount() {
     if (currentBalance == null || currentBalance <= 0) return;
     const v = parseFloat(amtInput.value || 0);
     if (!isFinite(v)) return;
+    // After Max click, pin the slider to 100% so it visually matches
+    // "you clicked Max" — the difference vs balance is the fee, not a
+    // user choice to send less.
+    if (maxClicked) {
+      slider.value = 100;
+      sliderLbl.textContent = '100% (-fee)';
+      return;
+    }
     const pct = Math.round(Math.max(0, Math.min((v / currentBalance) * 100, 100)));
     slider.value = pct;
     sliderLbl.textContent = `${pct}%`;
@@ -324,22 +356,21 @@
 
   exSel.addEventListener('change', fetchBalance);
   slider.addEventListener('input', () => applyPct(parseInt(slider.value, 10)));
-  amtInput.addEventListener('input', syncSliderFromAmount);
-  // Per-exchange on-chain BTC withdrawal fee. The exchange debits
-  // `amount + fee` from balance, so requesting the full balance fails
-  // with "insufficient funds". Max sends `balance - fee` — that's the
-  // true maximum that will actually leave the exchange.
-  const MAX_FEE_BTC = { okx: 0.0002, binance: 0.0002, bitoasis: 0.0003 };
+  amtInput.addEventListener('input', () => {
+    maxClicked = false;
+    syncSliderFromAmount();
+  });
   btnMax.addEventListener('click', () => {
     if (currentBalance == null) return;
-    const ex = exSel.value;
-    const fee = MAX_FEE_BTC[ex] ?? 0.0003;
-    const max = Math.max(0, Math.min(currentBalance - fee, HARD_CAP));
+    const max = Math.max(0, Math.min(currentBalance - feeFor(exSel.value), HARD_CAP));
     amtInput.value = max.toFixed(8);
+    maxClicked = true;
     syncSliderFromAmount();
   });
 
-  // Initial fetch on page load.
+  // Disable controls immediately on page load so a click during the
+  // first fetch can't no-op.
+  setControlsEnabled(false);
   fetchBalance();
 })();
 </script>
