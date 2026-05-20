@@ -18,6 +18,7 @@ Why a separate service:
 """
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 import re
@@ -51,7 +52,12 @@ app = FastAPI(title="bitcoiners-dca provisioner", version="1.0.0")
 def _require_secret(x_provisioner_secret: Optional[str]) -> None:
     if not SHARED_SECRET:
         raise HTTPException(500, "PROVISIONER_SHARED_SECRET not set on the service")
-    if x_provisioner_secret != SHARED_SECRET:
+    # Constant-time compare so an attacker can't recover the secret
+    # character-by-character via response-timing differences. The plain
+    # `!=` fast-paths on mismatch which leaks length and first-diff
+    # position. Audit P1 2026-05-21.
+    provided = x_provisioner_secret or ""
+    if len(provided) != len(SHARED_SECRET) or not hmac.compare_digest(provided, SHARED_SECRET):
         raise HTTPException(401, "bad shared secret")
 
 

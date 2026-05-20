@@ -150,6 +150,13 @@ class OKXExchange(Exchange):
     # call. `_poll_until_settled` MUST NOT be inside the @retry — a
     # network blip during the poll would re-enter and place a SECOND
     # real order. Critical safety boundary.
+    #
+    # IDEMPOTENCY: the caller (place_market_buy) generates the clOrdId
+    # ONCE and passes it in here. Every retry attempt uses the SAME
+    # clOrdId so OKX's server-side dedupe (error 51001, 5-second window)
+    # catches the duplicate and we don't pay twice. Audit 2026-05-21
+    # flagged that calling make_bot_client_order_id() inside the retry
+    # would defeat the dedupe; this signature change closes the hole.
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(min=1, max=8),
@@ -157,7 +164,7 @@ class OKXExchange(Exchange):
         reraise=True,
     )
     async def _create_market_buy_only(
-        self, pair: str, quote_amount: Decimal,
+        self, pair: str, quote_amount: Decimal, cl_ord_id: str,
     ) -> Order:
         # `quoteOrderQty` + `tdMode=cash` — see place_market_buy docstring.
         params = {
@@ -165,8 +172,9 @@ class OKXExchange(Exchange):
             "tgtCcy": "quote_ccy",
             "tdMode": "cash",
             # Tag so cancel_all_open_orders can recognise bot orders
-            # and leave the user's manual orders alone.
-            "clOrdId": make_bot_client_order_id(),
+            # and leave the user's manual orders alone. Stable across
+            # retries — see method docstring.
+            "clOrdId": cl_ord_id,
         }
         logger.info(
             "OKX place_market_buy: pair=%s amount=%s params=%s",
@@ -206,8 +214,14 @@ class OKXExchange(Exchange):
         # AED is insufficient, available margin (in USD) is too low for
         # borrowing" even when spot AED balance is plenty. Cash mode
         # only checks the spot wallet, which is what we want for DCA.
+        #
+        # Generate the clOrdId ONCE here — every retry inside
+        # _create_market_buy_only reuses it so OKX's server-side
+        # duplicate-clOrdId rejection prevents double-fills on network
+        # blips. Audit P0 2026-05-21.
+        cl_ord_id = make_bot_client_order_id()
         try:
-            order = await self._create_market_buy_only(pair, quote_amount)
+            order = await self._create_market_buy_only(pair, quote_amount, cl_ord_id)
         except ccxt_async.InsufficientFunds as e:
             raise InsufficientBalanceError(str(e)) from e
         except Exception as e:
@@ -222,12 +236,41 @@ class OKXExchange(Exchange):
         # and the strategy / next cycle reconciles.
         return await self._poll_until_settled(pair, order)
 
+    # Same idempotency story as _create_market_buy_only above: the outer
+    # wrapper generates clOrdId once, the @retry-wrapped inner reuses it
+    # so OKX dedupes on duplicate-clientOrderId for any retry. Audit P0
+    # 2026-05-21.
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(min=1, max=8),
         retry=retry_if_exception_type(_SAFE_RETRY_EXCEPTIONS),
         reraise=True,
     )
+    async def _create_limit_buy_only(
+        self,
+        pair: str,
+        quote_amount: Decimal,
+        limit_price: Decimal,
+        cl_ord_id: str,
+    ) -> Order:
+        base_amount = quote_amount / limit_price
+        logger.info(
+            "OKX place_limit_buy: pair=%s quote_amount=%s limit_price=%s → base_amount=%s",
+            pair, quote_amount, limit_price, base_amount,
+        )
+        raw = await self._client.create_limit_buy_order(
+            symbol=pair, amount=float(base_amount), price=float(limit_price),
+            # See place_market_buy: cash mode forces spot settlement so
+            # OKX doesn't route through margin and reject for borrow-side
+            # liquidity that DCA accounts don't have. clOrdId is stable
+            # across retries — caller generates it once.
+            params={
+                "tdMode": "cash",
+                "clOrdId": cl_ord_id,
+            },
+        )
+        return self._normalize_order(raw, pair, quote_amount)
+
     async def place_limit_buy(
         self,
         pair: str,
@@ -250,24 +293,13 @@ class OKXExchange(Exchange):
                 status=OrderStatus.FILLED,
                 created_at=now, filled_at=now,
             )
+        # Generate clOrdId ONCE before the @retry-wrapped call. See OKX
+        # _create_market_buy_only docstring for the rationale.
+        cl_ord_id = make_bot_client_order_id()
         try:
-            base_amount = quote_amount / limit_price
-            logger.info(
-                "OKX place_limit_buy: pair=%s quote_amount=%s limit_price=%s → base_amount=%s",
-                pair, quote_amount, limit_price, base_amount,
+            return await self._create_limit_buy_only(
+                pair, quote_amount, limit_price, cl_ord_id,
             )
-            raw = await self._client.create_limit_buy_order(
-                symbol=pair, amount=float(base_amount), price=float(limit_price),
-                # See place_market_buy: cash mode forces spot settlement so
-                # OKX doesn't route through margin and reject for borrow-side
-                # liquidity that DCA accounts don't have. Tag clOrdId so
-                # cancel_all_open_orders only cleans up bot-placed orders.
-                params={
-                    "tdMode": "cash",
-                    "clOrdId": make_bot_client_order_id(),
-                },
-            )
-            return self._normalize_order(raw, pair, quote_amount)
         except ccxt_async.InsufficientFunds as e:
             raise InsufficientBalanceError(str(e)) from e
         except Exception as e:

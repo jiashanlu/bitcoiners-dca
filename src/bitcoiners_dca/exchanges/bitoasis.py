@@ -295,10 +295,15 @@ class BitOasisExchange(Exchange):
             "type": "market",
             "amount": str(base_amount),
         }
+        # IDEMPOTENCY: BitOasis exposes no clientOrderId concept (see
+        # cancel_all_open_orders docstring for the wider implication).
+        # _request_with_retry retries on httpx.NetworkError + Timeout —
+        # if the network blip lands AFTER the server received the POST,
+        # the retry creates a SECOND real order. Use the no-retry path
+        # for state-changing POSTs; surface transients, let next cycle
+        # catch up. Audit P0 2026-05-21.
         try:
-            data = await self._request_with_retry(
-                "POST", "/exchange/order", body=body
-            )
+            data = await self._request("POST", "/exchange/order", body=body)
         except ExchangeError as e:
             msg = str(e).lower()
             if "insufficient" in msg or "balance" in msg:
@@ -343,10 +348,11 @@ class BitOasisExchange(Exchange):
             "amount": str(base_amount),
             "price": str(limit_price),
         }
+        # No idempotency key on BitOasis — see place_market_buy comment.
+        # Use the no-retry path so a transient network failure can't
+        # produce a duplicate order. Audit P0 2026-05-21.
         try:
-            data = await self._request_with_retry(
-                "POST", "/exchange/order", body=body,
-            )
+            data = await self._request("POST", "/exchange/order", body=body)
         except ExchangeError as e:
             msg = str(e).lower()
             if "insufficient" in msg or "balance" in msg:

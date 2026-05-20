@@ -1,16 +1,26 @@
 """
 DCA strategy engine — decides if it's time to buy, computes the buy amount
-(including overlays like buy-the-dip), routes via SmartRouter, executes,
-and optionally triggers an auto-withdraw to user's hardware wallet.
+(including overlays like buy-the-dip), routes via SmartRouter, executes.
 
 Strategy is exchange-agnostic — it receives a list of available Exchanges
 and the SmartRouter decides which one to use for each buy.
+
+Auto-withdraw is retired from the product surface — see
+feedback-kill-auto-withdraw-until-lightning. The strategy honors a
+kill-switch when the legacy config fields are still set.
 """
 from __future__ import annotations
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
+
+# Module-level logger so the on-chain-fetch error path (and any future
+# bare logger.exception() call) has a real logger to write to. Before
+# this import the `except Exception: logger.exception(...)` block fell
+# back to NameError and masked the underlying issue. Audit P1 2026-05-21.
+logger = logging.getLogger(__name__)
 
 from bitcoiners_dca.core.models import Order, Ticker
 from bitcoiners_dca.core.router import RoutingDecision, SmartRouter
