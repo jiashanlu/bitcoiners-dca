@@ -542,15 +542,14 @@ def create_app(
         # /dca/console/<path> so nav stays inside the iframe. Empty
         # string for direct LAN/Free-tier access — links resolve to /.
         prefix = _prefix(request)
-        # First-visit welcome: no trades yet AND dry-run on. Once the
-        # customer goes live OR a trade lands, the banner stops rendering.
-        welcome = False
-        try:
-            if cfg.dry_run:
-                cnt = _db().trade_count()
-                welcome = (cnt == 0)
-        except Exception:
-            welcome = False
+        # Onboarding checklist: surfaces until all 5 steps are done.
+        # Each step's "done" flag is derived from real config + DB state,
+        # not a separately-tracked flag — so it auto-recovers if the
+        # user reconfigures or comes back tomorrow.
+        onboarding = _onboarding_checklist(cfg)
+        # First-visit welcome: render the checklist whenever any step is
+        # unfinished. Once all 5 are done, the block stops showing.
+        welcome = not all(s["done"] for s in onboarding)
         # Orphan funds banner: cleared once user clicks Acknowledge.
         orphan = None
         try:
@@ -578,12 +577,86 @@ def create_app(
             "prefix": prefix,
             "bot_status": _bot_status(),
             "welcome": welcome,
+            "onboarding": onboarding,
+            "can_go_live": _can_go_live(cfg),
             "orphan": orphan,
             "pro_api": pro_api,
             "flash": extra.pop("flash", None),
             "active": extra.pop("active", ""),
             **extra,
         }
+
+    def _enabled_exchange_names(cfg) -> list[str]:
+        return [
+            n for n in ("okx", "binance", "bitoasis")
+            if getattr(getattr(cfg.exchanges, n, None), "enabled", False)
+        ]
+
+    def _onboarding_checklist(cfg) -> list[dict]:
+        """Render the dashboard's first-visit checklist. Each step's
+        done-state is computed from real config + persisted test results,
+        so the list re-renders accurately even after the user logs out.
+        """
+        db = _db()
+        # 1. Strategy: amount > 0 + frequency picked.
+        try:
+            amt = Decimal(str(getattr(cfg.strategy, "amount_aed", 0) or 0))
+        except (ValueError, InvalidOperation):
+            amt = Decimal(0)
+        strategy_done = bool(amt > 0 and getattr(cfg.strategy, "frequency", None))
+        # 2. Exchange creds saved (= ≥1 enabled exchange).
+        enabled = _enabled_exchange_names(cfg)
+        exchange_done = bool(enabled)
+        # 3. Test-connection green on ≥1 enabled exchange.
+        test_done = False
+        try:
+            for n in enabled:
+                if db.get_meta(f"exchange.{n}.test_connection_ok_at"):
+                    test_done = True
+                    break
+        except Exception:
+            test_done = False
+        # 4. Risk cap set (any of the caps counts — Ben's call: belt+braces).
+        risk_done = bool(
+            getattr(cfg.risk, "max_daily_aed", None)
+            or getattr(cfg.risk, "max_single_buy_aed", None)
+        )
+        # 5. Live (dry_run flipped off).
+        live_done = not getattr(cfg, "dry_run", True)
+
+        return [
+            {"key": "strategy", "label": "Pick a strategy (amount + frequency)",
+             "done": strategy_done, "link": "/strategy"},
+            {"key": "exchange", "label": "Add an exchange API key",
+             "done": exchange_done, "link": "/exchanges"},
+            {"key": "test",     "label": "Test the connection (read-only)",
+             "done": test_done, "link": "/exchanges"},
+            {"key": "risk",     "label": "Set a daily-spend risk cap",
+             "done": risk_done, "link": "/strategy"},
+            {"key": "live",     "label": "Flip to live trading",
+             "done": live_done, "link": None},
+        ]
+
+    def _can_go_live(cfg) -> dict:
+        """Return {ok: bool, reason: str|None} describing whether the
+        Go-live button should be enabled. Reason is human-readable so
+        the dashboard can tooltip it directly.
+        """
+        enabled = _enabled_exchange_names(cfg)
+        if not enabled:
+            return {"ok": False, "reason": "Add an exchange API key first"}
+        db = _db()
+        try:
+            tested = any(
+                db.get_meta(f"exchange.{n}.test_connection_ok_at")
+                for n in enabled
+            )
+        except Exception:
+            tested = False
+        if not tested:
+            return {"ok": False,
+                    "reason": "Click Test connection on at least one exchange first"}
+        return {"ok": True, "reason": None}
 
     @app.post("/orphan/acknowledge", response_class=HTMLResponse)
     async def orphan_acknowledge(request: Request):
@@ -762,6 +835,7 @@ def create_app(
         toggles and heartbeat-staleness surface without a full reload."""
         return HTMLResponse(jinja.get_template("partials/status_banner.html").render(
             bot_status=_bot_status(), prefix=_prefix(request),
+            can_go_live=_can_go_live(_config()),
         ))
 
     @app.post("/htmx/pro-api-banner/dismiss", response_class=HTMLResponse)
@@ -986,6 +1060,15 @@ def create_app(
             return _redirect(request, f"/exchanges?flash={flash['kind']}:{flash['message'][:140]}")
         try:
             await target.health_check()
+            # Persist success so onboarding + the go-live gate know this
+            # exchange has been verified end-to-end with real creds.
+            try:
+                _db().set_meta(
+                    f"exchange.{name}.test_connection_ok_at",
+                    datetime.now(timezone.utc).isoformat(),
+                )
+            except Exception:
+                logger.exception("Failed to persist test_connection success")
             return _redirect(request, f"/exchanges?ok={name}")
         except Exception as e:
             return _redirect(request, f"/exchanges?err={name}:{str(e)[:160]}")
@@ -1726,7 +1809,19 @@ def create_app(
 
     @app.post("/controls/go-live", response_class=HTMLResponse)
     async def controls_go_live(request: Request):
-        """Flip dry_run=false. Cycle next time cron fires."""
+        """Flip dry_run=false. Cycle next time cron fires.
+
+        Gated on a successful exchange test_connection — a customer flipping
+        to live with bad creds would see their first cycle fail and produce
+        a confusing support ticket. The gate is just the same flag the
+        dashboard checklist uses, so the experience is consistent.
+        """
+        gate = _can_go_live(_config())
+        if not gate["ok"]:
+            return _redirect(
+                request,
+                f"/exchanges?err={gate['reason']}",
+            )
         _apply_patch(state["config_path"], {"dry_run": False}, _refresh_config)
         return _redirect(request, "/")
 

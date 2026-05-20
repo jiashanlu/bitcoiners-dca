@@ -468,18 +468,42 @@ a { color: var(--accent); text-decoration: none; }
   <main class="main">
     {% if flash %}<div class="flash {{ flash.kind }}">{{ flash.message }}</div>{% endif %}
 
-    {# First-visit welcome — surfaces critical next steps so paying customers
-       don't sit in dry-run thinking it's broken. Rendered when no trades yet
-       AND in dry-run mode. #}
-    {% if welcome %}
+    {# Onboarding checklist — renders until every step is done. State is
+       computed server-side from real config + persisted test-connection
+       results, so the list reflects reality even if you log out and back
+       in. The block disappears once all 5 ticks turn green. #}
+    {% if welcome and onboarding %}
+    {% set done_count = onboarding|selectattr("done")|list|length %}
+    {% set total_count = onboarding|length %}
     <div class="flash warn" style="line-height:1.65">
-      <strong>👋 Welcome to bitcoiners-dca.</strong> You're in <strong>dry-run mode</strong> right now — cycles fire on schedule but no real orders are placed. Run through this checklist:
-      <ol style="margin:8px 0 0 1.4em">
-        <li>Pick a strategy on <a href="{{ prefix }}/strategy">Strategy</a> (frequency + budget). Each exchange has its own minimum order size (roughly AED 50-100 covers all major venues today, but it drifts with the BTC price); the <a href="{{ prefix }}/routes-audit">Routes audit</a> page shows which venues your cycle clears in real time.</li>
-        <li>Add your exchange API keys on <a href="{{ prefix }}/exchanges">Exchanges</a>. Trade-only scope is enough — add Withdraw scope only when you're ready to use the <a href="{{ prefix }}/withdrawals">manual withdraw</a> flow.</li>
-        <li>Set a <strong>daily-spend risk cap</strong> on <a href="{{ prefix }}/strategy">Strategy</a> → Risk caps. Belt + braces.</li>
-        <li>When everything looks right, click <strong>Go live →</strong> in the banner above. The first real cycle fires at the next cron tick — or click <strong>Buy now</strong> to fire one immediately.</li>
-      </ol>
+      <div style="display:flex; align-items:center; gap:12px; margin-bottom:10px">
+        <strong style="font-size:15px">👋 Get set up</strong>
+        <span class="mono" style="font-size:12px; color:var(--text-muted)">{{ done_count }}/{{ total_count }} done</span>
+      </div>
+      <p style="margin:0 0 10px; font-size:13px; color:var(--text-muted)">
+        Each step ticks itself green when the bot detects you've completed it.
+        Take them in order — the Go-live button stays disabled until your
+        exchange connection passes a read-only test.
+      </p>
+      <ul style="list-style:none; padding:0; margin:0">
+        {% for step in onboarding %}
+          <li style="display:flex; align-items:center; gap:10px; padding:6px 0; border-top:1px solid rgba(255,255,255,0.06)">
+            <span aria-hidden="true" style="font-size:16px; width:20px; display:inline-block; text-align:center; color:{% if step.done %}var(--accent, #00c389){% else %}var(--text-muted){% endif %}">
+              {% if step.done %}✓{% else %}○{% endif %}
+            </span>
+            <span style="flex:1; {% if step.done %}color:var(--text-muted); text-decoration:line-through{% endif %}">
+              {% if step.link %}
+                <a href="{{ prefix }}{{ step.link }}" style="color:{% if step.done %}var(--text-muted){% else %}var(--text){% endif %}">{{ step.label }}</a>
+              {% else %}
+                {{ step.label }}
+              {% endif %}
+            </span>
+            {% if not step.done and step.key == "live" %}
+              <span class="mono" style="font-size:11px; color:var(--text-muted)">click <strong>Go live →</strong> in the status banner</span>
+            {% endif %}
+          </li>
+        {% endfor %}
+      </ul>
     </div>
     {% endif %}
 

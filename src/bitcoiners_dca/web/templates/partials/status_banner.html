@@ -39,8 +39,11 @@
       </form>
       {% if bot_status.state == "dry_run" %}
         <form method="post" action="{{ prefix }}/controls/go-live" style="display:inline"
-              onsubmit="return confirm('Go live? Cycles will place real orders against your exchange API key. Confirm your Risk caps are set the way you want them.')">
-          <button type="submit" class="btn-primary-sm">Go live →</button>
+              {% if can_go_live and can_go_live.ok %}onsubmit="return confirm('Go live? Cycles will place real orders against your exchange API key. Confirm your Risk caps are set the way you want them.')"{% endif %}>
+          <button type="submit" class="btn-primary-sm"
+                  {% if can_go_live and not can_go_live.ok %}disabled aria-disabled="true" title="{{ can_go_live.reason }}"{% endif %}>
+            Go live →
+          </button>
         </form>
       {% else %}
         <form method="post" action="{{ prefix }}/controls/go-dry-run" style="display:inline">
