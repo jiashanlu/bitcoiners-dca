@@ -8,7 +8,7 @@
 #
 # Quick start:
 #   1. cp config.example.yaml config.yaml
-#   2. edit config.yaml (set strategy + exchanges + auto_withdraw)
+#   2. edit config.yaml (set strategy + exchanges)
 #   3. cp .env.example .env
 #   4. edit .env (set OKX_API_KEY etc.)
 #   5. docker compose up -d

@@ -1,6 +1,6 @@
 """
 DCAStrategy unit tests — verify buy decision, dip overlay, routing pass-through,
-and auto-withdraw threshold logic without hitting any real APIs.
+and the auto-withdraw kill-switch without hitting any real APIs.
 """
 from __future__ import annotations
 
@@ -66,7 +66,6 @@ class StubExchange(Exchange):
     async def place_market_buy(self, pair, quote_amount):
         self.buys.append((pair, quote_amount))
         amount_base = quote_amount / self._ask
-        # Pretend the new BTC lands in our balance (so auto-withdraw can see it)
         self._btc_balance += amount_base
         return Order(
             exchange=self.name,
@@ -174,120 +173,28 @@ async def test_dip_overlay_skips_when_above_threshold(router):
     assert result.overlay_applied is None
 
 
-# === Auto-withdraw ===
+# === Auto-withdraw is disabled at the product level ===
+# The daemon-fires-withdraw path was retired (see
+# feedback-kill-auto-withdraw-until-lightning). The exchange withdraw_btc()
+# adapters and idempotency DB schema stay in place for future re-enablement
+# alongside Lightning withdraw. The single test below pins the current
+# behavior: even with config flagged enabled, no withdrawal fires.
 
 @pytest.mark.asyncio
-async def test_auto_withdraw_fires_when_threshold_met(router):
+async def test_auto_withdraw_never_fires_at_strategy_level(router):
+    """Smoke test: config requesting auto-withdraw produces no withdrawal
+    call from the cycle. Manual withdraws via /withdrawals/withdraw-now
+    are the supported path."""
     cfg = StrategyConfig(
         base_amount_aed=Decimal("500"),
         auto_withdraw_enabled=True,
         auto_withdraw_address="bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
         auto_withdraw_threshold_btc=Decimal("0.001"),
     )
-    # Start with 0.001 BTC + 0.5 AED worth ≈ extra → above threshold
-    ex = StubExchange("okx", ask="350000", btc_balance="0.001")
+    ex = StubExchange("okx", ask="350000", btc_balance="0.01")
     strategy = DCAStrategy(cfg, router)
 
     result = await strategy.execute([ex])
 
-    assert len(ex.withdrawals) == 1
-    amount, address, network = ex.withdrawals[0]
-    assert address == "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
-    assert amount > 0
-    assert result.withdrew_btc == amount
-
-
-@pytest.mark.asyncio
-async def test_auto_withdraw_skips_under_threshold(router):
-    cfg = StrategyConfig(
-        base_amount_aed=Decimal("500"),
-        auto_withdraw_enabled=True,
-        auto_withdraw_address="bc1qabc",
-        auto_withdraw_threshold_btc=Decimal("1.0"),  # very high
-    )
-    ex = StubExchange("okx", ask="350000", btc_balance="0")
-    strategy = DCAStrategy(cfg, router)
-
-    result = await strategy.execute([ex])
-
-    assert ex.withdrawals == []
+    assert ex.withdrawals == [], "Cycle must not auto-fire withdrawals"
     assert result.withdrew_btc is None
-
-
-@pytest.mark.asyncio
-async def test_auto_withdraw_disabled_by_default(router, base_config):
-    """No auto_withdraw_address even on big balance — no withdrawal."""
-    ex = StubExchange("okx", ask="350000", btc_balance="10")
-    strategy = DCAStrategy(base_config, router)
-
-    result = await strategy.execute([ex])
-
-    assert ex.withdrawals == []
-    assert result.withdrew_btc is None
-
-
-@pytest.mark.asyncio
-async def test_auto_withdraw_skips_when_recent_withdrawal_recorded(router, tmp_path):
-    """Regression: if a withdrawal in the same exchange/asset was recorded
-    in the last 60 min, skip the auto-withdraw instead of duplicating it
-    (defends against the crash-between-call-and-cycle-complete race).
-    """
-    from bitcoiners_dca.persistence.db import Database
-    from bitcoiners_dca.core.models import Withdrawal, WithdrawalStatus
-
-    db = Database(str(tmp_path / "dca.db"))
-    # Pre-record a recent withdrawal — the strategy should see this and
-    # bail out before calling withdraw_btc.
-    db.record_withdrawal(Withdrawal(
-        exchange="okx",
-        withdrawal_id="prior-1",
-        asset="BTC",
-        amount=Decimal("0.005"),
-        address="bc1qabc",
-        fee=Decimal("0.0001"),
-        status=WithdrawalStatus.PENDING,
-        txid=None,
-        created_at=datetime.now(timezone.utc),
-    ))
-
-    cfg = StrategyConfig(
-        base_amount_aed=Decimal("500"),
-        auto_withdraw_enabled=True,
-        auto_withdraw_address="bc1qabc",
-        auto_withdraw_threshold_btc=Decimal("0.001"),
-    )
-    ex = StubExchange("okx", ask="350000", btc_balance="0.01")
-    strategy = DCAStrategy(cfg, router, db=db)
-
-    result = await strategy.execute([ex])
-
-    # The cycle bought BTC normally, but auto-withdraw was suppressed.
-    assert ex.withdrawals == []
-    assert result.withdrew_btc is None
-    assert any("idempotency" in n for n in result.notes), \
-        f"expected idempotency note, got: {result.notes!r}"
-
-
-@pytest.mark.asyncio
-async def test_auto_withdraw_records_withdrawal_when_db_provided(router, tmp_path):
-    """Successful auto-withdraw should immediately persist a row so a
-    subsequent cycle's idempotency check has something to find.
-    """
-    from bitcoiners_dca.persistence.db import Database
-
-    db = Database(str(tmp_path / "dca.db"))
-    cfg = StrategyConfig(
-        base_amount_aed=Decimal("500"),
-        auto_withdraw_enabled=True,
-        auto_withdraw_address="bc1qabc",
-        auto_withdraw_threshold_btc=Decimal("0.001"),
-    )
-    ex = StubExchange("okx", ask="350000", btc_balance="0.01")
-    strategy = DCAStrategy(cfg, router, db=db)
-
-    result = await strategy.execute([ex])
-
-    assert len(ex.withdrawals) == 1
-    assert result.withdrew_btc is not None
-    # Idempotency check now sees the just-recorded withdrawal.
-    assert db.recent_withdrawal_exists("okx", "BTC", since_minutes=60) is True

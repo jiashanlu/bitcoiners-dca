@@ -97,9 +97,9 @@
 <div class="card">
   <h2>Master flags</h2>
   <div class="form-row">
-    <label><input type="checkbox" name="dry_run" {% if config.dry_run %}checked{% endif %}> dry_run (simulate every buy + withdrawal, no real orders)</label>
+    <label><input type="checkbox" name="dry_run" {% if config.dry_run %}checked{% endif %}> dry_run (simulate every buy, no real orders)</label>
     <small>
-      <strong>Recommended</strong> for first 24 hours of operation. Flip off only after auditing dry-run cycles + verifying auto-withdraw address.
+      <strong>Recommended</strong> for first 24 hours of operation. Flip off only after auditing dry-run cycles + confirming your strategy looks right.
     </small>
   </div>
 </div>

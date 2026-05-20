@@ -1,12 +1,13 @@
 # bitcoiners-dca
 
 Self-hostable, multi-exchange Bitcoin DCA bot for UAE residents. Smart-routes
-buys to the cheapest exchange, surfaces arbitrage opportunities, auto-withdraws
-to your hardware wallet, and produces UAE-tax-ready reports.
+buys to the cheapest exchange, surfaces arbitrage opportunities, and produces
+UAE-tax-ready reports. Manual on-chain withdraw from the dashboard when you're
+ready to sweep to your hardware wallet.
 
 **Status:** v0.6 — customer-facing self-service dashboard. Edit strategy + exchanges + secrets entirely from the browser; daemon hot-reloads config every cycle. Encrypted-at-rest credentials (Fernet). Cloudflare Access gates the hosted dashboard. Builds on v0.5 (license + tier framework · composable strategy overlays · hosted-tenant template) and v0.4 (multi-hop smart routing · maker-mode · funding monitor). 165 tests passing.
 
-**Free** = self-host, single exchange, base DCA + tax CSV + on-chain auto-withdraw. **Pro** (AED 49/mo) unlocks multi-exchange routing, maker mode, advanced strategies, Lightning auto-withdraw, funding-rate monitor. **Business** (AED 499+/mo) adds basis-trade execution, LN Markets covered calls, multi-asset DCA, family-office multi-strategy mode. See `docs/TIERS.md` for the full matrix.
+**Free** = self-host, single exchange, base DCA + tax CSV + manual on-chain withdraw. **Pro** (AED 49/mo) unlocks multi-exchange routing (3-hop), maker mode, advanced strategies, on-chain smart triggers (MVRV-Z), funding-rate monitor. **Business** (AED 499+/mo) adds basis-trade execution, LN Markets covered calls, multi-asset DCA, family-office multi-strategy mode. See `docs/TIERS.md` for the full matrix.
 
 ---
 
@@ -20,8 +21,8 @@ Mac mini, Umbrel, Hetzner VPS, etc.) — never on a shared SaaS. It:
    (factoring in real-time ask + taker fee)
 3. **Detects arbitrage** between exchanges and alerts you via Telegram —
    does not auto-execute (regulatory + operational risk)
-4. **Auto-withdraws** accumulated BTC to your hardware-wallet address when a
-   threshold is reached
+4. **Lets you sweep BTC** to your hardware wallet from the dashboard whenever
+   the on-chain fee is a small fraction of the balance — manual, on-demand
 5. **Logs every trade** to a local SQLite DB you own — easy backups, easy export
 
 You hold your own exchange API keys. We never touch them.
@@ -123,7 +124,6 @@ See `config.example.yaml`. Key sections:
 - **overlays.buy_the_dip**: if BTC is down N% in 7 days, multiply buy amount by M
 - **routing**: best_price (default) or pin a preferred exchange
 - **exchanges**: enable per-exchange, point at env vars for credentials
-- **auto_withdraw**: hardcode YOUR hardware wallet address; bot withdraws above threshold
 - **arbitrage**: alert threshold (default 1.5% net of fees)
 - **notifications.telegram**: bot token + your chat ID
 - **dry_run**: master simulate-only switch
@@ -171,8 +171,8 @@ Only opportunities with **positive net profit after all costs** are alerted on.
 | Surface | What we do |
 |---|---|
 | **Your exchange API keys** | Read from env vars; never logged, never sent over network except to exchanges |
-| **Withdrawal address** | Hardcoded in config.yaml; bot cannot change it at runtime (no UI input) |
-| **Withdrawal scope** | Most exchanges support trade-only API keys. We strongly recommend that scope for the bot's key. Set up a separate withdraw-enabled key only for auto-withdraw if you want it. |
+| **Withdrawals** | Manual only. Use the dashboard's Withdraw-now flow when you want to sweep. Unattended auto-withdraw is parked until Lightning withdraw lands (on-chain-only sweeps cost too much for AED 49 customers). |
+| **Withdrawal scope** | Most exchanges support trade-only API keys. We strongly recommend that scope for the bot's key. Add Withdraw scope only when you're ready to use the dashboard's manual Withdraw-now flow. |
 | **State storage** | SQLite on your machine. No telemetry, no cloud sync. |
 | **Tax reports** | Generated locally, never shipped anywhere. |
 
@@ -187,7 +187,8 @@ Only opportunities with **positive net profit after all costs** are alerted on.
 - [x] Smart router with weighted scoring
 - [x] Arbitrage monitor with fee-aware net-profit calc
 - [x] DCA strategy engine with buy-the-dip overlay
-- [x] Auto-withdraw to hardware wallet
+- [x] Manual on-chain withdraw from dashboard (Withdraw-now flow + address book)
+- [ ] Unattended auto-withdraw (parked — returns with Lightning withdraw)
 - [x] SQLite persistence layer
 - [x] CLI (buy-once, arb-check, prices, status, init-config)
 - [x] Dockerfile

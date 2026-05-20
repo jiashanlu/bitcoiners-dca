@@ -26,7 +26,7 @@
 {% endif %}
 
 {% set exchange_meta = {
-  "okx":      {"name": "OKX UAE",     "pairs": "BTC/AED · BTC/USDT · USDT/AED", "scope": "Read + Trade (Withdraw optional for auto-withdraw)"},
+  "okx":      {"name": "OKX UAE",     "pairs": "BTC/AED · BTC/USDT · USDT/AED", "scope": "Read + Trade (add Withdraw scope only if you want manual withdraws via the dashboard)"},
   "binance":  {"name": "Binance UAE", "pairs": "BTC/USDT only (no BTC/AED)",    "scope": "Read + Trade"},
   "bitoasis": {"name": "BitOasis",    "pairs": "BTC/AED · USDT/AED · BTC/USDT", "scope": "Bearer token from Settings → API Token Management"}
 } %}
@@ -75,7 +75,7 @@
   <p class="help">
     • All credential values are encrypted at rest with Fernet (AES-128 in CBC mode + HMAC) using <code>DCA_SECRETS_KEY</code> from your environment.<br>
     • Decryption happens only inside the daemon when constructing exchange clients — never in HTTP responses, logs, or YAML files.<br>
-    • For OKX: prefer Read+Trade scope, IP-whitelisted to your dashboard host. Add Withdraw scope only if you enable on-chain auto-withdraw.<br>
+    • For OKX: prefer Read+Trade scope, IP-whitelisted to your dashboard host. Add Withdraw scope only if you plan to use the dashboard's manual Withdraw-now flow.<br>
     • Rotate any credentials that were ever pasted into a chat (Telegram, email, etc) before going live.
   </p>
 </div>

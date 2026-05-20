@@ -3,12 +3,12 @@ License + tier management — gates premium features in the bot.
 
 Three tiers:
 
-  FREE      Self-host. Single exchange. Basic DCA + tax CSV + on-chain
-            auto-withdraw + risk circuit breakers + local dashboard.
+  FREE      Self-host. Single exchange. Basic DCA + tax CSV + risk circuit
+            breakers + manual withdraw via the dashboard + local UI.
             Genuinely useful as standalone software.
 
   PRO       Hosted (or self-host with a valid key). Multi-exchange smart
-            routing, multi-hop, maker mode, Lightning auto-withdraw,
+            routing, multi-hop, maker mode, on-chain smart triggers,
             cross-exchange arb alerts, funding-rate monitor, advanced
             strategy overlays (volatility-weighted, time-of-day, drawdown).
 
@@ -97,13 +97,14 @@ class Feature(str, Enum):
 #
 # What stays in Free:
 #   * Single-exchange DCA + maker mode + basic buy-the-dip overlay
-#   * On-chain auto-withdraw, UAE tax CSV, risk circuit breakers
+#   * Manual on-chain withdraw, UAE tax CSV, risk circuit breakers
 #   * Local read-only dashboard + CLI
 # What unlocks at Pro (hosted, AED 49/mo):
 #   * Multi-exchange routing including multi-hop AED→USDT→BTC
 #   * All advanced overlays (volatility-weighted, time-of-day, drawdown)
+#   * On-chain smart triggers (MVRV-Z multiplier)
 #   * Cross-exchange arb alerts + funding-rate monitor
-#   * Lightning auto-withdraw + backtest engine
+#   * Backtest engine
 # What unlocks at Business (hosted, concierge):
 #   * Basis-trade execution + LN Markets covered calls
 #   * Multi-asset DCA + stablecoin yield + tax-loss harvesting

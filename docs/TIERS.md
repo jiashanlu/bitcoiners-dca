@@ -14,7 +14,7 @@ your license tier decides which features actually run.
 | Backtest engine (CLI) | ✓ | ✓ | ✓ |
 | Risk circuit breakers + pause/resume | ✓ | ✓ | ✓ |
 | Single-exchange execution | ✓ | ✓ | ✓ |
-| On-chain auto-withdraw to hardware wallet | ✓ | ✓ | ✓ |
+| Manual on-chain withdraw from dashboard | ✓ | ✓ | ✓ |
 | Telegram notifications | ✓ | ✓ | ✓ |
 | **Pro features** |
 | Multi-exchange routing | — | ✓ | ✓ |
@@ -26,7 +26,7 @@ your license tier decides which features actually run.
 | Time-of-day optimization | — | ✓ | ✓ |
 | Drawdown-aware sizing | — | ✓ | ✓ |
 | Funding-rate monitor (basis-trade signals) | — | ✓ | ✓ |
-| Lightning auto-withdraw (OKX BOLT11) | — | ✓ | ✓ |
+| On-chain smart triggers (MVRV-Z multiplier) | — | ✓ | ✓ |
 | Email + SMS notifications | — | ✓ | ✓ |
 | Hosted dashboard at app.bitcoiners.ae | — | ✓ | ✓ |
 | **Business features** |
@@ -65,10 +65,10 @@ features it unlocks.
 ## Why this split (philosophy)
 
 **Free tier is genuinely useful.** It's not a 7-day-trial-with-watermark.
-Single-exchange recurring DCA + tax CSV + on-chain auto-withdraw + risk
+Single-exchange recurring DCA + tax CSV + manual on-chain withdraw + risk
 circuit breakers is a complete product for someone who just wants to
-buy 500 AED of BTC every Monday on BitOasis and withdraw to their
-Coldcard at 0.01 BTC.
+buy 500 AED of BTC every Monday on BitOasis and sweep to their Coldcard
+when the balance is big enough that the on-chain fee is a small fraction.
 
 **Pro tier captures the smart-routing alpha** that we documented in
 `docs/ROUTING.md`. Multi-exchange routing alone tends to save 0.3-0.5%

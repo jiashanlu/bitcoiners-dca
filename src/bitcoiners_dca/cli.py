@@ -277,6 +277,10 @@ def _build_strategy(cfg: AppConfig, router: SmartRouter, db=None) -> DCAStrategy
             dip_threshold_pct=cfg.overlays.buy_the_dip.threshold_pct,
             dip_lookback_days=cfg.overlays.buy_the_dip.lookback_days,
             dip_multiplier=cfg.overlays.buy_the_dip.multiplier,
+            # Auto-withdraw is currently disabled at the product level. The
+            # fields below stay wired so the strategy engine's plumbing keeps
+            # compiling, but core/strategy.py short-circuits on enabled=True.
+            # See feedback-kill-auto-withdraw-until-lightning.
             auto_withdraw_enabled=cfg.auto_withdraw.enabled,
             auto_withdraw_address=cfg.auto_withdraw.destination_address,
             auto_withdraw_threshold_btc=cfg.auto_withdraw.threshold_btc,
@@ -779,7 +783,7 @@ def doctor(
         console.print("  • Then `bitcoiners-dca validate` for a config audit.")
         console.print("  • When confident, flip `dry_run: false` and start the daemon with `run`.")
     else:
-        console.print("  • Live trading is ENABLED. Verify auto-withdraw address one more time.")
+        console.print("  • Live trading is ENABLED. Cycles will place real orders.")
         console.print("  • Start the daemon: `bitcoiners-dca run` (or `docker compose up -d`)")
 
 
@@ -804,8 +808,8 @@ def license(
     console.print()
     console.print(f"[bold]Features enabled ({info['feature_count']}):[/bold]")
     if not info['features']:
-        console.print("  [dim]Free tier — base DCA + tax CSV + on-chain auto-withdraw + risk circuit breakers.[/dim]")
-        console.print("  [dim]Upgrade for multi-exchange, multi-hop routing, maker mode, Lightning, more strategies.[/dim]")
+        console.print("  [dim]Free tier — base DCA + tax CSV + risk circuit breakers + manual withdraw.[/dim]")
+        console.print("  [dim]Upgrade for multi-exchange routing, multi-hop, maker mode, on-chain triggers, more strategies.[/dim]")
         console.print("  [dim]Visit https://bitcoiners.ae/dca-bot to get a Pro/Business key.[/dim]")
     else:
         for f in info['features']:
@@ -1178,7 +1182,6 @@ def validate(
       - typos in config.yaml
       - missing env-vars for enabled exchanges
       - bad API keys (live health_check)
-      - invalid auto-withdraw destination
       - missing telegram bot token / chat_id when notifications are on
       - unwritable db / reports paths
     """
@@ -1187,8 +1190,6 @@ def validate(
 
 
 async def _validate(config_path: str, skip_network: bool) -> int:
-    from bitcoiners_dca.core.lightning import WithdrawalNetwork, detect_network
-
     table = Table(title="bitcoiners-dca · config validation", show_lines=False)
     table.add_column("Section"); table.add_column("Check"); table.add_column("Status")
     table.add_column("Detail")
@@ -1256,28 +1257,7 @@ async def _validate(config_path: str, skip_network: bool) -> int:
     else:
         row("network", "health_check", "SKIP", "--skip-network flag")
 
-    # 3. Auto-withdraw destination
-    aw = cfg.auto_withdraw
-    if aw.enabled:
-        if not aw.destination_address:
-            row("auto_withdraw", "destination_address", "FAIL", "enabled but unset")
-        else:
-            detected = detect_network(aw.destination_address)
-            if detected == WithdrawalNetwork.BITCOIN:
-                row("auto_withdraw", "destination_address", "PASS",
-                    f"on-chain ({aw.destination_address[:10]}…)")
-            elif detected in (WithdrawalNetwork.LIGHTNING, WithdrawalNetwork.LNURL):
-                row("auto_withdraw", "destination_address", "FAIL",
-                    "Lightning invoices expire — use an on-chain address for auto-withdraw")
-            else:
-                row("auto_withdraw", "destination_address", "WARN",
-                    f"unrecognized ({detected.value})")
-        if aw.threshold_btc <= 0:
-            row("auto_withdraw", "threshold_btc", "WARN", "≤0 — withdraws every cycle")
-    else:
-        row("auto_withdraw", "enabled", "SKIP", "disabled")
-
-    # 4. Notifications
+    # 3. Notifications
     tg = cfg.notifications.telegram
     if tg.enabled:
         import os
@@ -1293,7 +1273,7 @@ async def _validate(config_path: str, skip_network: bool) -> int:
     else:
         row("notifications", "telegram", "SKIP", "disabled")
 
-    # 5. Paths
+    # 4. Paths
     import os
     for label, path in [
         ("persistence.db_path", cfg.persistence.db_path),
@@ -1311,7 +1291,7 @@ async def _validate(config_path: str, skip_network: bool) -> int:
         else:
             row("paths", label, "FAIL", f"not writable: {parent}")
 
-    # 6. Strategy sanity
+    # 5. Strategy sanity
     if cfg.strategy.amount_aed <= 0:
         row("strategy", "amount_aed", "FAIL", f"{cfg.strategy.amount_aed} ≤ 0")
     else:
@@ -1334,7 +1314,7 @@ async def _validate(config_path: str, skip_network: bool) -> int:
         row("risk", "max_consecutive_failures", "PASS",
             f"auto-pause after {r.max_consecutive_failures}")
 
-    # 7. Dry-run state
+    # 6. Dry-run state
     if cfg.dry_run:
         row("runtime", "dry_run", "PASS", "ON — simulated only, no real orders")
     else:

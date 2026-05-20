@@ -1,155 +1,22 @@
 {% extends "_base.html" %}
-{% block title %}Auto-withdraw · bitcoiners-dca{% endblock %}
+{% block title %}Withdraw · bitcoiners-dca{% endblock %}
 {% block content %}
-<h1>Auto-withdraw</h1>
-<p class="subtitle">Each exchange sweeps BTC into its own destination once the balance crosses a threshold. Configure one row per exchange you want to evacuate.</p>
+<h1>Withdraw BTC</h1>
+<p class="subtitle">Send BTC from a configured exchange to your own wallet. Manual, on-demand — no scheduled sweeps.</p>
 
-<form method="post" action="{{ prefix }}/withdrawals">
-
-{% if not policies %}
-  <div class="card">
-    <p>No exchanges configured yet. Add an exchange on the <a href="{{ prefix }}/exchanges">Exchanges</a> page first.</p>
-  </div>
-{% endif %}
-
-{% for p in policies %}
-  <div class="card">
-    <h2 style="display:flex;align-items:center;gap:10px">
-      {{ p.exchange|capitalize }}
-      {% if p.supports_lightning %}
-        <span class="pill ok" style="font-size:11px">Lightning supported</span>
-      {% else %}
-        <span class="pill muted" style="font-size:11px">On-chain only</span>
-      {% endif %}
-    </h2>
-    <div class="form-row">
-      <label>
-        <input type="checkbox" name="ex_{{ p.exchange }}_enabled" {% if p.enabled %}checked{% endif %}>
-        Enable auto-withdraw from {{ p.exchange|capitalize }}
-      </label>
-    </div>
-
-    {% if p.supports_lightning %}
-      <div class="form-row">
-        <label>Network</label>
-        <select name="ex_{{ p.exchange }}_network">
-          <option value="bitcoin" {% if p.network == "bitcoin" %}selected{% endif %}>Bitcoin on-chain</option>
-          <option value="lightning" {% if p.network == "lightning" %}selected{% endif %}>Lightning</option>
-        </select>
-        <small>Pasting an <code>lnbc…</code> invoice or an LN address auto-switches to Lightning. Lightning is cheaper but a one-shot invoice expires — use a static LN address like <code>you@getalby.com</code> if you want it to keep working over time.</small>
-      </div>
-    {% else %}
-      <input type="hidden" name="ex_{{ p.exchange }}_network" value="bitcoin">
-    {% endif %}
-
-    <div class="form-row">
-      <label>Destination {% if p.supports_lightning %}(BTC address OR LN invoice / address){% else %}(BTC address){% endif %}</label>
-      <input type="text" name="ex_{{ p.exchange }}_destination"
-        value="{{ p.destination }}"
-        placeholder="{% if p.supports_lightning %}bc1q… / lnbc… / you@getalby.com{% else %}bc1q… or bc1p…{% endif %}">
-      <small>Generate the address on your hardware wallet (or LN wallet) and verify on-device before saving.</small>
-    </div>
-    <div class="form-row">
-      <label>Threshold (BTC)</label>
-      <input type="number" step="0.00000001" min="0.0001"
-        name="ex_{{ p.exchange }}_threshold_btc"
-        id="thr_{{ p.exchange }}"
-        data-exchange="{{ p.exchange }}"
-        data-supports-lightning="{{ '1' if p.supports_lightning else '0' }}"
-        value="{{ p.threshold_btc }}">
-      <small>Once BTC balance on {{ p.exchange|capitalize }} ≥ this, the bot withdraws automatically. Lower = more frequent withdrawals = more fees.</small>
-      <small id="thr_fee_{{ p.exchange }}" style="margin-top:6px;color:var(--text-muted)"></small>
-    </div>
-  </div>
-{% endfor %}
-
-<script>
-(function() {
-  // Per-exchange withdrawal fee estimates in BTC. Real fees vary; these
-  // are conservative defaults derived from each exchange's published
-  // schedule as of 2026-05. Used only for the live preview — the actual
-  // execution always queries get_fee_schedule() at withdraw time.
-  const ONCHAIN_FEE_BTC = {
-    okx:      0.0002,
-    binance:  0.0002,
-    bitoasis: 0.0003,
-  };
-  const LIGHTNING_FEE_BTC = 0.0000005;  // ~1 sat — effectively free
-
-  function update(input) {
-    const ex = input.dataset.exchange;
-    const supportsLn = input.dataset.supportsLightning === '1';
-    const out = document.getElementById('thr_fee_' + ex);
-    if (!out) return;
-    const threshold = parseFloat(input.value || '0');
-    if (!threshold || threshold <= 0) { out.textContent = ''; return; }
-    // Pick on-chain by default; if exchange supports LN AND user selected LN
-    // network, use LN fee instead.
-    const netSel = document.querySelector('select[name="ex_' + ex + '_network"]');
-    const isLn = supportsLn && netSel && netSel.value === 'lightning';
-    const fee = isLn ? LIGHTNING_FEE_BTC : ONCHAIN_FEE_BTC[ex];
-    if (!fee) { out.textContent = ''; return; }
-    const pct = (fee / threshold) * 100;
-    let msg = 'Estimated network fee at this threshold: ' + fee.toFixed(8)
-      + ' BTC ≈ <strong>' + pct.toFixed(2) + '%</strong> of each sweep';
-    if (pct > 5) {
-      out.style.color = '#e86363';
-      msg += '. <strong>That’s high.</strong> Raise the threshold so each '
-        + 'withdrawal carries enough to amortize the fee — most stackers '
-        + 'target &lt;1%.';
-    } else if (pct > 1) {
-      out.style.color = '#f0b000';
-      msg += ' — workable, but raising the threshold a bit will cut your fee drag.';
-    } else {
-      out.style.color = 'var(--text-muted)';
-    }
-    out.innerHTML = msg;
-  }
-
-  document.querySelectorAll('input[id^="thr_"]').forEach(input => {
-    input.addEventListener('input', () => update(input));
-    update(input);
-  });
-  // Re-compute when LN/onchain network toggle changes — fee differs ~400x.
-  document.querySelectorAll('select[name$="_network"]').forEach(sel => {
-    sel.addEventListener('change', () => {
-      const m = sel.name.match(/^ex_(.+)_network$/);
-      if (!m) return;
-      const input = document.getElementById('thr_' + m[1]);
-      if (input) update(input);
-    });
-  });
-})();
-</script>
-
-<div class="card">
-  <h2>Safety</h2>
-  <ul style="margin-left:1.2em; color:var(--text-muted); line-height:1.7">
-    <li>Use a <strong>fresh address per exchange</strong> from your hardware wallet, not the same one twice.</li>
-    <li><strong>Trade-only API key</strong> is enough — the exchange's withdraw whitelist authorizes the address, not the bot.</li>
-    <li>Set each exchange's <strong>withdraw whitelist</strong> to ONLY the destination here before turning auto-withdraw on. Belt + braces.</li>
-    <li>Lightning withdrawals are only supported by OKX (BitOasis and Binance UAE are on-chain only).</li>
-  </ul>
-</div>
-
-<button type="submit">Save</button>
-</form>
-
-{# ── One-shot manual withdrawal ──────────────────────────────────
-   Separate form from the auto-withdraw policy above. Posts to a
-   different endpoint that fires the withdrawal RIGHT NOW. On-chain
-   BTC only — the UAE exchanges we support (OKX UAE, BitOasis,
-   Binance UAE) don't expose Lightning withdrawals via API. #}
-<div class="card" style="margin-top:32px; border-color: var(--accent-soft)">
+{# Manual on-chain withdrawal. Unattended auto-withdraw is parked until
+   Lightning withdraw lands — on-chain fees wipe out small-account DCA. #}
+<div class="card" style="border-color: var(--accent-soft)">
   <h2 style="display:flex; align-items:center; gap:10px">
     Withdraw now
     <span class="pill warn" style="font-size:11px">live action — sends BTC immediately</span>
   </h2>
   <p class="help">
-    One-shot manual withdrawal. Pick the exchange, paste an on-chain
-    BTC address (<code>bc1q…</code> / <code>bc1p…</code>), enter the
-    amount. Use this to test a fresh destination before enabling
-    auto-withdraw above.
+    Pick the exchange, paste an on-chain BTC address
+    (<code>bc1q…</code> / <code>bc1p…</code>), enter the amount.
+    Withdraw whenever you've accumulated enough BTC that the on-chain
+    fee is a small fraction of the balance — typically when the fee is
+    under 1% of what you're sending.
   </p>
 
   <form method="post" action="{{ prefix }}/withdrawals/withdraw-now"
@@ -392,8 +259,7 @@
       for (const d of items) {
         const opt = document.createElement('option');
         opt.value = d.address;
-        const tag = d.whitelisted ? 'whitelisted at Binance'
-                                  : (d.source === 'auto_withdraw' ? 'auto-withdraw config' : 'recent');
+        const tag = d.whitelisted ? 'whitelisted at Binance' : 'recent';
         opt.label = (d.label ? `${d.label} · ` : '') + tag;
         dstList.appendChild(opt);
       }

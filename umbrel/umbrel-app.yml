@@ -13,13 +13,13 @@ description: >-
   Features:
   • Multi-exchange smart routing — every buy picks the cheapest after-fee price
   • Buy-the-dip overlay — multiplies the buy when BTC drops by your threshold
-  • Lightning withdrawal — auto-withdraw to a Lightning invoice via OKX
-  • On-chain auto-withdraw — sweep accumulated BTC to your hardware wallet
+  • On-chain smart triggers — multiply or skip buys based on MVRV-Z (Pro)
+  • Manual on-chain withdraw — sweep to your hardware wallet from the dashboard
   • Arbitrage detection — Telegram alerts on cross-exchange spreads
   • Risk circuit breakers — daily spend cap, single-buy cap, auto-pause
   • UAE-format tax CSV — for record-keeping
   • Backtest engine — replay any strategy against 365 days of history
-  • Read-only web dashboard
+  • Self-service web dashboard
 
 
   Built for UAE residents using VARA-licensed exchanges (BitOasis, OKX UAE)

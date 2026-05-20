@@ -1330,144 +1330,17 @@ def create_app(
 
     def _withdrawals_ctx_extra():
         cfg = _config()
-        # ExchangesConfig is a Pydantic model with one field per supported
-        # exchange ({okx, binance, bitoasis}). Iterate model fields rather
-        # than treating it as a dict.
+        # Expose the configured-exchange list to the manual Withdraw-now
+        # form's dropdown. Auto-withdraw policy UI was removed — see
+        # feedback-kill-auto-withdraw-until-lightning.
         ex_names = list(cfg.exchanges.model_fields.keys()) if cfg.exchanges else []
-        # Surface each known exchange — even ones without saved policy —
-        # so the user can opt in. Existing policies render with their
-        # stored values; unconfigured exchanges show defaults.
-        policies = []
-        existing = (cfg.auto_withdraw.exchanges or {})
-        for name in ex_names:
-            p = existing.get(name)
-            policies.append({
-                "exchange": name,
-                "supports_lightning": _supports_lightning(name),
-                "enabled": (p.enabled if p else False),
-                "destination": (p.destination if p else "") or "",
-                "network": (p.network if p else "bitcoin"),
-                "threshold_btc": str(p.threshold_btc if p else Decimal("0.001")),
-            })
+        policies = [{"exchange": name} for name in ex_names]
         return {"policies": policies}
 
     @app.get("/withdrawals", response_class=HTMLResponse)
     async def withdrawals_page(request: Request):
         return HTMLResponse(jinja.get_template("withdrawals.html").render(_ctx(
             request, active="withdrawals", **_withdrawals_ctx_extra(),
-        )))
-
-    @app.post("/withdrawals", response_class=HTMLResponse)
-    async def withdrawals_save(request: Request):
-        form = await request.form()
-        cfg = _config()
-        ex_names = list(cfg.exchanges.model_fields.keys()) if cfg.exchanges else []
-
-        # Auto-detect Lightning from the destination so a user who pastes
-        # an `lnbc...` invoice doesn't have to also toggle the network.
-        from bitcoiners_dca.core.lightning import (
-            detect_network as _detect_network,
-            is_lightning as _is_ln,
-            WithdrawalNetwork as _Net,
-        )
-
-        def _refuse(msg: str):
-            return HTMLResponse(jinja.get_template("withdrawals.html").render(_ctx(
-                request, active="withdrawals", **_withdrawals_ctx_extra(),
-                flash={"kind": "err", "message": msg},
-            )))
-
-        per_exchange: dict[str, dict] = {}
-        any_enabled = False
-        for name in ex_names:
-            prefix = f"ex_{name}_"
-            enabled = form.get(prefix + "enabled") == "on"
-            destination = (form.get(prefix + "destination") or "").strip() or None
-            requested_network = (form.get(prefix + "network") or "bitcoin").strip()
-            try:
-                threshold = Decimal(str(form.get(prefix + "threshold_btc", "0.001")).strip() or "0.001")
-            except InvalidOperation:
-                threshold = Decimal("0.001")
-
-            # Auto-flip to lightning if the address is clearly an LN invoice/address.
-            if destination and _is_ln(destination):
-                requested_network = "lightning"
-
-            # Validation runs only when the row is enabled — disabled rows
-            # can have blank/garbage destination, we don't care.
-            if enabled and destination:
-                net = _detect_network(destination)
-                if net == _Net.UNKNOWN:
-                    return _refuse(
-                        f"{name}: destination {destination[:40]!r} doesn't look like a "
-                        "valid BTC address (bc1…/1…/3…) or Lightning address "
-                        "(you@walletprovider.com). Double-check it before saving."
-                    )
-                # BOLT11 invoices expire (default 1h, max 7d). They make no
-                # sense as an auto-withdraw destination — by the time the
-                # bot has accumulated enough BTC to trip the threshold, the
-                # invoice is dead. Refuse explicitly with a clear message
-                # pointing at the alternatives.
-                if net == _Net.LIGHTNING:
-                    return _refuse(
-                        f"{name}: that's a one-shot BOLT11 invoice — it'll "
-                        "expire before the bot can reuse it. For ongoing "
-                        "auto-withdraw, paste a static Lightning Address "
-                        "(e.g. you@walletofsatoshi.com) or an on-chain BTC "
-                        "address. Use the CLI for one-off invoice withdraws."
-                    )
-                # LNURL is opaque — we'd have to fetch + parse the response
-                # to know what we're sending to. Same problem class as
-                # BOLT11; reject.
-                if net == _Net.LNURL:
-                    return _refuse(
-                        f"{name}: LNURL-pay destinations aren't supported "
-                        "for auto-withdraw yet. Paste a Lightning Address "
-                        "(you@host) or an on-chain BTC address instead."
-                    )
-
-            # Refuse LN on an exchange that doesn't support it — fail loudly
-            # in the dashboard rather than silently dropping to on-chain.
-            if (
-                enabled
-                and requested_network == "lightning"
-                and not _supports_lightning(name)
-            ):
-                return _refuse(
-                    f"{name} doesn't support Lightning withdrawals. Use an "
-                    "on-chain BTC address or pick a different exchange."
-                )
-
-            per_exchange[name] = {
-                "enabled": enabled,
-                "destination": destination,
-                "network": requested_network,
-                "threshold_btc": str(threshold),
-            }
-            any_enabled = any_enabled or enabled
-
-        patch = {
-            "auto_withdraw.enabled": any_enabled,
-            "auto_withdraw.exchanges": per_exchange,
-        }
-        flash = _apply_patch(state["config_path"], patch, _refresh_config)
-        # Mirror each configured destination into the address book so it
-        # auto-completes on the Withdraw-now form too.
-        try:
-            db = _db()
-            for ex_name, entry in per_exchange.items():
-                dst = (entry.get("destination") or "").strip()
-                if dst:
-                    db.record_destination(
-                        exchange=ex_name,
-                        address=dst,
-                        network=entry.get("network") or "bitcoin",
-                        source="auto_withdraw",
-                    )
-        except Exception:
-            logger.exception("record_destination from auto-withdraw save failed")
-        return HTMLResponse(jinja.get_template("withdrawals.html").render(_ctx(
-            request, active="withdrawals", flash=flash, **_withdrawals_ctx_extra(),
         )))
 
     @app.post("/withdrawals/withdraw-now", response_class=HTMLResponse)

@@ -1,8 +1,8 @@
 # bitcoiners-dca starter config — copy to config.yaml and edit.
 
 # ─── LICENSE ────────────────────────────────────────────────────────────────
-# Free tier = no key needed, single-exchange DCA + tax CSV + on-chain
-# auto-withdraw + risk circuit breakers. Pro / Business tiers unlock
+# Free tier = no key needed, single-exchange DCA + tax CSV + risk circuit
+# breakers + manual withdraw via the dashboard. Pro / Business tiers unlock
 # multi-exchange routing, maker mode, advanced strategies, etc.
 # See docs/TIERS.md for the full feature matrix.
 license:
@@ -108,12 +108,10 @@ exchanges:
     # BitOasis uses Bearer-token auth. Generate at Settings → API Token Management.
     token_env: BITOASIS_API_TOKEN
 
-# ─── AUTO-WITHDRAW ──────────────────────────────────────────────────────────
-# After each successful buy, withdraw to your hardware wallet if threshold met.
-auto_withdraw:
-  enabled: false
-  destination_address: null   # YOUR Bitcoin hardware wallet address (bc1q…/bc1p…)
-  threshold_btc: 0.01         # don't withdraw until BTC balance ≥ this
+# ─── WITHDRAWALS ────────────────────────────────────────────────────────────
+# Withdrawals are manual via the dashboard at /withdrawals/withdraw-now.
+# Unattended auto-withdraw is parked until Lightning withdraw lands — on-chain
+# fees (~0.0002 BTC) wipe out small-account DCA savings.
 
 # ─── RISK / CIRCUIT BREAKERS ────────────────────────────────────────────────
 # Protect against runaway spend and exchange outages. The bot will auto-pause
@@ -160,8 +158,8 @@ reports:
   uae_tax_csv_path: "./reports"
 
 # ─── MASTER FLAGS ───────────────────────────────────────────────────────────
-# SAFETY DEFAULT: dry_run starts ON. When true, every buy + withdrawal is
-# simulated; no real orders are placed. After you've run `bitcoiners-dca
-# validate`, watched a few dry cycles via `buy-once`, and confirmed your
-# auto-withdraw address + strategy are correct, set this to false.
+# SAFETY DEFAULT: dry_run starts ON. When true, every buy is simulated; no
+# real orders are placed. After you've run `bitcoiners-dca validate`,
+# watched a few dry cycles via `buy-once`, and confirmed your strategy is
+# correct, set this to false.
 dry_run: true

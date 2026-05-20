@@ -476,8 +476,7 @@ a { color: var(--accent); text-decoration: none; }
       <strong>👋 Welcome to bitcoiners-dca.</strong> You're in <strong>dry-run mode</strong> right now — cycles fire on schedule but no real orders are placed. Run through this checklist:
       <ol style="margin:8px 0 0 1.4em">
         <li>Pick a strategy on <a href="{{ prefix }}/strategy">Strategy</a> (frequency + budget). Each exchange has its own minimum order size (roughly AED 50-100 covers all major venues today, but it drifts with the BTC price); the <a href="{{ prefix }}/routes-audit">Routes audit</a> page shows which venues your cycle clears in real time.</li>
-        <li>Add your exchange API keys on <a href="{{ prefix }}/exchanges">Exchanges</a> (trade-only scope; never withdraw scope).</li>
-        <li>(Optional but recommended) Set your <a href="{{ prefix }}/withdrawals">auto-withdraw destination</a> — your own hardware wallet address.</li>
+        <li>Add your exchange API keys on <a href="{{ prefix }}/exchanges">Exchanges</a>. Trade-only scope is enough — add Withdraw scope only when you're ready to use the <a href="{{ prefix }}/withdrawals">manual withdraw</a> flow.</li>
         <li>Set a <strong>daily-spend risk cap</strong> on <a href="{{ prefix }}/strategy">Strategy</a> → Risk caps. Belt + braces.</li>
         <li>When everything looks right, click <strong>Go live →</strong> in the banner above. The first real cycle fires at the next cron tick — or click <strong>Buy now</strong> to fire one immediately.</li>
       </ol>

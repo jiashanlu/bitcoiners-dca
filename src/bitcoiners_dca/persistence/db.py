@@ -96,7 +96,7 @@ CREATE TABLE IF NOT EXISTS withdrawal_destinations (
     address TEXT NOT NULL,
     network TEXT NOT NULL DEFAULT 'bitcoin',
     label TEXT,
-    -- manual | auto_withdraw | binance_whitelist
+    -- manual | binance_whitelist  (auto_withdraw was retired; legacy rows may remain)
     source TEXT NOT NULL DEFAULT 'manual',
     first_used_at TEXT NOT NULL,
     last_used_at TEXT NOT NULL,
@@ -163,13 +163,12 @@ class Database:
     def recent_withdrawal_exists(
         self, exchange: str, asset: str, since_minutes: int = 60
     ) -> bool:
-        """Idempotency check for auto-withdraw.
+        """Idempotency check for withdrawals.
 
         Returns True if a withdrawal row exists for (exchange, asset) within
-        the last `since_minutes`. Strategy uses this to short-circuit a
-        re-attempt after a crash mid-withdraw: even if the exchange's `free`
-        balance hasn't decremented yet (rare but possible), we won't fire a
-        second `withdraw_btc` call.
+        the last `since_minutes`. Used by any future re-enablement of the
+        auto-withdraw daemon path and by tests; today's manual flow doesn't
+        consult this gate.
 
         Timestamp comparison is string-lex on ISO format, which works because
         all rows are recorded with tz-aware UTC isoformat (`+00:00` suffix).
@@ -269,8 +268,9 @@ class Database:
 
         Source tags where the address came from:
           - 'manual'            user pasted into the Withdraw-now form
-          - 'auto_withdraw'     saved as the auto-withdraw destination
           - 'binance_whitelist' pulled from Binance's whitelist API
+        Legacy rows tagged 'auto_withdraw' may exist; auto-withdraw was
+        retired from the product surface.
         """
         now = datetime.now(timezone.utc).isoformat()
         self._conn.execute(

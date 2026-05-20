@@ -39,7 +39,7 @@
       </form>
       {% if bot_status.state == "dry_run" %}
         <form method="post" action="{{ prefix }}/controls/go-live" style="display:inline"
-              onsubmit="return confirm('Go live? Cycles will place real orders against your exchange API key. Make sure your Risk caps + auto-withdraw destination are set the way you want them.')">
+              onsubmit="return confirm('Go live? Cycles will place real orders against your exchange API key. Confirm your Risk caps are set the way you want them.')">
           <button type="submit" class="btn-primary-sm">Go live →</button>
         </form>
       {% else %}

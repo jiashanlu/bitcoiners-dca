@@ -149,10 +149,9 @@ for one-click install on home Bitcoin nodes. PRs welcome.
 Before going live:
 
 - [ ] Set `dry_run: true` and run for 24 hours — verify no errors, balances poll, drafts make sense
-- [ ] Verify auto-withdraw address is YOUR hardware wallet (echo it from config and confirm)
 - [ ] Test Telegram bot — send a manual test from your account to verify chat_id
-- [ ] Confirm trade-only API key permissions on each exchange (no withdraw scope unless you want auto-withdraw)
-- [ ] Whitelist the hardware-wallet address in each exchange's withdrawal settings
+- [ ] Confirm trade-only API key permissions on each exchange (Withdraw scope is only needed if you want to use the dashboard's manual Withdraw-now flow)
+- [ ] Whitelist your hardware-wallet address in each exchange's withdrawal settings (lets you do manual withdraws later from the dashboard)
 - [ ] Back up `data/dca.db` to your home node / NAS / cloud (encrypted)
 - [ ] Set `dry_run: false` in config.yaml
 - [ ] Restart the service: `docker compose restart dca` or `sudo systemctl restart bitcoiners-dca`
@@ -192,8 +191,8 @@ The entire state of the bot is in `data/dca.db`. Back this up daily:
 - Run the daemon as a dedicated unprivileged user (`dca`)
 - Mount config + secrets read-only into Docker
 - API keys should have **trade-only** scope on each exchange. Only enable
-  withdrawal scope if you're using auto-withdraw AND have whitelisted
-  destination addresses.
+  Withdraw scope if you plan to use the dashboard's manual Withdraw-now
+  flow, and only after whitelisting destination addresses at the exchange.
 - The dashboard binds to 127.0.0.1 by default — only accessible from the
   host. Don't expose to the network without auth.
 - For remote monitoring: use SSH port-forwarding (`ssh -L 8000:localhost:8000 user@host`) rather than opening the dashboard port.

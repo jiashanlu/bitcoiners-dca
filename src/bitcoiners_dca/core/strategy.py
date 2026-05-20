@@ -379,114 +379,18 @@ class DCAStrategy:
             result.errors.append(f"Route execution failed: {e}")
             return result
 
-        # 4. Auto-withdraw: sweep BTC off each configured exchange to the
-        # user's self-custody destination(s). Two policy sources:
-        #   (a) Per-exchange map `auto_withdraw_exchanges` — preferred. Each
-        #       entry is independent: different destination/network/threshold
-        #       per exchange, supports Lightning where the exchange does.
-        #   (b) Legacy single-destination fields — only used when (a) is
-        #       empty AND only fires on the cycle's final exchange.
-        # Non-fatal: any failure logs to result.errors and continues.
-        if self.config.auto_withdraw_exchanges and self.config.auto_withdraw_enabled:
-            for ex in exchanges:
-                policy = self.config.auto_withdraw_exchanges.get(ex.name)
-                if not policy or not policy.get("enabled") or not policy.get("destination"):
-                    continue
-                # Idempotency gate: if a withdrawal from this exchange was
-                # already recorded in the last 60 min, skip — a crash
-                # between calling withdraw_btc and the cycle finishing
-                # could otherwise drive a duplicate next cycle.
-                if self.db is not None and self.db.recent_withdrawal_exists(
-                    ex.name, "BTC", since_minutes=60
-                ):
-                    result.notes.append(
-                        f"Auto-withdraw from {ex.name} skipped: recent withdrawal "
-                        "already recorded within 60 min (idempotency)"
-                    )
-                    continue
-                threshold = Decimal(str(policy.get("threshold_btc", "0.001")))
-                network = policy.get("network", "bitcoin")
-                destination = policy["destination"]
-                try:
-                    btc_balance = await ex.get_balance("BTC")
-                    if not btc_balance or btc_balance.free < threshold:
-                        continue
-                    fees = await ex.get_fee_schedule(self.config.pair)
-                    # On-chain has a withdrawal fee that comes off our balance;
-                    # Lightning is effectively zero on OKX so don't subtract.
-                    withdraw_fee = (
-                        Decimal("0") if network == "lightning"
-                        else fees.withdrawal_fee_btc
-                    )
-                    withdraw_amount = btc_balance.free - withdraw_fee
-                    if withdraw_amount <= 0:
-                        continue
-                    wd = await ex.withdraw_btc(
-                        amount_btc=withdraw_amount,
-                        address=destination,
-                        network=network,
-                    )
-                    # Persist immediately so a crash AFTER this call but
-                    # before the cycle completes still leaves a record for
-                    # the next cycle's idempotency gate to see.
-                    if self.db is not None:
-                        try:
-                            self.db.record_withdrawal(wd)
-                        except Exception as e:
-                            result.errors.append(
-                                f"Failed to persist withdrawal record from {ex.name}: {e}"
-                            )
-                    result.withdrew_btc = (result.withdrew_btc or Decimal(0)) + withdraw_amount
-                    result.withdrew_to_address = destination
-                    result.notes.append(
-                        f"Auto-withdrew {withdraw_amount} BTC from {ex.name} "
-                        f"via {network} (withdrawal_id={wd.withdrawal_id})"
-                    )
-                except Exception as e:
-                    result.errors.append(f"Auto-withdraw from {ex.name} skipped: {e}")
-        elif (
-            self.config.auto_withdraw_enabled
-            and self.config.auto_withdraw_address
-            and chosen_route.output_ccy == "BTC"
-            and result.orders
-        ):
-            # Legacy path: single destination, fires only on final exchange.
-            final_ex = exchange_map[result.orders[-1].exchange]
-            # Idempotency gate (same rationale as the per-exchange path above).
-            if self.db is not None and self.db.recent_withdrawal_exists(
-                final_ex.name, "BTC", since_minutes=60
-            ):
-                result.notes.append(
-                    f"Auto-withdraw from {final_ex.name} skipped: recent withdrawal "
-                    "already recorded within 60 min (idempotency)"
-                )
-            else:
-                try:
-                    btc_balance = await final_ex.get_balance("BTC")
-                    if btc_balance and btc_balance.free >= self.config.auto_withdraw_threshold_btc:
-                        fees = await final_ex.get_fee_schedule(self.config.pair)
-                        withdraw_amount = btc_balance.free - fees.withdrawal_fee_btc
-                        if withdraw_amount > 0:
-                            wd = await final_ex.withdraw_btc(
-                                amount_btc=withdraw_amount,
-                                address=self.config.auto_withdraw_address,
-                            )
-                            if self.db is not None:
-                                try:
-                                    self.db.record_withdrawal(wd)
-                                except Exception as e:
-                                    result.errors.append(
-                                        f"Failed to persist withdrawal record from {final_ex.name}: {e}"
-                                    )
-                            result.withdrew_btc = withdraw_amount
-                            result.withdrew_to_address = self.config.auto_withdraw_address
-                            result.notes.append(
-                                f"Auto-withdrew {withdraw_amount} BTC from {final_ex.name} "
-                                f"(withdrawal_id={wd.withdrawal_id})"
-                            )
-                except Exception as e:
-                    # Non-fatal: log but don't fail the whole cycle
-                    result.errors.append(f"Auto-withdraw skipped: {e}")
+        # 4. Auto-withdraw: parked until Lightning withdraw lands as a Pro
+        # feature. On-chain-only auto-withdraw burns ~0.0002 BTC (~$15-20)
+        # per sweep, which eats AED 49 customer savings. Manual withdraw
+        # via the /withdrawals dashboard page is the supported flow.
+        # The exchange withdraw_btc() adapters, DB schema, address book,
+        # and SecretStore stay in place as plumbing for re-enablement.
+        # See feedback-kill-auto-withdraw-until-lightning in memory.
+        if self.config.auto_withdraw_enabled:
+            result.notes.append(
+                "Auto-withdraw is disabled at the product level. Use the "
+                "dashboard /withdrawals page to withdraw manually."
+            )
 
         return result
 
