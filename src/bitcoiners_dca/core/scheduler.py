@@ -146,6 +146,18 @@ class DCAScheduler:
             max_consecutive_failures=config.risk.max_consecutive_failures,
             timezone_str=config.strategy.timezone or "Asia/Dubai",
         )
+        # Page the operator's admin Telegram on auto-pause transition.
+        # The notify hook is a no-op when ADMIN_TG_* env vars are unset
+        # (e.g. self-host with no central monitoring), so this is safe
+        # to wire unconditionally.
+        from bitcoiners_dca.core.notifications import send_admin_alert
+        self.risk.on_auto_pause = lambda reason: send_admin_alert(
+            f"Tenant auto-paused: {reason}\n\n"
+            f"Pause clears manually via dashboard /controls/resume "
+            f"or CLI `bitcoiners-dca risk resume`. Investigate the "
+            f"underlying failure (exchange auth, daily-cap, etc) first.",
+            tag="cycle-fail",
+        )
         self._rebuild_dependencies = rebuild_dependencies
         self.market_data = MarketDataProvider(db=db)
         self.funding_monitor: Optional[FundingMonitor] = None

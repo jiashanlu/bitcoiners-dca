@@ -68,6 +68,11 @@ class RiskManager:
         self.max_single_buy_aed = max_single_buy_aed
         self.max_consecutive_failures = max_consecutive_failures
         self.timezone_str = timezone_str
+        # Optional hook fired exactly once when an auto-pause transition
+        # happens (N consecutive failures hit the threshold). Used by the
+        # scheduler to DM the operator's admin Telegram on top of any
+        # user-facing notifications. None = no admin alert.
+        self.on_auto_pause = None
 
     # === STATE QUERIES ===
 
@@ -121,10 +126,27 @@ class RiskManager:
     # === STATE MUTATIONS ===
 
     def pause(self, reason: str) -> None:
+        # Don't double-fire the auto-pause admin alert when called repeatedly
+        # (e.g. dashboard pause click on an already-paused bot). Check the
+        # current state BEFORE flipping the meta.
+        was_paused = self.is_paused()
         self.db.set_meta(META_PAUSED, "true")
         self.db.set_meta(META_PAUSED_AT, datetime.now(timezone.utc).isoformat())
         self.db.set_meta(META_PAUSED_REASON, reason)
         logger.warning("RiskManager paused: %s", reason)
+        # Fire the admin-alert hook only on first transition into paused
+        # AND only when caused by auto-pause (consecutive failures). Manual
+        # pauses from the dashboard go through the same method but the
+        # caller passes a different reason string.
+        if (
+            not was_paused
+            and self.on_auto_pause is not None
+            and "consecutive failed cycles" in reason
+        ):
+            try:
+                self.on_auto_pause(reason)
+            except Exception:
+                logger.exception("on_auto_pause callback failed")
 
     def resume(self) -> None:
         self.db.set_meta(META_PAUSED, "false")

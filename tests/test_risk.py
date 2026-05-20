@@ -150,3 +150,41 @@ def test_no_caps_allows_full_amount(db):
     assert decision.allow
     assert decision.amount_aed == Decimal("9999")
     assert decision.reasons == []
+
+
+# === Admin auto-pause hook ===
+
+def test_auto_pause_fires_admin_hook_once_on_transition(db):
+    """When consecutive failures cross the threshold, the on_auto_pause
+    hook fires exactly once — not on every subsequent failed cycle and
+    not on a manual pause."""
+    calls = []
+    rm = RiskManager(db=db, max_consecutive_failures=3)
+    rm.on_auto_pause = lambda reason: calls.append(reason)
+
+    # Three failures → auto-pause transitions, hook fires once.
+    rm.record_cycle_result(success=False)
+    rm.record_cycle_result(success=False)
+    rm.record_cycle_result(success=False)
+    assert rm.is_paused()
+    assert len(calls) == 1
+    assert "consecutive failed cycles" in calls[0]
+
+    # A subsequent failed cycle should NOT re-fire (already paused).
+    # We have to manually call pause again with the same reason because
+    # record_cycle_result keeps incrementing; the dedup is in pause().
+    rm.pause("5 consecutive failed cycles (threshold 3)")
+    assert len(calls) == 1, "hook re-fired on already-paused pause()"
+
+
+def test_manual_pause_does_not_fire_admin_hook(db):
+    """A pause from the dashboard / CLI (non-auto reason) should not
+    fire the admin alert — it's not an incident."""
+    calls = []
+    rm = RiskManager(db=db)
+    rm.on_auto_pause = lambda reason: calls.append(reason)
+
+    rm.pause("Manual pause from dashboard")
+
+    assert rm.is_paused()
+    assert calls == [], "hook fired for manual pause"

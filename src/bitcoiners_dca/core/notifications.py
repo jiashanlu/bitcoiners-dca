@@ -230,3 +230,57 @@ class Notifier:
             await asyncio.to_thread(_send_sync)
         except Exception as e:
             log.warning("email notify failed: %s", e)
+
+
+# === Admin ops alert — fires to the operator (Ben), NOT the customer ===
+#
+# Driven by two env vars set at the tenant / host level (not in customer
+# config.yaml). When unset, the function is a no-op — safe to call
+# unconditionally from anywhere in the bot.
+#
+# Why a module-level fire-and-forget function instead of a class:
+# the bot's user-facing Notifier is wired to the customer's TG_BOT_TOKEN
+# and chat_id. Admin alerts go to a DIFFERENT chat (Ben's) via a
+# DIFFERENT bot. Mixing the two channels would either spam the customer
+# with ops noise or hide the alert from Ben. Separate concerns,
+# separate code path.
+
+def send_admin_alert(text: str, *, tag: str = "ops") -> None:
+    """DM the operator's admin Telegram chat. Synchronous + fire-and-forget.
+
+    Reads `ADMIN_TG_BOT_TOKEN` and `ADMIN_TG_CHAT_ID` from env. If either
+    is unset, logs at debug and returns — caller does not need to gate.
+    The bot+chat are distinct from the customer's Telegram channel
+    (TG_BOT_TOKEN / NotificationsConfig.telegram.chat_id) so that ops
+    alerts go to Ben without surfacing to the customer.
+
+    Errors swallowed: notifications must NEVER break trade execution.
+    """
+    token = os.environ.get("ADMIN_TG_BOT_TOKEN")
+    chat_id = os.environ.get("ADMIN_TG_CHAT_ID")
+    if not token or not chat_id:
+        log.debug("admin alert skipped: ADMIN_TG_BOT_TOKEN/CHAT_ID unset")
+        return
+    # Prepend a TAG + tenant hint so Ben can triage at a glance across
+    # multiple tenants reporting to the same DM.
+    tenant_hint = os.environ.get("TENANT_ID") or os.environ.get("HOSTNAME") or "?"
+    msg = f"🚨 *{tag}* [{tenant_hint}]\n{text}"
+    try:
+        # httpx.Client (sync) — keeps this callable from non-async hooks
+        # like RiskManager.pause(). Short timeout; the bot keeps running
+        # even if Telegram is slow.
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": msg,
+                    "parse_mode": "Markdown",
+                    "disable_web_page_preview": True,
+                },
+            )
+            if resp.status_code >= 300:
+                log.warning("admin alert non-2xx: %s %s",
+                            resp.status_code, resp.text[:200])
+    except Exception as e:
+        log.warning("admin alert failed: %s", e)
