@@ -262,16 +262,22 @@ class PerExchangeAutoWithdraw(BaseModel):
 
 
 class AutoWithdrawConfig(BaseModel):
-    """Sweep BTC out of exchanges into self-custody.
+    """DEPRECATED — auto-withdraw is RETIRED from the product surface.
 
-    `exchanges` is the source of truth — one policy per exchange the user
-    holds. The legacy top-level `destination_address` + `threshold_btc` are
-    kept for backwards-compat reads of older config.yaml files; on save,
-    they're migrated into a default 'okx' entry by the dashboard.
+    Per `feedback-kill-auto-withdraw-until-lightning`: on-chain fees
+    wipe out the AED 49 customer's savings on small cycles. The
+    feature returns once Lightning lands as a Pro-tier feature.
+
+    DO NOT WIRE — these fields are kept ONLY so legacy config.yaml
+    files from before 2026-05 still parse cleanly. Don't add new
+    callers; don't surface in onboarding; don't reference in
+    marketing. Manual withdraw via /withdrawals/withdraw-now is the
+    only supported flow. Audit B-#11 2026-05-21.
     """
+    # Always False on prod. The daemon path that consumed this was
+    # ripped out in LAUNCH-1 (commit f38a1e0).
     enabled: bool = False
-    # Legacy single-destination fields. Kept for read-only back-compat;
-    # the per-exchange `exchanges` map is the new source of truth.
+    # Legacy single-destination fields. Read-only back-compat only.
     destination_address: Optional[str] = None
     threshold_btc: Decimal = Decimal("0.01")
 

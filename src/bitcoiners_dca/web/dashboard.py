@@ -986,14 +986,37 @@ def create_app(
     async def exchanges_page(request: Request):
         sec = _secrets()
         creds: dict[str, dict[str, str]] = {}
+        # Per-exchange source-of-credentials marker: "secrets" if any
+        # value came from SecretStore (dashboard-set), "env" if any
+        # required field fell through to an env var, "missing" if
+        # neither. Audit B-#13 2026-05-21 — previously the UI showed
+        # "(not set)" even when env vars were resolving the credentials
+        # at runtime, confusing customers about which set was active.
+        creds_source: dict[str, str] = {}
         if sec:
             for ex in ("okx", "binance", "bitoasis"):
                 stored = credentials_for(sec, ex)
-                # Display redacted
+                env_fallback_any = False
+                for field in (required_fields.get(ex) or []):
+                    if not stored.get(field) and os.environ.get(f"{ex.upper()}_{field.upper()}"):
+                        env_fallback_any = True
+                if any(stored.values()):
+                    creds_source[ex] = "secrets"
+                elif env_fallback_any:
+                    creds_source[ex] = "env"
+                else:
+                    creds_source[ex] = "missing"
+                # Display redacted — same iteration as before, but
+                # for required fields that are empty in SecretStore,
+                # surface "(env var)" if the matching env var IS set
+                # so customer can tell credentials are wired elsewhere.
                 creds[ex] = {
                     field: _redact(value)
                     for field, value in stored.items()
                 }
+                for field in (required_fields.get(ex) or []):
+                    if not creds[ex].get(field) and os.environ.get(f"{ex.upper()}_{field.upper()}"):
+                        creds[ex][field] = "(env var)"
         # Surface results of the "Test connection" button.
         test_ok = request.query_params.get("ok")
         test_err = request.query_params.get("err")
@@ -1021,6 +1044,7 @@ def create_app(
             request, active="exchanges", flash=flash,
             credentials=creds, secrets_available=sec is not None,
             required_fields=required_fields,
+            creds_source=creds_source,
             outbound_ip=outbound_ip,
         )))
 
@@ -1850,10 +1874,18 @@ def create_app(
         # Use the strategy's intended per-cycle amount for the check.
         decision = rm.evaluate(Decimal(str(cfg.strategy.amount_aed)))
         if not decision.allow:
-            return _redirect(
-                request,
-                f"/trades?error=Buy now blocked by risk caps: {'; '.join(decision.reasons)[:200]}",
+            # Store the rejection reason in DB meta (buy_now.last_error)
+            # so the dashboard surfaces it on next render. Previously
+            # the full reason was crammed into a URL querystring,
+            # which (a) shows up verbatim in access logs and (b) gets
+            # truncated/escaped poorly. Audit B-#14 2026-05-21.
+            from datetime import datetime as _dt_now
+            reason = "; ".join(decision.reasons)[:200]
+            _db().set_meta(
+                "buy_now.last_error",
+                f"{_dt_now.now(timezone.utc).isoformat()} :: risk-caps :: {reason}",
             )
+            return _redirect(request, "/trades?flash=buy_now_blocked")
         # CONCURRENCY GUARD: two clicks in quick succession would otherwise
         # fire two _buy_once cycles in parallel — doubling the customer's
         # spend. The status banner's buy-in-flight pill polls every 20s
