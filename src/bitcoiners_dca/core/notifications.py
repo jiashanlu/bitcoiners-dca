@@ -63,10 +63,27 @@ def _format_fee(order: Order) -> str:
 
 
 class Notifier:
-    def __init__(self, config: NotificationsConfig):
+    def __init__(
+        self,
+        config: NotificationsConfig,
+        *,
+        telegram_token_override: Optional[str] = None,
+    ) -> None:
+        """Constructor.
+
+        Pass `telegram_token_override` to skip both the SecretStore +
+        env lookup and use a literal token for this Notifier instance
+        only. Used by the dashboard's /settings/telegram-test endpoint
+        so it doesn't have to mutate process-wide os.environ during a
+        live request (which leaked across concurrent handlers — audit
+        B-#7 2026-05-21).
+        """
         self.config = config
+        self._token_override = telegram_token_override
 
     def _resolve_telegram_token(self) -> Optional[str]:
+        if self._token_override:
+            return self._token_override
         """Look up the Telegram bot token in this order:
 
           1. SecretStore — what the dashboard's `/settings` form writes.

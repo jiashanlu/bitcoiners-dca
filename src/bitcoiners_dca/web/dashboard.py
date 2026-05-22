@@ -1765,11 +1765,12 @@ def create_app(
         elif not chat_id:
             flash = {"kind": "err", "message": "No chat_id set. Add yours in the Telegram card and click Save first."}
         else:
-            # Build a notifier whose token resolution prefers SecretStore.
-            n = Notifier(cfg.notifications)
-            # The notifier reads from env, so monkey-patch the env for this call.
-            prev = os.environ.get("TG_BOT_TOKEN")
-            os.environ["TG_BOT_TOKEN"] = token
+            # Pass the candidate token directly via the Notifier
+            # override path — previously we mutated process-wide
+            # os.environ["TG_BOT_TOKEN"], which leaked the token to
+            # concurrent handlers running on the same process. Audit
+            # B-#7 2026-05-21.
+            n = Notifier(cfg.notifications, telegram_token_override=token)
             try:
                 await n._send_telegram(
                     "🧪 *bitcoiners-dca test*\n\nIf you see this, your bot token "
@@ -1778,11 +1779,6 @@ def create_app(
                 flash = {"kind": "ok", "message": f"Test message sent to chat {chat_id}. Check Telegram."}
             except Exception as e:
                 flash = {"kind": "err", "message": f"Test failed: {e}"}
-            finally:
-                if prev is None:
-                    os.environ.pop("TG_BOT_TOKEN", None)
-                else:
-                    os.environ["TG_BOT_TOKEN"] = prev
 
         return HTMLResponse(jinja.get_template("settings.html").render(_ctx(
             request, active="settings", flash=flash,
@@ -2178,6 +2174,26 @@ def _resolve_creds(
     return out
 
 
+# Exchange responses sometimes include the API key prefix or other
+# sensitive bytes in error strings (Binance 401, OKX signature
+# mismatches). _redact_exchange_error strips anything that looks like
+# a key/token before the message is surfaced in the dashboard.
+# Audit B-#15 2026-05-21.
+import re as _re_redact
+_REDACT_PATTERNS = [
+    _re_redact.compile(r"\b[A-Za-z0-9]{30,}\b"),     # API key / token shapes
+    _re_redact.compile(r"sk_(live|test)_[A-Za-z0-9]+"),
+    _re_redact.compile(r"price_[A-Za-z0-9]+"),
+    _re_redact.compile(r"(?i)x-(api|mbx|stripe)-?key:\s*\S+"),
+]
+
+def _redact_exchange_error(msg: str, limit: int = 200) -> str:
+    out = msg
+    for pat in _REDACT_PATTERNS:
+        out = pat.sub("[REDACTED]", out)
+    return out[:limit]
+
+
 async def _safe_get_balances(ex: Exchange) -> tuple[str, list[dict] | dict]:
     try:
         bals = await ex.get_balances()
@@ -2187,7 +2203,7 @@ async def _safe_get_balances(ex: Exchange) -> tuple[str, list[dict] | dict]:
             for b in bals
         ]
     except Exception as e:
-        return ex.name, {"error": str(e)[:200]}
+        return ex.name, {"error": _redact_exchange_error(str(e))}
 
 
 async def _safe_get_ticker(ex: Exchange, pair: str) -> tuple[str, dict]:
@@ -2198,7 +2214,7 @@ async def _safe_get_ticker(ex: Exchange, pair: str) -> tuple[str, dict]:
             "spread_pct": f"{float(t.spread_pct):.4f}",
         }
     except Exception as e:
-        return ex.name, {"error": str(e)[:200]}
+        return ex.name, {"error": _redact_exchange_error(str(e))}
 
 
 # === Module-level app for `uvicorn bitcoiners_dca.web.dashboard:app` ===

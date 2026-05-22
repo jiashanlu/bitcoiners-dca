@@ -8,7 +8,7 @@ authors = [{ name = "Ben", email = "ben@bitcoiners.ae" }]
 license = { text = "MIT" }
 
 dependencies = [
-  "ccxt>=4.4.0",              # Unified exchange API (OKX, Binance)
+  "ccxt>=4.4.0,<5",           # Unified exchange API (OKX, Binance). Upper bound: major version bumps have historically changed sign() behavior and the raw-encode allowlist, silently breaking Binance UAE Travel-Rule withdrawals. Audit B-#17 2026-05-21.
   "httpx>=0.27.0",            # For BitOasis custom adapter + general HTTP
   "PyYAML>=6.0",              # Config parsing
   "pydantic>=2.6",            # Config validation + data models
