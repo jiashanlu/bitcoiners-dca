@@ -1,8 +1,17 @@
 # Dockerfile non-root hardening plan (#150)
 
-Status: drafted 2026-05-15 — needs Ben review before merge.
+Status: **✅ IMPLEMENTED 2026-05-xx** (see current Dockerfile — verified
+audit 2026-05-21 / I-P3-1). Document retained as historical context for
+the design decisions. The current Dockerfile follows Approach A
+(entrypoint chown + gosu drop-priv) below.
 
-## Goal
+If you're touching this code, read the implementation in `Dockerfile`
++ `hosted/entrypoint.sh` first; the doc below is the historical plan
+that produced them, not the current source of truth.
+
+---
+
+## Goal (historical)
 
 Run the bitcoiners-dca bot container as a non-root user (defense-in-depth).
 If a dependency or exchange-adapter vulnerability is ever exploited, the
