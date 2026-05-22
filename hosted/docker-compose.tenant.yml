@@ -78,6 +78,12 @@ services:
       # Belt-and-suspenders on top of the ufw allow-list — if either layer
       # is misconfigured, requests fail closed.
       DCA_REQUIRE_CF_HEADER: "1"
+      # Per-tenant email gate (audit B-P1-6). The dashboard refuses
+      # any CF-Access-authenticated request where the email doesn't
+      # match this value — defence against a mis-scoped CF Access
+      # policy granting cross-tenant access. provision.sh substitutes
+      # ${TENANT_OWNER_EMAIL} at tenant-bootstrap time.
+      DCA_TENANT_OWNER_EMAIL: "${TENANT_OWNER_EMAIL}"
       # CSRF middleware whitelists these hosts as valid Origin/Referer
       # in addition to the tenant's own hostname. The bot dashboard is
       # iframed inside `app.bitcoiners.ae/dca/console/`, so legitimate

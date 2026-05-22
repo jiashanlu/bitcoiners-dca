@@ -213,7 +213,19 @@ class _CFGateMiddleware(BaseHTTPMiddleware):
     flag DCA_REQUIRE_CF_HEADER=1 is set (production hosted mode).
 
     Skips /healthz so the container healthcheck still works internally.
+
+    Per-tenant email gate (audit B-P1-6 2026-05-21):
+    Beyond requiring SOME CF-Access-authenticated email, also require
+    that email matches the tenant's configured owner. Without this,
+    a mis-scoped CF Access policy (allows any email, or allows the
+    wrong group) would let any authenticated user reach any tenant.
+
+    Configure via env var DCA_TENANT_OWNER_EMAIL on the tenant container.
+    The provisioner sets it at bootstrap. If absent, this check is
+    skipped (warns once) so non-hosted self-host installs aren't broken.
     """
+
+    _owner_email_logged_once = False
 
     async def dispatch(self, request, call_next):
         if request.url.path == "/healthz":
@@ -221,6 +233,32 @@ class _CFGateMiddleware(BaseHTTPMiddleware):
         if _require_cf_header() and not request.headers.get(CF_USER_HEADER):
             from starlette.responses import PlainTextResponse
             return PlainTextResponse("Unauthorized: missing proxy header", status_code=401)
+
+        # Per-tenant email check. Only enforce when both the CF header
+        # is present AND DCA_TENANT_OWNER_EMAIL is configured.
+        cf_email = request.headers.get(CF_USER_HEADER)
+        tenant_owner = os.environ.get("DCA_TENANT_OWNER_EMAIL", "").strip().lower()
+        if cf_email and tenant_owner:
+            if cf_email.strip().lower() != tenant_owner:
+                from starlette.responses import PlainTextResponse
+                logger.warning(
+                    "cross-tenant access attempt: CF-Access user %r != tenant owner %r",
+                    cf_email, tenant_owner,
+                )
+                return PlainTextResponse(
+                    "Forbidden: this dashboard belongs to a different account",
+                    status_code=403,
+                )
+        elif cf_email and not tenant_owner and not _CFGateMiddleware._owner_email_logged_once:
+            # First-time only — don't spam every request.
+            logger.warning(
+                "DCA_TENANT_OWNER_EMAIL not configured — per-tenant email "
+                "gate disabled. Self-hosted: ignore. Hosted: set this in "
+                "the tenant container env so a mis-scoped CF Access "
+                "policy can't grant cross-tenant access. Audit B-P1-6.",
+            )
+            _CFGateMiddleware._owner_email_logged_once = True
+
         return await call_next(request)
 
 
@@ -323,8 +361,19 @@ class _OriginCSRFMiddleware(BaseHTTPMiddleware):
                                f"host {self._host_of(referer)!r} not in {cf_allowed_hosts}"},
                     status_code=403,
                 )
-            # Neither Origin nor Referer — server-to-server style; the
-            # upstream proxy already validated the session.
+            # Neither Origin nor Referer — server-to-server style. The
+            # upstream proxy already validated the session, so we
+            # allow this through. Log it so we can SEE if anything
+            # legitimate hits this path in production; if the count
+            # stays at zero for a week, tighten to a 403. Audit B-P1-5
+            # 2026-05-21 — defense-in-depth gap noted but not tightened
+            # yet because some legacy HTMX server-side fetches may
+            # depend on this branch.
+            logger.warning(
+                "csrf: allowing request with CF-auth header but no Origin/Referer (path=%s method=%s ua=%r)",
+                request.url.path, request.method,
+                (request.headers.get("user-agent") or "")[:80],
+            )
             return await call_next(request)
 
         if origin:

@@ -182,6 +182,11 @@ export TENANT_ID="${tenant_id}"
 export TENANT_DATA_DIR="${tenant_dir}"
 export TENANT_DASH_PORT="${dash_port}"
 export IMAGE_TAG="${PROVISION_IMAGE_TAG}"
+# Audit B-P1-6 2026-05-21: the bot dashboard's CF gate refuses any
+# CF-Access-authenticated request where the email doesn't match this
+# value — defence against a mis-scoped CF Access policy granting
+# cross-tenant access.
+export TENANT_OWNER_EMAIL="${customer_email}"
 envsubst < "${script_dir}/hosted/docker-compose.tenant.yml" > "${tenant_dir}/docker-compose.yml"
 
 # Render nginx fragment IF the target dir exists. In the bitcoiners-app
