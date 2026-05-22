@@ -1858,13 +1858,37 @@ def create_app(
                 request,
                 f"/trades?error=Buy now blocked by risk caps: {'; '.join(decision.reasons)[:200]}",
             )
-        # Fire-and-forget — the cycle can take up to maker.timeout_seconds
-        # (default 10 min) when prefer_maker is on. Browsers + proxies give
-        # up at ~100s. We track progress in DB meta so the status banner
-        # (polls every 20s) can show "buy in flight" without keeping the
-        # request open.
+        # CONCURRENCY GUARD: two clicks in quick succession would otherwise
+        # fire two _buy_once cycles in parallel — doubling the customer's
+        # spend. The status banner's buy-in-flight pill polls every 20s
+        # but a determined-or-impatient click + slow ack window can fire
+        # both before the meta is set. We read-then-set atomically here:
+        # if a buy-now is already in flight (started_at non-empty AND
+        # less than INFLIGHT_TIMEOUT_SECS old) we return the user back
+        # with a flash. Audit P0 2026-05-21.
+        INFLIGHT_TIMEOUT_SECS = 15 * 60  # 15 min > maker timeout (10 min)
         cfg_path = state["config_path"]
         db = _db()
+        existing_started = (db.get_meta("buy_now.started_at") or "").strip()
+        if existing_started:
+            try:
+                from datetime import datetime as _dt
+                started_dt = _dt.fromisoformat(existing_started)
+                age = (_dt.now(timezone.utc) - started_dt).total_seconds()
+                if age < INFLIGHT_TIMEOUT_SECS:
+                    return _redirect(
+                        request,
+                        f"/trades?error=Buy already in flight ({int(age)}s ago) — wait for it to finish before triggering another",
+                    )
+                # Stale entry (>15 min): treat as orphaned and overwrite.
+                logger.warning(
+                    "buy-now: clearing stale in-flight marker from %s (%ds old)",
+                    existing_started, int(age),
+                )
+            except ValueError:
+                # Malformed ISO — treat as stale and overwrite below.
+                pass
+
         db.set_meta("buy_now.started_at", datetime.now(timezone.utc).isoformat())
         db.set_meta("buy_now.last_error", "")  # clear any stale error
 
