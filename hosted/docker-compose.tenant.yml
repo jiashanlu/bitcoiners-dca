@@ -30,10 +30,16 @@ services:
     # connection pools + httpx + asyncio). Phase 1 testing showed
     # reproducible OOM kills every ~75s (exitCode 137, "container oom"
     # in docker events — note Docker's State.OOMKilled flag is lossy and
-    # reports false even when the kernel oom-kills). Raised to 512MB.
-    # ~20 tenants per LXC still well within budget on a 16GB host.
-    mem_limit: 512m
-    memswap_limit: 512m
+    # reports false even when the kernel oom-kills). Raised to 512MB,
+    # then 1GB on 2026-05-24 after the HH:00 daemon-kill pattern was
+    # traced to memory pressure during cycle execution. At 512m, idle
+    # was ~78% (398/512); cycle peak (multi-hop router + place_limit_buy
+    # + ccxt clients for OKX/Binance/BitOasis) pushed past the cap and
+    # the kernel pressure-stall reaper killed the python worker thread.
+    # 1g gives ~3× headroom (~25% idle utilization). ~10 tenants per
+    # LXC still within budget on a 16GB host.
+    mem_limit: 1g
+    memswap_limit: 1g
     cpus: 0.5
     pids_limit: 200
     command: ["run", "--config", "/app/config/config.yaml"]
