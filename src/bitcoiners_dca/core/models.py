@@ -82,6 +82,26 @@ class Order(BaseModel):
     created_at: datetime
     filled_at: Optional[datetime] = None
 
+    @property
+    def effective_fee_quote(self) -> Decimal:
+        """Fee expressed in QUOTE currency, regardless of how the
+        exchange charged it.
+
+        OKX charges spot fees in the BASE asset for buys (e.g. fee in
+        BTC, not AED). The raw `fee_quote` field is then 0, which made
+        tax-CSV totals understate fees on every AED-pair cycle. This
+        property converts via `fee_base × price_filled_avg` when
+        needed, so callers get a single AED-denominated number.
+
+        Returns 0 when no fee info is available at all. Audit follow-up
+        from Ben's 2026-05-24 "why 0.6%?" question.
+        """
+        if self.fee_quote > 0:
+            return self.fee_quote
+        if self.fee_base > 0 and self.price_filled_avg and self.price_filled_avg > 0:
+            return self.fee_base * self.price_filled_avg
+        return Decimal(0)
+
 
 # === WITHDRAWALS ===
 

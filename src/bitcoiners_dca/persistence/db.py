@@ -128,6 +128,12 @@ class Database:
         self._conn.executescript(SCHEMA)
 
     def record_trade(self, order: Order) -> None:
+        # Persist the effective fee in QUOTE terms. OKX returns fees
+        # in BASE (BTC) for AED-quoted buys → raw fee_quote is 0 →
+        # tax CSV silently lost the fee on every cycle. effective_fee_quote
+        # converts via fee_base × price_filled_avg when needed so the
+        # column always carries an AED number. raw_json still has both
+        # fields for full fidelity. Audit follow-up 2026-05-24.
         self._conn.execute(
             """INSERT OR REPLACE INTO trades
                (timestamp, exchange, order_id, pair, side, amount_quote,
@@ -139,7 +145,7 @@ class Database:
                 str(order.amount_quote),
                 str(order.amount_base) if order.amount_base else None,
                 str(order.price_filled_avg) if order.price_filled_avg else None,
-                str(order.fee_quote),
+                str(order.effective_fee_quote),
                 order.status.value,
                 order.model_dump_json(),
             ),

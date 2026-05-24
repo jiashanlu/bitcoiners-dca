@@ -111,9 +111,20 @@ class RoutingDecision:
 class _ExchangeMarketData:
     exchange: Exchange
     tickers: dict[str, Ticker]               # pair -> ticker (failed pairs absent)
-    taker_pct: Decimal
+    taker_pct: Decimal                       # default / fallback fee (e.g. exchange's USDT-pair rate)
     balances: dict[str, Decimal]             # asset -> free balance (0 if absent)
     minimums: dict[str, OrderMinimum] = field(default_factory=dict)  # pair -> min
+    # Per-pair taker fee, populated for AED-quoted pairs where OKX
+    # charges substantially more (~0.6%) than its standard USDT-pair
+    # taker (~0.1%). Without this, the router systematically under-
+    # prices the AED leg of multi-hop routes and over-prefers direct.
+    # Audit follow-up 2026-05-24 from Ben's "why 0.6%?" question.
+    taker_pct_by_pair: dict[str, Decimal] = field(default_factory=dict)
+
+    def taker_for(self, pair: str) -> Decimal:
+        """Return the taker fee for a specific pair, falling back to
+        the exchange's default if no per-pair value was fetched."""
+        return self.taker_pct_by_pair.get(pair, self.taker_pct)
 
 
 # === The router. ===
@@ -303,28 +314,40 @@ class SmartRouter:
 
         async def for_one(ex: Exchange) -> _ExchangeMarketData:
             ticker_tasks = [ex.get_ticker(p) for p in pairs_to_try]
-            fee_task = ex.get_fee_schedule(pairs_to_try[0])
+            # Per-pair fee fetch. ccxt's load_markets returns per-pair
+            # maker/taker, so get_fee_schedule(pair) is cheap (cached).
+            # OKX charges ~6× more on AED-quoted pairs vs USDT pairs;
+            # without per-pair fees the router prices multi-hop routes
+            # incorrectly (audit 2026-05-24).
+            fee_tasks = [ex.get_fee_schedule(p) for p in pairs_to_try]
             balance_tasks = [ex.get_balance(c) for c in ccys_to_balance]
             min_tasks = [ex.get_order_minimum(p) for p in pairs_to_try]
             results = await asyncio.gather(
-                *ticker_tasks, fee_task, *balance_tasks, *min_tasks,
+                *ticker_tasks, *fee_tasks, *balance_tasks, *min_tasks,
                 return_exceptions=True,
             )
             n_pairs = len(pairs_to_try)
             n_bal = len(ccys_to_balance)
             tickers_raw = results[:n_pairs]
-            fees_raw = results[n_pairs]
-            balances_raw = results[n_pairs + 1 : n_pairs + 1 + n_bal]
-            mins_raw = results[n_pairs + 1 + n_bal :]
+            fees_raw_list = results[n_pairs : 2 * n_pairs]
+            balances_raw = results[2 * n_pairs : 2 * n_pairs + n_bal]
+            mins_raw = results[2 * n_pairs + n_bal :]
 
             tickers: dict[str, Ticker] = {}
             for p, t in zip(pairs_to_try, tickers_raw):
                 if not isinstance(t, Exception):
                     tickers[p] = t
 
-            taker = Decimal("0.005")  # conservative default
-            if not isinstance(fees_raw, Exception):
-                taker = fees_raw.taker_pct
+            # Per-pair fee map + a fallback default.
+            taker_pct_by_pair: dict[str, Decimal] = {}
+            default_taker = Decimal("0.005")  # conservative default
+            for p, f in zip(pairs_to_try, fees_raw_list):
+                if not isinstance(f, Exception):
+                    taker_pct_by_pair[p] = f.taker_pct
+            # Default = the direct pair's taker (preserves prior behaviour
+            # for callers that read `.taker_pct` directly).
+            if pairs_to_try[0] in taker_pct_by_pair:
+                default_taker = taker_pct_by_pair[pairs_to_try[0]]
 
             balances: dict[str, Decimal] = {}
             for c, b in zip(ccys_to_balance, balances_raw):
@@ -337,8 +360,9 @@ class SmartRouter:
                     minimums[p] = m
 
             return _ExchangeMarketData(
-                exchange=ex, tickers=tickers, taker_pct=taker,
+                exchange=ex, tickers=tickers, taker_pct=default_taker,
                 balances=balances, minimums=minimums,
+                taker_pct_by_pair=taker_pct_by_pair,
             )
 
         return await asyncio.gather(*[for_one(e) for e in exchanges])
@@ -379,7 +403,8 @@ class SmartRouter:
             if direct_pair in md.tickers:
                 hop = TradeHop(
                     exchange=md.exchange.name, pair=direct_pair, side="buy",
-                    price=md.tickers[direct_pair].ask, taker_pct=md.taker_pct,
+                    price=md.tickers[direct_pair].ask,
+                    taker_pct=md.taker_for(direct_pair),
                 )
                 route = TradeRoute(
                     hops=(hop,),
@@ -399,9 +424,9 @@ class SmartRouter:
                     if leg1 in md.tickers and leg2 in md.tickers:
                         hops = (
                             TradeHop(md.exchange.name, leg1, "buy",
-                                     md.tickers[leg1].ask, md.taker_pct),
+                                     md.tickers[leg1].ask, md.taker_for(leg1)),
                             TradeHop(md.exchange.name, leg2, "buy",
-                                     md.tickers[leg2].ask, md.taker_pct),
+                                     md.tickers[leg2].ask, md.taker_for(leg2)),
                         )
                         route = TradeRoute(
                             hops=hops,
@@ -435,7 +460,7 @@ class SmartRouter:
                             direct_pair_via_inter,
                             "buy",
                             md.tickers[direct_pair_via_inter].ask,
-                            md.taker_pct,
+                            md.taker_for(direct_pair_via_inter),
                         )
                         route = TradeRoute(
                             hops=(hop,),
@@ -487,11 +512,11 @@ class SmartRouter:
                             continue
                         hops = (
                             TradeHop(md.exchange.name, leg1, "buy",
-                                     md.tickers[leg1].ask, md.taker_pct),
+                                     md.tickers[leg1].ask, md.taker_for(leg1)),
                             TradeHop(md.exchange.name, leg2, "buy",
-                                     md.tickers[leg2].ask, md.taker_pct),
+                                     md.tickers[leg2].ask, md.taker_for(leg2)),
                             TradeHop(md.exchange.name, leg3, "buy",
-                                     md.tickers[leg3].ask, md.taker_pct),
+                                     md.tickers[leg3].ask, md.taker_for(leg3)),
                         )
                         route = TradeRoute(
                             hops=hops,
@@ -546,9 +571,9 @@ class SmartRouter:
                     )
                     hops = (
                         TradeHop(src.exchange.name, leg1, "buy",
-                                 src.tickers[leg1].ask, src.taker_pct),
+                                 src.tickers[leg1].ask, src.taker_for(leg1)),
                         TradeHop(dst.exchange.name, leg2, "buy",
-                                 dst.tickers[leg2].ask, dst.taker_pct),
+                                 dst.tickers[leg2].ask, dst.taker_for(leg2)),
                     )
                     route = TradeRoute(
                         hops=hops,
