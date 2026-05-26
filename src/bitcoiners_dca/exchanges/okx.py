@@ -97,8 +97,25 @@ class OKXExchange(Exchange):
     async def get_fee_schedule(self, pair: str = "BTC/AED") -> FeeSchedule:
         markets = await self._client.load_markets()
         market = markets.get(pair, {})
-        maker = market.get("maker", 0.001)
-        taker = market.get("taker", 0.0015)
+        maker = _to_decimal(market.get("maker", 0.001))
+        taker = _to_decimal(market.get("taker", 0.0015))
+        # ccxt's load_markets returns the account's standard spot-tier fees
+        # (typically 0.08% maker / 0.10% taker at L1) for every market. That
+        # is correct for stablecoin-quoted pairs but WRONG for OKX's AED-
+        # quoted fiat market, which has its own (much higher) fee schedule
+        # — ~0.40% maker, ~0.60% taker. Without this floor the smart
+        # router systematically under-prices AED-leg routes vs
+        # stablecoin-leg routes and biases toward AED-direct.
+        #
+        # Confirmed via live cycle data on the benbois prod tenant
+        # 2026-05-25: BTC/AED taker fill = 0.584% effective, BTC/AED
+        # passive limit fill = 0.400% effective.
+        #
+        # Use `max(...)` — never go BELOW ccxt's value, in case OKX ever
+        # surfaces the actual AED-tier fees through the markets endpoint.
+        if (pair.split("/")[1] if "/" in pair else "").upper() == "AED":
+            maker = max(maker, Decimal("0.0040"))
+            taker = max(taker, Decimal("0.0060"))
         # Withdrawal fee for BTC — fetch from currencies endpoint
         currencies = await self._client.fetch_currencies()
         btc = currencies.get("BTC", {})
@@ -109,8 +126,8 @@ class OKXExchange(Exchange):
         return FeeSchedule(
             exchange=self.name,
             pair=pair,
-            maker_pct=_to_decimal(maker),
-            taker_pct=_to_decimal(taker),
+            maker_pct=maker,
+            taker_pct=taker,
             withdrawal_fee_btc=withdraw_fee,
         )
 

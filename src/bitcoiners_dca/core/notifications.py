@@ -62,6 +62,55 @@ def _format_fee(order: Order) -> str:
     return "0 (no fee reported)"
 
 
+def _classify_execution(order: Order) -> str:
+    """Human-readable execution type — distinguishes maker vs taker.
+
+    Exchanges classify the FEE RATE based on whether the order crossed
+    the spread, NOT based on the order's ``type`` field. A "limit"
+    order can still pay the taker rate if its limit price was at-or-
+    above the best ask when placed (OKX treats it as an aggressive
+    limit). The reverse never happens — a market order always pays
+    taker. So:
+
+      - ``order.type == MARKET``         → always taker
+      - ``order.type == LIMIT`` + low %  → real maker (passive rest)
+      - ``order.type == LIMIT`` + high % → "aggressive limit" → taker
+
+    Threshold picks the gap between known maker/taker rates for the
+    pair's quote currency. AED-quoted pairs sit in a ~0.40/0.60 band on
+    OKX, stable-quoted sit in ~0.08/0.10. 0.50% and 0.09% are the
+    midpoints.
+    """
+    from bitcoiners_dca.core.models import OrderType
+    if order.type == OrderType.MARKET:
+        return "Taker (market)"
+    fee_q = order.effective_fee_quote
+    if not order.amount_quote or order.amount_quote == 0 or fee_q <= 0:
+        return "Limit (fee unknown)"
+    fee_pct = fee_q / order.amount_quote
+    quote = ""
+    if order.pair and "/" in order.pair:
+        quote = order.pair.split("/")[1].upper()
+    threshold = Decimal("0.005") if quote == "AED" else Decimal("0.0009")
+    if fee_pct < threshold:
+        return "Maker (limit, passive fill)"
+    return "Taker (limit crossed spread)"
+
+
+def _route_taker_fee_pct(route) -> Decimal:
+    """Cumulative taker-fee % of a route, compounded across hops.
+
+    A 2-hop route with 0.6% + 0.1% on each hop has an effective fee
+    of 1 - (1-0.006)(1-0.001) ≈ 0.7006%, not exactly the sum. The
+    difference is small but the compounding model matches what the
+    router uses in `effective_price`.
+    """
+    factor = Decimal(1)
+    for hop in route.hops:
+        factor *= (Decimal(1) + hop.taker_pct)
+    return (factor - Decimal(1)) * Decimal(100)
+
+
 class Notifier:
     def __init__(
         self,
@@ -164,6 +213,7 @@ class Notifier:
             msg += f"*Overlay:* {result.overlay_applied}\n"
         msg += (
             f"*Route:* {route_label or order.exchange}\n"
+            f"*Type:* {_classify_execution(order)}\n"
             f"*Bought:* {_fmt_dec(order.amount_base) if order.amount_base else '?'} BTC "
             f"@ AED {_fmt_dec(order.price_filled_avg, 2) if order.price_filled_avg else '?'}/BTC\n"
             f"*Fee:* {_format_fee(order)}\n"
@@ -177,9 +227,13 @@ class Notifier:
         if result.routing_decision and result.routing_decision.best_alt:
             premium = result.routing_decision.price_premium_vs_alt_pct()
             if premium > 0:
+                chosen_fee = _route_taker_fee_pct(result.routing_decision.chosen.route)
+                alt_fee = _route_taker_fee_pct(result.routing_decision.best_alt.route)
                 msg += (
                     f"\n\n💡 Saved {premium:.2f}% vs "
                     f"{result.routing_decision.best_alt.route.label}"
+                    f"\n_(est. fees taker: chosen "
+                    f"{_fmt_dec(chosen_fee, 2)}%, alt {_fmt_dec(alt_fee, 2)}%)_"
                 )
         if result.errors:
             msg += "\n\n⚠️ Non-fatal warnings:\n" + "\n".join(f"- {e}" for e in result.errors)
