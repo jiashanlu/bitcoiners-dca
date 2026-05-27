@@ -174,6 +174,14 @@ class DCAScheduler:
             )
         self._scheduler = AsyncIOScheduler()
         self._stop_event = asyncio.Event()
+        # True for the full duration of a DCA cycle. The 5-minute jobs
+        # (arbitrage / health / funding) check this and bail rather than
+        # call _reload_if_changed() — a rebuild closes the live exchange
+        # clients, and doing that mid-cycle crashes the in-flight request
+        # ("'NoneType' has no attribute 'getaddrinfo'" on ccxt/aiodns,
+        # "Cannot send a request, as the client has been closed" on httpx).
+        # Set synchronously at cycle entry so any later-firing job sees it.
+        self._cycle_in_progress = False
 
     def _historical_price_7d_ago(self) -> Optional[Decimal]:
         """Convenience for the legacy path. Reads from MarketDataProvider."""
@@ -237,6 +245,15 @@ class DCAScheduler:
     async def _run_dca_cycle(self) -> None:
         """One scheduled DCA cycle. Errors are caught + logged + notified
         so the scheduler keeps running."""
+        # Claim the cycle before the first await so concurrent 5-min jobs
+        # won't rebuild/close the exchange clients this cycle relies on.
+        self._cycle_in_progress = True
+        try:
+            await self._run_dca_cycle_inner()
+        finally:
+            self._cycle_in_progress = False
+
+    async def _run_dca_cycle_inner(self) -> None:
         await self._reload_if_changed()
 
         # Risk pre-check — paused state + daily/single-buy caps.
@@ -346,6 +363,8 @@ class DCAScheduler:
 
     async def _run_arbitrage_check(self) -> None:
         """Poll for arbitrage. Alerts only on net-positive opportunities."""
+        if self._cycle_in_progress:
+            return  # don't rebuild/close clients out from under a live DCA cycle
         await self._reload_if_changed()
         try:
             if len(self.exchanges) < 2:
@@ -360,6 +379,8 @@ class DCAScheduler:
             logger.exception("Arbitrage check failed: %s", e)
 
     async def _run_funding_check(self) -> None:
+        if self._cycle_in_progress:
+            return  # a cycle is mid-flight — defer to the next 5-min tick
         if not self.funding_monitor:
             return
         try:
@@ -421,6 +442,14 @@ class DCAScheduler:
         detect a stalled daemon ("last heartbeat > N minutes ago" → alert).
         """
         from datetime import datetime, timezone
+
+        # A DCA cycle is exercising the same exchange clients right now;
+        # skip this heartbeat rather than race the cycle. The 5-min cadence
+        # means the next tick still lands well inside any stale-daemon
+        # threshold, and a cycle that pins a client (maker wait_for_fill)
+        # would otherwise log a spurious "health check failed" alert.
+        if self._cycle_in_progress:
+            return
 
         for ex in self.exchanges:
             try:
