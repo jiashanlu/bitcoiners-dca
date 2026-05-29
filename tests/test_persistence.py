@@ -359,3 +359,40 @@ def test_record_cycle_is_atomic(tmp_db, monkeypatch):
     # Neither the cycle_log row nor the first trade should be present.
     assert tmp_db.cycle_count() == 0
     assert tmp_db.trade_count() == 0
+
+
+def test_record_cycle_persists_base_denominated_fee_as_quote(tmp_db):
+    """Regression: OKX bills the spot fee in BASE (BTC) on AED-quoted buys,
+    so the raw `fee_quote` is 0. The live scheduler path (record_cycle)
+    must store `effective_fee_quote` — fee_base × price — or the tax CSV
+    silently drops every OKX fee. (record_trade was fixed in the 2026-05-24
+    audit; this per-hop path was missed until 2026-05-29.)
+    """
+    from bitcoiners_dca.core.strategy import ExecutionResult
+
+    btc_fee = Decimal("0.0000042")        # OKX fee charged in BTC
+    price = Decimal("357142")             # AED per BTC
+    okx_order = Order(
+        exchange="okx", order_id="okx-base-fee", pair="BTC/AED",
+        side=OrderSide.BUY, type=OrderType.MARKET,
+        amount_quote=Decimal("500"), amount_base=Decimal("0.0014"),
+        price_filled_avg=price,
+        fee_quote=Decimal(0), fee_base=btc_fee,   # the OKX shape
+        status=OrderStatus.FILLED,
+        created_at=datetime.now(timezone.utc),
+        filled_at=datetime.now(timezone.utc),
+    )
+    result = ExecutionResult(
+        timestamp=datetime.now(timezone.utc),
+        intended_amount_aed=Decimal("500"),
+        overlay_applied=None,
+        routing_decision=None,
+        orders=[okx_order],
+    )
+
+    tmp_db.record_cycle(result)
+
+    stored = tmp_db._conn.execute(
+        "SELECT fee_quote FROM trades WHERE order_id = ?", ("okx-base-fee",)
+    ).fetchone()
+    assert Decimal(stored["fee_quote"]) == btc_fee * price  # ~1.5 AED, not 0

@@ -252,7 +252,13 @@ class Database:
                         str(o.amount_quote),
                         str(o.amount_base) if o.amount_base else None,
                         str(o.price_filled_avg) if o.price_filled_avg else None,
-                        str(o.fee_quote),
+                        # effective_fee_quote, not raw fee_quote: OKX bills the
+                        # fee in BASE (BTC) on AED buys, so the raw column is 0
+                        # and the tax CSV silently dropped every OKX fee. This
+                        # is the LIVE scheduler path (record_cycle persists each
+                        # hop) — record_trade above was fixed in the 2026-05-24
+                        # audit but this path was missed. Audit follow-up 2026-05-29.
+                        str(o.effective_fee_quote),
                         o.status.value,
                         o.model_dump_json(),
                     ),

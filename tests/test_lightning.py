@@ -76,9 +76,12 @@ class TestOkxResolveChain:
         with pytest.raises(WithdrawalDeniedError, match="BOLT11"):
             OKXExchange._resolve_chain("lnurl1dp68", "lightning")
 
-    def test_rejects_lightning_address(self):
-        with pytest.raises(WithdrawalDeniedError, match="BOLT11"):
-            OKXExchange._resolve_chain("ben@walletofsatoshi.com", "lightning")
+    def test_accepts_lightning_address(self):
+        # LUD-16 Lightning Addresses (you@host) are a supported OKX
+        # withdrawal target — resolve to the lightning chain, don't reject.
+        chain, net = OKXExchange._resolve_chain("ben@walletofsatoshi.com", "lightning")
+        assert chain == OKX_CHAIN_LIGHTNING
+        assert net == "lightning"
 
     def test_rejects_mismatched_address_for_onchain(self):
         with pytest.raises(WithdrawalDeniedError, match="not on-chain"):
