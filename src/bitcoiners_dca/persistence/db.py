@@ -332,6 +332,53 @@ class Database:
         )
         self._conn.commit()
 
+    # Cross-process cycle lock (audit 2026-06-02 #12). The scheduler daemon
+    # and the dashboard Buy-Now run as SEPARATE processes on the same SQLite
+    # DB; the daemon's in-process `_cycle_in_progress` flag and the buy-now's
+    # `started_at` guard don't cross the boundary, so both could read the
+    # same daily_spend in a cycle's fill window and each proceed, overspending
+    # max_daily_aed by up to one cycle. This advisory lock serialises them.
+    CYCLE_LOCK_META_KEY = "cycle_lock_at"
+
+    def try_acquire_cycle_lock(self, ttl_seconds: int = 900) -> bool:
+        """Acquire the cross-process cycle lock. Only one DCA cycle (cron or
+        Buy-Now) may hold it at a time. Self-expires after ttl_seconds so a
+        crashed cycle can't wedge it (default 900s > the 600s maker timeout).
+
+        Returns True if acquired — caller MUST call release_cycle_lock() when
+        the cycle finishes (use try/finally). False if another cycle holds it.
+        """
+        now = datetime.now(timezone.utc)
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._conn.execute(
+                "SELECT value FROM meta WHERE key = ?", (self.CYCLE_LOCK_META_KEY,)
+            ).fetchone()
+            held = (row["value"] if row else "") or ""
+            if held:
+                try:
+                    age = (now - datetime.fromisoformat(held)).total_seconds()
+                except ValueError:
+                    age = ttl_seconds + 1  # unparseable → treat as stale
+                if age < ttl_seconds:
+                    self._conn.execute("ROLLBACK")
+                    return False
+            self._conn.execute(
+                "INSERT INTO meta (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+                "updated_at = excluded.updated_at",
+                (self.CYCLE_LOCK_META_KEY, now.isoformat(), now.isoformat()),
+            )
+            self._conn.execute("COMMIT")
+            return True
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+
+    def release_cycle_lock(self) -> None:
+        """Release the cross-process cycle lock (idempotent)."""
+        self.set_meta(self.CYCLE_LOCK_META_KEY, "")
+
     def _sum_decimal(self, column: str, where: str, params: tuple = ()) -> Decimal:
         """Sum a money column EXACTLY with Decimal.
 

@@ -1966,6 +1966,20 @@ def create_app(
                 # Malformed ISO — treat as stale and overwrite below.
                 pass
 
+        # CROSS-PROCESS lock: the scheduler daemon runs in a SEPARATE process
+        # on the same DB. If it's mid-cycle, a Buy-Now here would race it on
+        # the shared daily-cap read and could overspend by a cycle (audit
+        # 2026-06-02 #12). Acquire the shared lock now; released in the bg
+        # task's finally. Self-expires after the TTL if this process dies.
+        if not db.try_acquire_cycle_lock():
+            from datetime import datetime as _dt_now2
+            db.set_meta(
+                "buy_now.last_error",
+                f"{_dt_now2.now(timezone.utc).isoformat()} :: risk-caps :: "
+                f"a scheduled cycle is currently running — try again shortly",
+            )
+            return _redirect(request, "/trades?flash=buy_now_blocked")
+
         db.set_meta("buy_now.started_at", datetime.now(timezone.utc).isoformat())
         db.set_meta("buy_now.last_error", "")  # clear any stale error
 
@@ -1982,6 +1996,7 @@ def create_app(
                 )
             finally:
                 _db().set_meta("buy_now.started_at", "")
+                _db().release_cycle_lock()
 
         _spawn_bg(_run_buy_once_and_log())
 

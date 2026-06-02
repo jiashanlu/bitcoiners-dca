@@ -249,7 +249,19 @@ class DCAScheduler:
         # won't rebuild/close the exchange clients this cycle relies on.
         self._cycle_in_progress = True
         try:
-            await self._run_dca_cycle_inner()
+            # Cross-process cycle lock: if the dashboard Buy-Now (separate
+            # process) is mid-cycle, skip this scheduled tick rather than
+            # race it on the shared daily-cap read (audit 2026-06-02 #12).
+            if not self.db.try_acquire_cycle_lock():
+                logger.info(
+                    "DCA cycle skipped — another cycle (e.g. dashboard "
+                    "Buy-Now) holds the cross-process lock"
+                )
+                return
+            try:
+                await self._run_dca_cycle_inner()
+            finally:
+                self.db.release_cycle_lock()
         finally:
             self._cycle_in_progress = False
 
