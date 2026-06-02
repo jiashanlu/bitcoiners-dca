@@ -62,7 +62,16 @@ class TradeHop:
         return self.base_ccy if self.side == "buy" else self.quote_ccy
 
     def expected_output(self, input_amount: Decimal) -> Decimal:
-        """How much of `output_ccy` we expect to receive after taker fee."""
+        """How much of `output_ccy` we expect to receive after taker fee.
+
+        Note: the buy formula folds the fee into the price (`× (1 + taker)`),
+        modelling a fee charged on the QUOTE. Exchanges that bill the fee in
+        the BASE asset (OKX on AED buys) differ by ~taker² (≈0.0036% at 0.6%)
+        — immaterial here because (a) this is used only for RANKING, where
+        every venue uses the same convention, and (b) recorded fills use the
+        real exchange fee via Order.effective_fee_quote, not this estimate.
+        Intentional approximation, not a bug (audit 2026-06-02 P3).
+        """
         if self.side == "buy":
             return input_amount / (self.price * (Decimal(1) + self.taker_pct))
         return input_amount * self.price * (Decimal(1) - self.taker_pct)

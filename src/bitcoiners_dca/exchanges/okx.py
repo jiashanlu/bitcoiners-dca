@@ -116,13 +116,24 @@ class OKXExchange(Exchange):
         if (pair.split("/")[1] if "/" in pair else "").upper() == "AED":
             maker = max(maker, Decimal("0.0040"))
             taker = max(taker, Decimal("0.0060"))
-        # Withdrawal fee for BTC — fetch from currencies endpoint
+        # Withdrawal fee for BTC — fetch from currencies endpoint.
         currencies = await self._client.fetch_currencies()
         btc = currencies.get("BTC", {})
         networks = btc.get("networks", {})
-        # Prefer Lightning if available (much cheaper); fall back to BTC mainnet
-        btc_network = networks.get("Bitcoin", {}) or networks.get("BTC", {})
-        withdraw_fee = _to_decimal(btc_network.get("fee", 0.0002))
+        # Prefer the Lightning network's fee when OKX exposes it (near-zero),
+        # else fall back to BTC mainnet. The old code claimed to prefer
+        # Lightning in a comment but only ever read the mainnet fee, so the
+        # schedule overstated Lightning withdrawal cost (audit 2026-06-02 P3).
+        ln_network = (
+            networks.get("Lightning", {})
+            or networks.get("LN", {})
+            or networks.get("BTC-Lightning", {})
+        )
+        if ln_network and ln_network.get("fee") is not None:
+            withdraw_fee = _to_decimal(ln_network.get("fee"))
+        else:
+            btc_network = networks.get("Bitcoin", {}) or networks.get("BTC", {})
+            withdraw_fee = _to_decimal(btc_network.get("fee", 0.0002))
         return FeeSchedule(
             exchange=self.name,
             pair=pair,
@@ -218,7 +229,13 @@ class OKXExchange(Exchange):
                 amount_quote=quote_amount,
                 amount_base=fake_base,
                 price_filled_avg=ticker.ask,
-                fee_quote=quote_amount * Decimal("0.0015"),
+                # AED pairs carry OKX's ~0.6% taker, not the 0.15% USDT-pair
+                # rate — hardcoding 0.0015 understated the dry-run/preview AED
+                # fee ~4x (audit 2026-06-02 P3).
+                fee_quote=quote_amount * (
+                    Decimal("0.006") if pair.upper().endswith("/AED")
+                    else Decimal("0.0015")
+                ),
                 status=OrderStatus.FILLED,
                 created_at=datetime.now(timezone.utc),
                 filled_at=datetime.now(timezone.utc),
@@ -306,7 +323,10 @@ class OKXExchange(Exchange):
                 pair=pair, side=OrderSide.BUY, type=OrderType.LIMIT,
                 amount_quote=quote_amount, amount_base=base,
                 price_filled_avg=limit_price,
-                fee_quote=quote_amount * Decimal("0.001"),  # maker fee
+                fee_quote=quote_amount * (
+                    Decimal("0.004") if pair.upper().endswith("/AED")
+                    else Decimal("0.001")
+                ),  # maker fee — AED tier is ~0.4%, not 0.1% (audit P3)
                 status=OrderStatus.FILLED,
                 created_at=now, filled_at=now,
             )

@@ -14,6 +14,7 @@ failure, dry-run-aware, structured errors, async context manager for cleanup.
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -289,6 +290,16 @@ class BitOasisExchange(Exchange):
             raise ExchangeError(f"BitOasis ticker ask is zero for {pair}")
         base_amount = (quote_amount / ticker.ask).quantize(Decimal("0.00000001"))
 
+        # Reject sub-minimum orders up front with a clear error instead of a
+        # cryptic BitOasis API rejection. Only enforce for BTC-base pairs —
+        # BITOASIS_BTC_MIN_BASE is BTC-denominated (audit 2026-06-02 P3).
+        if pair.upper().startswith("BTC/") and base_amount < BITOASIS_BTC_MIN_BASE:
+            raise ExchangeError(
+                f"BitOasis order {base_amount} BTC is below the {BITOASIS_BTC_MIN_BASE} "
+                f"BTC minimum (cycle {quote_amount} {pair.split('/')[-1]} too small "
+                f"at ask {ticker.ask})"
+            )
+
         bo = _to_bitoasis_pair(pair)
         body = {
             "pair": bo,
@@ -374,11 +385,21 @@ class BitOasisExchange(Exchange):
         maker_fallback orders locking up AED across cycles.
 
         Caveat vs OKX/Binance: BitOasis's API has no clientOrderId
-        concept, so we can't filter "bot orders only" — this cancels
-        ALL open orders for the pair on the account. Users running the
-        bot alongside manual BitOasis orders should be aware. Single-
-        purpose accounts (the recommended setup) see no impact.
+        concept, so we can't filter "bot orders only" — this would cancel
+        ALL open orders for the pair on the account, including a user's
+        manual limit (e.g. a take-profit). To avoid silently killing those,
+        the destructive sweep is OFF by default and only runs when the
+        operator sets DCA_BITOASIS_SWEEP_ALL=1 (single-purpose accounts).
+        Audit 2026-06-02 P2.
         """
+        if os.environ.get("DCA_BITOASIS_SWEEP_ALL", "").strip().lower() not in (
+            "1", "true", "yes"
+        ):
+            logger.debug(
+                "BitOasis sweep skipped for %s — DCA_BITOASIS_SWEEP_ALL not set "
+                "(it would cancel ALL open orders, incl. manual ones)", pair,
+            )
+            return 0
         bo = _to_bitoasis_pair(pair)
         try:
             data = await self._request(

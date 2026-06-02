@@ -277,7 +277,9 @@ def test_uae_tax_csv_multi_hop_summary_math(tmp_db, tmp_path):
 
     # Multi-hop leg 2: 270 USDT → 0.0026 BTC. Counts toward "Total BTC
     # acquired", but NOT toward "Total AED spent" (its amount_quote is
-    # in USDT, not AED). Fee is USDT — must not enter AED fee total.
+    # in USDT, not AED). Fee is USDT — converted to AED at the weighted
+    # USDT/AED rate (1000/270) for the fee total: 0.27 * 1000/270 = 1.00 AED
+    # (audit 2026-06-02 P2 — previously dropped entirely).
     tmp_db.record_trade(Order(
         exchange="binance", order_id="mh-2", pair="BTC/USDT",
         side=OrderSide.BUY, type=OrderType.MARKET,
@@ -297,8 +299,10 @@ def test_uae_tax_csv_multi_hop_summary_math(tmp_db, tmp_path):
     # Total BTC acquired = 0.0014 (direct) + 0.0026 (mh-2) = 0.0040.
     # Wrong (old) math would yield 0.0014 + 270 + 0.0026 ≈ 270.0040.
     assert "Total BTC acquired,0.00400000" in contents
-    # Total AED fees = 0.75 (direct) + 2 (USDT/AED). USDT fee 0.27 excluded.
-    assert "Total fees (AED),2.75" in contents
+    # Total AED fees = 0.75 (direct) + 2 (USDT/AED) + 1.00 (BTC/USDT leg's
+    # 0.27 USDT fee converted at 1000/270). The BTC-purchase-leg fee is no
+    # longer dropped from the total (audit 2026-06-02 P2).
+    assert "Total fees (AED),3.75" in contents
 
 
 def test_record_cycle_is_atomic(tmp_db, monkeypatch):

@@ -64,6 +64,30 @@ def export_uae_tax_csv(
     total_btc = Decimal(0)
     total_fees = Decimal(0)
 
+    # Weighted <stable>/AED rate from the AED-quoted legs in this period, used
+    # to convert a multi-hop BTC/USDT leg's fee (denominated in USDT) into AED
+    # for the fee TOTAL — otherwise every multi-hop cycle under-reported fees
+    # by the whole BTC-purchase leg (audit 2026-06-02 P2). Same weighting as
+    # btc_cost_basis_aed. rate[ccy] = AED spent on ccy / units of ccy bought.
+    _stable_aed: dict[str, tuple[Decimal, Decimal]] = {}
+    for r in rows:
+        p = str(r["pair"] or "")
+        if r["side"] == "buy" and p.endswith("/AED"):
+            base = p.split("/")[0]
+            if base != "BTC":
+                aed = Decimal(str(r["amount_quote"] or 0))
+                units = Decimal(str(r["amount_base"] or 0))
+                acc_aed, acc_units = _stable_aed.get(base, (Decimal(0), Decimal(0)))
+                _stable_aed[base] = (acc_aed + aed, acc_units + units)
+
+    def _fee_to_aed(fee_val: Decimal, fee_ccy: str) -> Optional[Decimal]:
+        if fee_ccy == "AED":
+            return fee_val
+        acc = _stable_aed.get(fee_ccy)
+        if acc and acc[1] > 0:
+            return fee_val * (acc[0] / acc[1])
+        return None  # no rate available this period — can't convert
+
     with file_path.open("w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(
@@ -75,7 +99,8 @@ def export_uae_tax_csv(
                 "Amount (AED)",
                 "Amount (BTC)",
                 "Price (AED per BTC)",
-                "Fee (AED)",
+                "Fee",
+                "Fee Ccy",
                 "Order ID",
             ]
         )
@@ -86,6 +111,11 @@ def export_uae_tax_csv(
             amount_btc = Decimal(str(row["amount_base"] or 0))
             price = Decimal(str(row["price_avg"] or 0))
             fee = Decimal(str(row["fee_quote"] or 0))
+            # The stored fee is in the pair's QUOTE currency (effective_fee_quote):
+            # AED for a direct/USDT-AED leg, USDT for a BTC/USDT leg. Label it
+            # honestly rather than under a flat "Fee (AED)" header (audit P2).
+            pair = str(row["pair"] or "")
+            fee_ccy = pair.split("/")[1] if "/" in pair else "AED"
 
             writer.writerow(
                 [
@@ -96,7 +126,8 @@ def export_uae_tax_csv(
                     f"{amount_aed:.2f}",
                     f"{amount_btc:.8f}",
                     f"{price:.2f}",
-                    f"{fee:.2f}",
+                    f"{fee:.8f}".rstrip("0").rstrip(".") or "0",
+                    fee_ccy,
                     row["order_id"],
                 ]
             )
@@ -113,10 +144,15 @@ def export_uae_tax_csv(
                 # fees in. This matches Database.total_btc_bought /
                 # total_aed_spent semantics; see also btc_cost_basis_aed
                 # for the weighted-USDT-rate cost-basis calculation.
-                pair = str(row["pair"] or "")
                 if pair.endswith("/AED"):
                     total_aed += amount_aed
-                    total_fees += fee
+                # Sum fees on ALL buy legs, converting non-AED leg fees to AED
+                # at the weighted rate. Previously only /AED legs counted, so a
+                # multi-hop cycle's BTC/USDT fee (the real Bitcoin-purchase fee)
+                # was dropped from the total (audit 2026-06-02 P2).
+                fee_aed = _fee_to_aed(fee, fee_ccy)
+                if fee_aed is not None:
+                    total_fees += fee_aed
                 if pair.startswith("BTC/"):
                     total_btc += amount_btc
 

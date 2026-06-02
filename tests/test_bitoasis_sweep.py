@@ -40,7 +40,24 @@ class _FakeBitOasis(BitOasisExchange):
 
 
 @pytest.mark.asyncio
-async def test_sweep_cancels_every_open_order():
+async def test_sweep_default_off_cancels_nothing(monkeypatch):
+    """The destructive all-orders sweep is OFF by default — on a shared
+    BitOasis account it would cancel the user's own manual orders, since
+    BitOasis has no clientOrderId to filter bot orders (audit 2026-06-02 P2).
+    """
+    monkeypatch.delenv("DCA_BITOASIS_SWEEP_ALL", raising=False)
+    ex = _FakeBitOasis(
+        open_orders=[{"id": "order-1"}, {"id": "order-2"}],
+    )
+    n = await ex.cancel_all_open_orders("BTC/AED")
+    assert n == 0
+    assert ex._cancel_calls == []          # nothing cancelled
+    assert ex._request_calls == []         # didn't even fetch open orders
+
+
+@pytest.mark.asyncio
+async def test_sweep_cancels_every_open_order(monkeypatch):
+    monkeypatch.setenv("DCA_BITOASIS_SWEEP_ALL", "1")
     ex = _FakeBitOasis(
         open_orders=[
             {"id": "order-1", "side": "BUY", "type": "LIMIT"},
@@ -58,7 +75,8 @@ async def test_sweep_cancels_every_open_order():
 
 
 @pytest.mark.asyncio
-async def test_sweep_handles_empty_open_orders():
+async def test_sweep_handles_empty_open_orders(monkeypatch):
+    monkeypatch.setenv("DCA_BITOASIS_SWEEP_ALL", "1")
     ex = _FakeBitOasis(open_orders=[])
     n = await ex.cancel_all_open_orders("BTC/AED")
     assert n == 0
@@ -66,10 +84,11 @@ async def test_sweep_handles_empty_open_orders():
 
 
 @pytest.mark.asyncio
-async def test_sweep_continues_when_individual_cancel_fails():
+async def test_sweep_continues_when_individual_cancel_fails(monkeypatch):
     """If one order cancel raises, others should still be attempted.
     Pre-cycle sweep can't bail on the first error or one bad order
     poisons the rest of the cycle."""
+    monkeypatch.setenv("DCA_BITOASIS_SWEEP_ALL", "1")
     ex = _FakeBitOasis(
         open_orders=[
             {"id": "order-1"},

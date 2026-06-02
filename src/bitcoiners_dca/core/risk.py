@@ -113,15 +113,21 @@ class RiskManager:
         # ISO8601 of UTC equivalents — SQL compares as strings, fine.
         start_iso = local_midnight.astimezone(timezone.utc).isoformat()
         end_iso = next_local_midnight.astimezone(timezone.utc).isoformat()
+        # Sum exactly with Decimal — CAST(... AS REAL) coerces the TEXT-stored
+        # money to float, diverging from the cap arithmetic (audit P3).
         cur = self.db._conn.execute(
-            """SELECT COALESCE(SUM(CAST(amount_quote AS REAL)), 0)
+            """SELECT amount_quote
                FROM trades
                WHERE side='buy' AND status='filled'
                  AND pair LIKE '%/AED'
                  AND timestamp >= ? AND timestamp < ?""",
             (start_iso, end_iso),
         )
-        return Decimal(str(cur.fetchone()[0]))
+        total = Decimal(0)
+        for (val,) in cur.fetchall():
+            if val is not None and val != "":
+                total += Decimal(str(val))
+        return total
 
     # === STATE MUTATIONS ===
 

@@ -214,7 +214,12 @@ class Database:
         # in BEGIN/COMMIT means either everything lands or nothing does.
         # Note: connection is opened with isolation_level=None (autocommit)
         # so we explicitly drive the transaction with BEGIN here.
-        self._conn.execute("BEGIN")
+        # BEGIN IMMEDIATE takes the write lock at statement 1 rather than
+        # lazily on first write, so a concurrent writer (FastAPI threadpool
+        # sharing this connection) can't interleave between the cycle_log
+        # insert and the per-hop trade inserts and break cycle atomicity
+        # (audit 2026-06-02 P3).
+        self._conn.execute("BEGIN IMMEDIATE")
         try:
             self._conn.execute(
                 """INSERT INTO cycle_log
@@ -327,29 +332,43 @@ class Database:
         )
         self._conn.commit()
 
+    def _sum_decimal(self, column: str, where: str, params: tuple = ()) -> Decimal:
+        """Sum a money column EXACTLY with Decimal.
+
+        Money is stored as TEXT (str(Decimal)). Summing via SQLite's
+        `CAST(... AS REAL)` coerces to float and reintroduces the binary
+        rounding error Decimal exists to avoid, diverging from the exact-
+        Decimal tax CSV (audit 2026-06-02 P3). `column`/`where` are static,
+        code-controlled strings — never user input.
+        """
+        cur = self._conn.execute(
+            f"SELECT {column} FROM trades WHERE {where}", params
+        )
+        total = Decimal(0)
+        for (val,) in cur.fetchall():
+            if val is not None and val != "":
+                total += Decimal(str(val))
+        return total
+
     def total_btc_bought(self) -> Decimal:
         # Only count BTC-receiving trades. Multi-hop AED→USDT→BTC routes
         # persist two rows: USDT/AED (amount_base = USDT) and BTC/USDT
         # (amount_base = BTC). Summing both would treat USDT amounts as
         # BTC and produce nonsense totals (1003 "BTC" from 12 cycles).
-        cur = self._conn.execute(
-            "SELECT COALESCE(SUM(CAST(amount_base AS REAL)), 0) "
-            "FROM trades WHERE side='buy' AND status='filled' "
-            "AND pair LIKE 'BTC/%'"
+        return self._sum_decimal(
+            "amount_base",
+            "side='buy' AND status='filled' AND pair LIKE 'BTC/%'",
         )
-        return Decimal(str(cur.fetchone()[0]))
 
     def total_aed_spent(self) -> Decimal:
         # Only count the AED-spending leg of each cycle: either a direct
         # BTC/AED trade or the USDT/AED hop of a multi-hop route. Without
         # this filter, two-hop cycles double-count (AED spent on USDT,
         # then USDT spent on BTC — both denominated and summed).
-        cur = self._conn.execute(
-            "SELECT COALESCE(SUM(CAST(amount_quote AS REAL)), 0) "
-            "FROM trades WHERE side='buy' AND status='filled' "
-            "AND pair LIKE '%/AED'"
+        return self._sum_decimal(
+            "amount_quote",
+            "side='buy' AND status='filled' AND pair LIKE '%/AED'",
         )
-        return Decimal(str(cur.fetchone()[0]))
 
     def btc_cost_basis_aed(self) -> Decimal:
         """AED cost basis of the BTC the bot has acquired.
@@ -385,32 +404,22 @@ class Database:
         Returns 0 if no BTC has been bought yet.
         """
         # Direct BTC/AED buys.
-        cur = self._conn.execute(
-            "SELECT COALESCE(SUM(CAST(amount_quote AS REAL)), 0) "
-            "FROM trades WHERE side='buy' AND status='filled' "
-            "AND pair = 'BTC/AED'"
+        direct_aed = self._sum_decimal(
+            "amount_quote", "side='buy' AND status='filled' AND pair = 'BTC/AED'"
         )
-        direct_aed = Decimal(str(cur.fetchone()[0]))
 
         # Bot's USDT/AED pool.
-        cur = self._conn.execute(
-            "SELECT "
-            "  COALESCE(SUM(CAST(amount_quote AS REAL)), 0) AS aed_spent, "
-            "  COALESCE(SUM(CAST(amount_base AS REAL)), 0)  AS usdt_bought "
-            "FROM trades WHERE side='buy' AND status='filled' "
-            "AND pair='USDT/AED'"
+        usdt_aed_spent = self._sum_decimal(
+            "amount_quote", "side='buy' AND status='filled' AND pair='USDT/AED'"
         )
-        row = cur.fetchone()
-        usdt_aed_spent = Decimal(str(row[0]))
-        usdt_bought    = Decimal(str(row[1]))
+        usdt_bought = self._sum_decimal(
+            "amount_base", "side='buy' AND status='filled' AND pair='USDT/AED'"
+        )
 
         # USDT consumed buying BTC.
-        cur = self._conn.execute(
-            "SELECT COALESCE(SUM(CAST(amount_quote AS REAL)), 0) "
-            "FROM trades WHERE side='buy' AND status='filled' "
-            "AND pair='BTC/USDT'"
+        usdt_spent_on_btc = self._sum_decimal(
+            "amount_quote", "side='buy' AND status='filled' AND pair='BTC/USDT'"
         )
-        usdt_spent_on_btc = Decimal(str(cur.fetchone()[0]))
 
         if usdt_bought > 0 and usdt_spent_on_btc > 0:
             weighted_rate = usdt_aed_spent / usdt_bought

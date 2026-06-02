@@ -95,10 +95,14 @@ class Order(BaseModel):
 
         Returns 0 when no fee info is available at all. Audit follow-up
         from Ben's 2026-05-24 "why 0.6%?" question.
+
+        Uses `!= 0` (not `> 0`) so a negative maker REBATE is preserved as a
+        negative AED credit rather than silently dropped to 0, which would
+        slightly overstate cost basis (audit 2026-06-02 P3).
         """
-        if self.fee_quote > 0:
+        if self.fee_quote != 0:
             return self.fee_quote
-        if self.fee_base > 0 and self.price_filled_avg and self.price_filled_avg > 0:
+        if self.fee_base != 0 and self.price_filled_avg and self.price_filled_avg > 0:
             return self.fee_base * self.price_filled_avg
         return Decimal(0)
 
