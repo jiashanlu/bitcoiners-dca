@@ -37,7 +37,7 @@ from bitcoiners_dca.core.models import (
 )
 from bitcoiners_dca.exchanges.base import (
     Exchange, ExchangeError, InsufficientBalanceError, WithdrawalDeniedError,
-    make_bot_client_order_id,
+    make_bot_client_order_id, resolve_partial_status,
     split_fee_by_currency as _split_fee_by_currency,
 )
 
@@ -592,6 +592,11 @@ class OKXExchange(Exchange):
             "cancelled": OrderStatus.CANCELLED,
         }
         fee_base, fee_quote = _split_fee_by_currency(raw.get("fee"), pair)
+        status = status_map.get(raw.get("status", "open"), OrderStatus.PENDING)
+        # A resting limit with filled>0 is a PARTIAL, not PENDING — without
+        # this the maker fallback re-bought the full amount on top of the
+        # partial fill (audit 2026-06-02 P0).
+        status = resolve_partial_status(status, raw.get("filled"), raw.get("amount"))
         return Order(
             exchange=self.name,
             order_id=str(raw.get("id") or ""),
@@ -603,7 +608,7 @@ class OKXExchange(Exchange):
             price_filled_avg=_to_decimal(raw.get("average") or raw.get("price")),
             fee_base=fee_base,
             fee_quote=fee_quote,
-            status=status_map.get(raw.get("status", "open"), OrderStatus.PENDING),
+            status=status,
             created_at=datetime.fromtimestamp(raw.get("timestamp", 0) / 1000, tz=timezone.utc) if raw.get("timestamp") else datetime.now(timezone.utc),
             filled_at=datetime.now(timezone.utc) if raw.get("status") == "closed" else None,
         )

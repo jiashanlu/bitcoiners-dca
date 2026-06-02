@@ -33,6 +33,7 @@ class MakerStubExchange(Exchange):
         bid: str = "299000",
         balance_aed: str = "10000",
         limit_behavior: str = "fill",
+        gap_fill: str | None = None,
     ):
         self.name = name
         self.dry_run = False
@@ -40,6 +41,12 @@ class MakerStubExchange(Exchange):
         self._bid = Decimal(bid)
         self._balance = Decimal(balance_aed)
         self._limit_behavior = limit_behavior
+        # gap_fill simulates the prod race: get_order keeps reporting the
+        # order as PENDING (unfilled) right up to timeout, but the limit
+        # actually (fully | partially) fills in the window before the cancel
+        # lands, so cancel_order — which returns the authoritative state — is
+        # the FIRST place the fill is visible. "full" | "partial" | None.
+        self._gap_fill = gap_fill
         self._orders: dict[str, Order] = {}
         self._counter = 0
         self.market_buys: list[tuple[str, Decimal]] = []
@@ -113,6 +120,23 @@ class MakerStubExchange(Exchange):
         existing = self._orders.get(order_id)
         if not existing:
             return None
+        if self._gap_fill and existing.status == OrderStatus.PENDING:
+            # The limit filled in the cancel gap — cancel_order surfaces the
+            # real state (mirrors ccxt fetch_order after a cancel-that-raced).
+            full_base = existing.amount_quote / self._ask
+            if self._gap_fill == "full":
+                return existing.model_copy(update={
+                    "status": OrderStatus.FILLED,
+                    "amount_base": full_base,
+                    "price_filled_avg": self._ask,
+                    "filled_at": datetime.now(timezone.utc),
+                })
+            if self._gap_fill == "partial":
+                return existing.model_copy(update={
+                    "status": OrderStatus.CANCELLED,
+                    "amount_base": full_base / Decimal(2),
+                    "price_filled_avg": self._ask,
+                })
         # Return a NEW Order representing the cancellation rather than
         # mutating the stored one. Real adapters do the same — the
         # original placed-order object stays as a record. The strategy
@@ -232,3 +256,47 @@ async def test_maker_fallback_partial_keeps_partial_no_market_topup():
     )
     assert result.order is not None
     assert result.order.status == OrderStatus.PARTIAL
+
+
+@pytest.mark.asyncio
+async def test_maker_fallback_no_double_buy_when_limit_fills_during_cancel():
+    """P1 cancel/fill race (audit 2026-06-02): the poll snapshot says PENDING
+    right up to timeout, but the limit fully fills in the gap before the
+    cancel lands. The bot must use that fill and NOT also market-buy — the
+    old code re-bought the full amount, doubling the AED spend.
+    """
+    ex = MakerStubExchange("okx", limit_behavior="expire", gap_fill="full")
+    strategy = DCAStrategy(_cfg("maker_fallback", timeout=1), SmartRouter())
+    result = await strategy.execute([ex])
+
+    assert ex.limit_buys
+    assert ex.cancels
+    assert ex.market_buys == [], (
+        "maker_fallback market-bought on top of a limit that filled during "
+        "the cancel window — full double-spend"
+    )
+    assert result.order is not None
+    assert result.order.status == OrderStatus.FILLED
+    assert result.order.type == OrderType.LIMIT
+
+
+@pytest.mark.asyncio
+async def test_maker_fallback_no_double_buy_when_partial_only_seen_at_cancel():
+    """P0 partial double-buy (audit 2026-06-02): get_order reports PENDING
+    (filled 0) until timeout, but the order partially filled — visible only
+    in the authoritative cancel result. The bot must keep the partial and NOT
+    market-buy the full amount on top of the already-bought portion.
+    """
+    ex = MakerStubExchange("okx", limit_behavior="expire", gap_fill="partial")
+    strategy = DCAStrategy(_cfg("maker_fallback", timeout=1), SmartRouter())
+    result = await strategy.execute([ex])
+
+    assert ex.limit_buys
+    assert ex.cancels
+    assert ex.market_buys == [], (
+        "maker_fallback re-bought the full amount on top of a partial fill — "
+        "~1.6x over-spend (the live P0)"
+    )
+    assert result.order is not None
+    assert result.order.status == OrderStatus.PARTIAL
+    assert result.order.amount_base > 0

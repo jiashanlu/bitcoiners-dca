@@ -541,39 +541,66 @@ class DCAStrategy:
         if final.status == OrderStatus.FILLED:
             return final
 
-        # Snapshot the partial-fill state BEFORE the cancel call. Some
-        # exchange adapters return a brand-new Order on cancel, but stubs
-        # in tests (and a future adapter that gets clever) might mutate
-        # `final` in-place — turning a PARTIAL into a CANCELLED and
-        # losing the "we already bought some BTC" signal we need below.
-        was_partial = (
-            final.status == OrderStatus.PARTIAL
-            and final.amount_base
-            and final.amount_base > 0
-        )
-
-        # Not fully filled — cancel any remaining unfilled portion to free
-        # the locked quote. If `final` was PARTIAL, some quote was already
-        # spent on the filled portion and that fill stays on the book; only
-        # the unfilled remainder cancels.
+        # Not fully filled at timeout. Cancel the resting remainder, then
+        # decide off the AUTHORITATIVE post-cancel state — never the stale
+        # `final` poll snapshot. Between the last poll and the cancel landing
+        # the limit may have filled (partially or fully); deciding off `final`
+        # treated those as unfilled and re-bought the FULL amount on top,
+        # spending ~1.6-2x the intended AED (audit 2026-06-02: P0
+        # maker-fallback-partial-double-buy + P1 cancel-fill-race). Each
+        # adapter's cancel_order returns get_order() internally, so its result
+        # is the real final state; cancelling an already-filled order raises,
+        # in which case we re-fetch rather than assume it's safe to buy again.
+        settled = final
+        confirmed_dead = False
         try:
-            await ex.cancel_order(hop.pair, placed.order_id)
+            cancelled = await ex.cancel_order(hop.pair, placed.order_id)
+            if cancelled is not None:
+                settled = cancelled
+                confirmed_dead = True
         except Exception:
-            pass
+            try:
+                refetched = await ex.get_order(hop.pair, placed.order_id)
+                if refetched is not None:
+                    settled = refetched
+            except Exception:
+                pass
 
-        # Partial fill: keep what we got — discarding it would be a worse
-        # outcome (lost trade history, miscounted cost basis). The next
-        # cycle catches up naturally. Don't top-up via market_buy even in
-        # maker_fallback mode — that would put two orders behind one hop,
-        # which the rest of the route execution doesn't model.
-        if was_partial:
-            return final
+        filled_base = settled.amount_base or Decimal(0)
+
+        # Filled in full during the cancel window — use that fill, never
+        # market-buy on top of it.
+        if settled.status == OrderStatus.FILLED:
+            return settled
+
+        # Partial fill — keep exactly what we bought, recorded as PARTIAL so
+        # cost basis reflects the real BTC. Do NOT top up via market_buy (even
+        # in maker_fallback): that double-counts the filled portion and puts
+        # two orders behind one hop, which route execution doesn't model. The
+        # next cycle catches up.
+        if filled_base > 0:
+            return settled.model_copy(update={"status": OrderStatus.PARTIAL})
 
         if mode == "maker_only":
             return None  # caller treats as skip
 
-        # maker_fallback: market buy at the current ask
-        return await ex.place_market_buy(hop.pair, input_amount)
+        # maker_fallback, nothing filled. Only fall back to a market buy once
+        # we have an authoritative read that the limit is truly dead
+        # (cancelled/rejected). If the state is unknown or still pending, a
+        # market buy risks doubling the spend if that limit later fills — skip
+        # this cycle instead; the next cycle retries cleanly.
+        if confirmed_dead and settled.status in (
+            OrderStatus.CANCELLED, OrderStatus.REJECTED
+        ):
+            return await ex.place_market_buy(hop.pair, input_amount)
+
+        logger.warning(
+            "maker_fallback: could not confirm limit %s on %s is dead and "
+            "unfilled (status=%s) — skipping market fallback this cycle to "
+            "avoid a possible double-buy; next cycle retries.",
+            placed.order_id, hop.pair, settled.status,
+        )
+        return None
 
     def _compute_limit_price(self, hop) -> Decimal:
         """Limit price for `hop` based on `maker_limit_at` config.

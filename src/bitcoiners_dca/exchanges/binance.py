@@ -40,7 +40,7 @@ from bitcoiners_dca.core.models import (
 )
 from bitcoiners_dca.exchanges.base import (
     Exchange, ExchangeError, InsufficientBalanceError, WithdrawalDeniedError,
-    make_bot_client_order_id,
+    make_bot_client_order_id, resolve_partial_status,
     split_fee_by_currency as _split_fee_by_currency,
 )
 
@@ -482,13 +482,16 @@ class BinanceExchange(Exchange):
             "canceled": OrderStatus.CANCELLED, "cancelled": OrderStatus.CANCELLED,
         }
         fee_base, fee_quote = _split_fee_by_currency(raw.get("fee"), pair)
+        status = status_map.get(raw.get("status", "open"), OrderStatus.PENDING)
+        # Resting limit with filled>0 → PARTIAL, not PENDING (audit 2026-06-02).
+        status = resolve_partial_status(status, raw.get("filled"), raw.get("amount"))
         return Order(
             exchange=self.name, order_id=str(raw.get("id") or ""), pair=pair,
             side=OrderSide(raw.get("side", "buy")), type=OrderType(raw.get("type", "market")),
             amount_quote=quote_amount, amount_base=_to_decimal(raw.get("filled")),
             price_filled_avg=_to_decimal(raw.get("average") or raw.get("price")),
             fee_base=fee_base, fee_quote=fee_quote,
-            status=status_map.get(raw.get("status", "open"), OrderStatus.PENDING),
+            status=status,
             created_at=datetime.fromtimestamp(raw.get("timestamp", 0) / 1000, tz=timezone.utc) if raw.get("timestamp") else datetime.now(timezone.utc),
             filled_at=datetime.now(timezone.utc) if raw.get("status") == "closed" else None,
         )

@@ -45,6 +45,7 @@ from bitcoiners_dca.exchanges.base import (
     ExchangeError,
     InsufficientBalanceError,
     WithdrawalDeniedError,
+    resolve_partial_status,
 )
 
 logger = logging.getLogger(__name__)
@@ -586,6 +587,14 @@ class BitOasisExchange(Exchange):
             "CANCELED": OrderStatus.CANCELLED,
             "CANCELLED": OrderStatus.CANCELLED,
         }.get(status_str, OrderStatus.PENDING)
+        # BitOasis's documented order shape has no distinct executed/filled
+        # field separate from base_amount, so a resting partial generally
+        # can't be derived here — if the API ever returns an `executed_amount`
+        # we honour it, otherwise this is a no-op and the strategy-layer
+        # post-cancel re-read is the real double-buy guard (audit 2026-06-02).
+        status = resolve_partial_status(
+            status, raw.get("executed_amount"), raw.get("base_amount")
+        )
 
         side = OrderSide(str(raw.get("side", "buy")).lower())
         order_type = OrderType(str(raw.get("type", "market")).lower())

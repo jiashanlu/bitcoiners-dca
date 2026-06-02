@@ -32,6 +32,35 @@ def _to_decimal_safe(value) -> Decimal:
         return Decimal(0)
 
 
+def resolve_partial_status(mapped: OrderStatus, filled, amount) -> OrderStatus:
+    """Upgrade a still-open order to PARTIAL when it carries a non-zero fill.
+
+    Exchanges report a partially-filled-but-resting limit as status
+    ``open``/``OPEN`` (``filled>0``, ``remaining>0``), which every adapter
+    maps to PENDING. Before this, nothing ever produced ``OrderStatus.PARTIAL``,
+    so every partial-fill branch in the strategy was dead code — and a maker
+    order that partially filled before timeout was treated as wholly unfilled
+    and re-bought in full (audit 2026-06-02 P0/P1). This derives PARTIAL from
+    the fill quantities, adapter-agnostically.
+
+    Only upgrades from PENDING. A terminal status (FILLED/CANCELLED/REJECTED)
+    is authoritative and passes through unchanged.
+    """
+    if mapped != OrderStatus.PENDING:
+        return mapped
+    f = _to_decimal_safe(filled)
+    if f <= 0:
+        return mapped
+    a = _to_decimal_safe(amount)
+    # filled>0 and (amount unknown, or filled strictly below the order size)
+    # → a resting partial. filled>=amount with an open status is ambiguous
+    # (likely settling) — leave it PENDING and let the FILLED/closed mapping
+    # promote it on the next poll.
+    if a <= 0 or f < a:
+        return OrderStatus.PARTIAL
+    return mapped
+
+
 def split_fee_by_currency(
     fee: object,
     pair: str,
