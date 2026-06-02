@@ -375,9 +375,23 @@ class DCAStrategy:
                 getattr(_h, "output_ccy", "?"),
                 getattr(_h, "price", "?"),
             )
+        # Convert the AED budget into the route's INPUT currency before
+        # execution. Intermediate-direct routes spend an idle stablecoin
+        # (input=USDT/USDC), so a 1000-AED budget must become ~272 USDT, not
+        # 1000 USDT (~3.67x over-spend). Direct AED routes carry rate=None →
+        # no conversion. (Audit 2026-06-02 task #212.)
+        exec_amount = amount
+        _q2i = getattr(chosen_route, "quote_to_input_rate", None)
+        if _q2i is not None and _q2i > 0:
+            exec_amount = amount * _q2i
+            result.notes.append(
+                f"input-ccy conversion: AED {amount} → "
+                f"{exec_amount} {chosen_route.input_ccy} "
+                f"(rate {_q2i})"
+            )
         try:
             orders = await self._execute_route(
-                chosen_route, amount, exchange_map, result,
+                chosen_route, exec_amount, exchange_map, result,
             )
             result.orders = orders
             if orders:

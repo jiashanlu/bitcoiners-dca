@@ -496,8 +496,15 @@ class BitOasisExchange(Exchange):
             "amount": str(amount_btc),
             "withdrawal_address": address,
         }
+        # IDEMPOTENCY: a coin-withdrawal POST moves real BTC on-chain and
+        # BitOasis has no idempotency key. _request_with_retry retries on
+        # NetworkError/Timeout/429 — if the blip lands AFTER the server
+        # accepted the withdrawal, the retry sends a SECOND on-chain
+        # transaction (double-spend + double fee). Use the no-retry path,
+        # exactly like place_market_buy: surface the transient and let the
+        # operator reconcile rather than auto-resend. Audit P1 2026-06-02.
         try:
-            data = await self._request_with_retry(
+            data = await self._request(
                 "POST", "/exchange/coin-withdrawal", body=body
             )
         except ExchangeError as e:

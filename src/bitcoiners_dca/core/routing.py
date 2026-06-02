@@ -87,6 +87,16 @@ class TradeRoute:
     quote_balance: Optional[Decimal] = None
     cross_exchange: bool = False
     fixed_costs: Decimal = Decimal(0)   # e.g. withdrawal fees in quote ccy
+    # Units of this route's INPUT currency per 1 unit of the cycle's quote
+    # currency (AED). None means the route input IS the cycle quote (the
+    # common AED-direct case → no conversion). Set for "intermediate-direct"
+    # routes funded from an idle stablecoin (input=USDT) so the strategy can
+    # size the order in USDT from an AED budget, and so `quote_balance` /
+    # `min_input_amount` can be compared against the AED cycle size in one
+    # consistent unit. e.g. with USDT/AED = 3.67, this is 1/3.67 USDT-per-AED.
+    # Audit 2026-06-02 (task #212): without it the router compared USDT
+    # against AED and either dropped the route or sized a ~3.67x oversize buy.
+    quote_to_input_rate: Optional[Decimal] = None
 
     def __post_init__(self):
         if not self.hops:

@@ -50,6 +50,11 @@ class RouteCandidate:
     effective_price: Decimal     # input ccy per unit of output ccy, after fees
     score: Decimal               # ranking metric; preference bonus applied here
     max_spread_pct: Decimal      # worst spread across all hops (for filtering)
+    # Multiplicative preference applied to `score` ONCE in _apply_filters
+    # (e.g. the "prefer idle stablecoin" nudge). Kept separate from `score`
+    # because the final scoring pass reassigns `score` from effective_price,
+    # which silently discarded a directly-mutated score (audit 2026-06-02).
+    score_multiplier: Decimal = Decimal(1)
     quote_balance: Optional[Decimal] = None
     # Minimum amount of route input currency this route can execute, derived
     # from each hop's partner-published OrderMinimum. 0 = no known floor.
@@ -442,19 +447,38 @@ class SmartRouter:
 
                     # Intermediate-direct: if we already hold this
                     # intermediate (e.g. USDT sitting idle on OKX), we can
-                    # skip leg-1 entirely and just BTC/USDT. The
-                    # quote_balance is reported in the intermediate's
-                    # units; balance-clamp in strategy.execute handles the
-                    # conversion. Threshold = 10 units of intermediate —
-                    # below this it's noise (OKX BTC/USDT minimum is ~5
-                    # USDT). A 2-USDT dust balance wouldn't ever fund a
-                    # trade so emitting the route pollutes the audit UI.
+                    # skip leg-1 entirely and just BTC/USDT. The held balance
+                    # is in the intermediate's units (USDT); we convert it to
+                    # an AED-equivalent so it can be compared against the AED
+                    # cycle size in one consistent unit, and we carry the
+                    # AED→USDT rate so the strategy sizes the order in USDT.
+                    # Threshold = 10 units of intermediate — below this it's
+                    # noise (OKX BTC/USDT minimum is ~5 USDT). A 2-USDT dust
+                    # balance wouldn't ever fund a trade so emitting the route
+                    # pollutes the audit UI. (Audit 2026-06-02 task #212.)
                     inter_balance = md.balances.get(inter, Decimal(0))
                     direct_pair_via_inter = f"{target_asset}/{inter}"
                     if (
                         inter_balance >= self.prefer_intermediate_min
                         and direct_pair_via_inter in md.tickers
                     ):
+                        # AED-per-intermediate from the <inter>/AED ticker
+                        # (the same pair as the two-hop leg-1). Without it we
+                        # cannot convert units — leave quote_balance None
+                        # (trust-user / don't filter on a wrong-unit number)
+                        # and don't size in input units.
+                        inter_quote_tk = md.tickers.get(f"{inter}/{quote_ccy}")
+                        aed_per_inter = (
+                            inter_quote_tk.ask
+                            if inter_quote_tk and inter_quote_tk.ask and inter_quote_tk.ask > 0
+                            else None
+                        )
+                        if aed_per_inter is not None:
+                            quote_bal_aed = inter_balance * aed_per_inter
+                            quote_to_input_rate = Decimal(1) / aed_per_inter
+                        else:
+                            quote_bal_aed = None
+                            quote_to_input_rate = None
                         hop = TradeHop(
                             md.exchange.name,
                             direct_pair_via_inter,
@@ -464,7 +488,8 @@ class SmartRouter:
                         )
                         route = TradeRoute(
                             hops=(hop,),
-                            quote_balance=inter_balance,
+                            quote_balance=quote_bal_aed,
+                            quote_to_input_rate=quote_to_input_rate,
                         )
                         candidate = self._score(
                             route, sample_amount,
@@ -472,14 +497,15 @@ class SmartRouter:
                             market_data,
                         )
                         # "Prefer existing stable balance" — small downward
-                        # nudge on the route's score so it wins over a
-                        # marginally cheaper BTC/AED direct. Same shape as
-                        # the preferred-exchange bonus elsewhere. Score is
-                        # ranked ascending (lower = better), so multiply by
-                        # `1 - boost_pct/100`.
+                        # nudge so it wins over a marginally cheaper BTC/AED
+                        # direct. Carried as a score_multiplier applied once
+                        # in _apply_filters; setting candidate.score here
+                        # directly was overwritten by the final scoring pass,
+                        # making the preference dead code (audit 2026-06-02).
                         if self.prefer_intermediate_balance:
-                            boost = Decimal(1) - (self.prefer_intermediate_boost_pct / Decimal(100))
-                            candidate.score = candidate.score * boost
+                            candidate.score_multiplier = Decimal(1) - (
+                                self.prefer_intermediate_boost_pct / Decimal(100)
+                            )
                             candidate.note = (
                                 (candidate.note + " · " if candidate.note else "")
                                 + f"prefer-{inter}-balance"
@@ -631,7 +657,15 @@ class SmartRouter:
         if required_amount is not None:
             kept: list[RouteCandidate] = []
             for c in candidates:
-                if c.min_input_amount > 0 and required_amount < c.min_input_amount:
+                # min_input_amount is in the route's INPUT currency. For an
+                # intermediate-direct route that's USDT, but required_amount
+                # is AED — convert the floor to AED before comparing so we
+                # don't test a USDT floor against an AED cycle size (#212).
+                floor_in_quote = c.min_input_amount
+                rate = c.route.quote_to_input_rate
+                if rate and rate > 0 and c.min_input_amount > 0:
+                    floor_in_quote = c.min_input_amount / rate
+                if floor_in_quote > 0 and required_amount < floor_in_quote:
                     excluded.append(ExcludedRoute(
                         route=c.route,
                         reason=(
@@ -681,9 +715,17 @@ class SmartRouter:
                 c.score = c.effective_price * (
                     Decimal(1) - self.preferred_bonus_pct / Decimal(100)
                 )
-                c.note = "Preferred-exchange bonus applied"
+                c.note = (
+                    (c.note + " · " if c.note else "")
+                    + "Preferred-exchange bonus applied"
+                )
             else:
                 c.score = c.effective_price
+            # Apply any per-candidate preference nudge ONCE, here, after the
+            # base score is (re)assigned — e.g. the prefer-stablecoin boost
+            # set at enumeration. Lower score = better, so a multiplier < 1
+            # promotes the candidate.
+            c.score = c.score * c.score_multiplier
 
         if underfunded_fallback:
             # Sort by quote_balance DESC (most usable balance first), then
@@ -765,10 +807,22 @@ def _market_data_to_payload(
                 continue
             balances_out[inter] = float(md.balances.get(inter, Decimal(0)))
 
+        # Per-pair taker fees so a fee-aware server can price each hop with
+        # its own rate. The scalar `taker_pct` is the DIRECT pair's fee
+        # (~0.6% on OKX AED); applying it to a BTC/USDT leg (~0.1%) overprices
+        # two-hop routes and biases the server back to direct (audit
+        # 2026-06-02). Sent alongside the scalar for backward compatibility;
+        # the bot also re-prices locally (see _reprice_decision_with_local_fees)
+        # so correctness holds even against a server that ignores this.
+        taker_by_pair_out = {
+            p: float(v) for p, v in md.taker_pct_by_pair.items()
+            if p in tickers_out
+        }
         payload.append({
             "exchange": md.exchange.name,
             "tickers": tickers_out,
             "taker_pct": float(md.taker_pct),
+            "taker_pct_by_pair": taker_by_pair_out,
             "balances": balances_out,
         })
     return payload
@@ -834,6 +888,60 @@ def _decode_remote_decision(
         cross_exchange_alerts=[],   # Phase 2 follow-up
         reason=data.get("reason", "Remote pick"),
     )
+
+
+def _reprice_decision_with_local_fees(
+    decision: RoutingDecision,
+    market_data: list["_ExchangeMarketData"],
+    required_quote_amount: Optional[Decimal],
+) -> RoutingDecision:
+    """Re-rank a remote decision using the bot's OWN per-pair taker fees.
+
+    The Pro API server prices hops from a single scalar taker (the direct
+    pair's ~0.6% AED fee), which overprices the cheaper BTC/USDT leg of
+    two-hop routes and biases selection back to direct (audit 2026-06-02).
+    We trust the server only for route STRUCTURE (which hops exist) and
+    recompute effective_price locally with the correct per-pair fee, then
+    re-sort. This keeps fee correctness even if the server never consumes
+    `taker_pct_by_pair`.
+    """
+    taker_by: dict[tuple[str, str], Decimal] = {}
+    for md in market_data:
+        for p in md.tickers:
+            taker_by[(md.exchange.name, p)] = md.taker_for(p)
+
+    sample = required_quote_amount if required_quote_amount else Decimal(1000)
+
+    def reprice(c: RouteCandidate) -> RouteCandidate:
+        new_hops = tuple(
+            TradeHop(
+                exchange=h.exchange, pair=h.pair, side=h.side, price=h.price,
+                taker_pct=taker_by.get((h.exchange, h.pair), h.taker_pct),
+            )
+            for h in c.route.hops
+        )
+        new_route = TradeRoute(
+            hops=new_hops,
+            quote_balance=c.route.quote_balance,
+            cross_exchange=c.route.cross_exchange,
+            fixed_costs=c.route.fixed_costs,
+            quote_to_input_rate=c.route.quote_to_input_rate,
+        )
+        c.route = new_route
+        c.effective_price = new_route.effective_price(sample)
+        c.score = c.effective_price
+        return c
+
+    all_c = [reprice(decision.chosen)] + [reprice(a) for a in decision.alternatives]
+    all_c.sort(key=lambda c: c.score)
+    decision.chosen = all_c[0]
+    decision.alternatives = all_c[1:]
+    decision.reason = (
+        f"Picked {decision.chosen.label} @ effective "
+        f"{decision.chosen.effective_price:.2f} (Pro API route, locally "
+        f"re-priced with per-pair fees)"
+    )
+    return decision
 
 
 async def _remote_pick(
@@ -939,6 +1047,12 @@ async def _remote_pick(
             "/api/pro/route", "malformed response (decode failed)",
         )
         return None
+
+    # Re-price with local per-pair fees so a fee-blind server can't bias the
+    # pick (audit 2026-06-02 pro-api-payload-drops-per-pair-fees).
+    decision = _reprice_decision_with_local_fees(
+        decision, market_data, required_quote_amount
+    )
     logger.info(
         "[pro-api] remote pick: %s @ %s",
         decision.chosen.label,

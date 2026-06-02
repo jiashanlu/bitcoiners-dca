@@ -134,3 +134,44 @@ async def test_strategy_falls_back_to_direct_when_two_hop_disabled():
 
     assert len(result.orders) == 1
     assert result.orders[0].pair == "BTC/AED"
+
+
+@pytest.mark.asyncio
+async def test_intermediate_direct_sizes_order_in_usdt_not_aed():
+    """Audit 2026-06-02 / task #212: an intermediate-direct route funded from
+    idle USDT must place a USDT-denominated order sized from the AED budget
+    (1000 AED ≈ 272 USDT at 3.67), NOT spend 1000 USDT (~3670 AED, ~3.67x).
+    """
+    usdt_ask = Decimal("3.67")
+    okx = TwoHopStubExchange("okx", prices={
+        "BTC/AED":  "367000",
+        "USDT/AED": str(usdt_ask),
+        "BTC/USDT": "100000",
+    }, balances={"AED": "5000", "USDT": "500"})
+
+    cfg = StrategyConfig(base_amount_aed=Decimal("1000"), pair="BTC/AED")
+    router = SmartRouter(
+        enable_two_hop=True,
+        intermediates=["USDT"],
+        prefer_intermediate_balance=True,
+        prefer_intermediate_min=Decimal("10"),
+    )
+    strategy = DCAStrategy(cfg, router)
+
+    result = await strategy.execute([okx])
+    assert result.errors == []
+
+    # Intermediate-direct wins (prefer-stablecoin nudge): a single BTC/USDT buy.
+    btc_usdt_buys = [b for b in okx.buys if b[0] == "BTC/USDT"]
+    assert btc_usdt_buys, f"expected a BTC/USDT buy, got {okx.buys}"
+    pair, spent = btc_usdt_buys[0]
+
+    # Spent in USDT ≈ 1000 AED / 3.67 ≈ 272, NOT 1000.
+    assert spent < Decimal("300"), (
+        f"order sized in AED not USDT — spent {spent} USDT for a 1000-AED "
+        f"budget (~3.67x over-spend)"
+    )
+    expected_usdt = Decimal("1000") / usdt_ask
+    assert abs(spent - expected_usdt) < Decimal("1")
+    # Never exceeds the held idle USDT balance.
+    assert spent <= Decimal("500")

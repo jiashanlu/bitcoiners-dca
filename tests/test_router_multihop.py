@@ -230,3 +230,50 @@ async def test_cross_exchange_alert_suppressed_below_min_size():
     )
     decision = await router.pick([okx, bn], required_quote_amount=Decimal("500"))
     assert decision.cross_exchange_alerts == []
+
+
+# === Intermediate-direct unit conversion (audit 2026-06-02 / task #212) ===
+
+@pytest.mark.asyncio
+async def test_intermediate_direct_balance_converted_to_aed_equivalent():
+    """An idle USDT balance funds a BTC/USDT route. The router must compare
+    its AED-equivalent value (not the raw USDT number) against the AED cycle
+    size, and carry the AED→USDT rate for execution sizing.
+
+    Regression: previously quote_balance was the raw USDT figure, so 300 USDT
+    (~1100 AED of buying power) was tested as `300 < 1000` AED and the route
+    was silently dropped — and if it won, a 1000-AED cycle placed a 1000-USDT
+    (~3670 AED) order.
+    """
+    usdt_ask = Decimal("3.67")
+    okx = MultiPairFakeExchange("okx", markets={
+        "BTC/AED":  ("367000", "366900"),
+        "USDT/AED": (str(usdt_ask), "3.66"),
+        "BTC/USDT": ("100000", "99990"),
+    }, balances={"AED": "5000", "USDT": "300"})
+
+    router = SmartRouter(
+        enable_two_hop=True,
+        intermediates=["USDT"],
+        prefer_intermediate_balance=True,
+        prefer_intermediate_min=Decimal("10"),
+    )
+    decision = await router.pick([okx], required_quote_amount=Decimal("1000"))
+
+    all_candidates = [decision.chosen] + decision.alternatives
+    inter_direct = [
+        c for c in all_candidates
+        if c.route.is_direct and c.route.hops[0].pair == "BTC/USDT"
+    ]
+    assert inter_direct, "intermediate-direct BTC/USDT route was not emitted"
+    c = inter_direct[0]
+
+    # quote_balance is the AED-equivalent (300 USDT * 3.67), not raw 300.
+    assert c.quote_balance == Decimal("300") * usdt_ask
+    # Carries the AED→USDT rate so the strategy sizes the order in USDT.
+    assert c.route.quote_to_input_rate == Decimal(1) / usdt_ask
+    # 1100 AED-equiv >= 1000 AED cycle → NOT dropped by the balance filter.
+    excluded_pairs = [e.route.hops[0].pair for e in decision.excluded]
+    assert "BTC/USDT" not in excluded_pairs
+    # Prefer-stablecoin nudge is carried as a multiplier (applied, not dead).
+    assert c.score_multiplier < Decimal(1)
