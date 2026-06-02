@@ -1046,7 +1046,7 @@ def create_app(
             for ex in ("okx", "binance", "bitoasis"):
                 stored = credentials_for(sec, ex)
                 env_fallback_any = False
-                for field in (required_fields.get(ex) or []):
+                for field in required_fields(ex):
                     if not stored.get(field) and os.environ.get(f"{ex.upper()}_{field.upper()}"):
                         env_fallback_any = True
                 if any(stored.values()):
@@ -1063,7 +1063,7 @@ def create_app(
                     field: _redact(value)
                     for field, value in stored.items()
                 }
-                for field in (required_fields.get(ex) or []):
+                for field in required_fields(ex):
                     if not creds[ex].get(field) and os.environ.get(f"{ex.upper()}_{field.upper()}"):
                         creds[ex][field] = "(env var)"
         # Surface results of the "Test connection" button.
