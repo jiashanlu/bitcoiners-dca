@@ -16,7 +16,13 @@ services:
     container_name: bitcoiners-provisioner
     restart: unless-stopped
     ports:
-      - "0.0.0.0:8500:8500"
+      # Bind to loopback only. Caddy reaches the provisioner by container name
+      # on the `tenants` network, and the CF tunnel's cloudflared (host systemd
+      # service) reaches it at 127.0.0.1:8500 — so nothing needs the port
+      # exposed on the public interface. Keeps the provisioner off the public
+      # internet without depending on ufw (which carries SSH-lockout risk on
+      # this box). (Security hardening 2026-06-03.)
+      - "127.0.0.1:8500:8500"
     env_file:
       - /etc/bitcoiners-dca/provisioner.env
     environment:
