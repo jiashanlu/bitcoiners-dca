@@ -25,10 +25,19 @@ services:
       PROVISION_NGINX_DIR: /etc/nginx/conf.d
       PROVISION_PRIVATE_KEY: /etc/bitcoiners-dca/keys/license_signing.pem
       PROVISION_IMAGE_TAG: bitcoiners-dca:latest
+      # Hetzner/Caddy mode: provision.sh writes per-tenant Caddy routes here
+      # (this is Caddy's /opt/caddy/sites mounted rw below) and reloads the
+      # caddy container. Empty/unset on home/LXC → the nginx path is used.
+      PROVISION_CADDY_SITES_DIR: /caddy-sites
+      PROVISION_CADDY_CONTAINER: caddy
+      PROVISIONER_TENANT_SUBDOMAIN_BASE: tenants.bitcoiners.ae
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /opt/bitcoiners-dca:/opt/bitcoiners-dca
       - /etc/bitcoiners-dca:/etc/bitcoiners-dca:ro
+      # Caddy's per-tenant sites dir, rw so provision.sh can drop route files.
+      # Only present on the Hetzner host; harmless empty dir elsewhere.
+      - /opt/caddy/sites:/caddy-sites
     # On the Hetzner host, Caddy lives on the `tenants` network and proxies
     # `provisioner.bitcoiners.ae` → `bitcoiners-provisioner:8500`. The
     # provisioner must therefore be reachable on the `tenants` network too,

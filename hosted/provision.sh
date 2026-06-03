@@ -207,22 +207,25 @@ fi
 # Caddy per-tenant route (Hetzner deployment). The dashboard joins the shared
 # `tenants` docker network (see docker-compose.tenant.yml) so Caddy can reach
 # it as bitcoiners-dca-<id>-dashboard:8000. We write the per-tenant site block
-# into Caddy's sites dir (mounted from /opt/caddy/sites) via the docker socket
-# and hot-reload. Skipped on home/LXC setups that have no Caddy container.
-caddy_container="${PROVISION_CADDY_CONTAINER:-}"
-if [[ -n "${caddy_container}" ]] && docker inspect "${caddy_container}" >/dev/null 2>&1; then
+# into Caddy's sites dir (mounted rw into THIS provisioner container as
+# PROVISION_CADDY_SITES_DIR) and hot-reload Caddy over the docker socket.
+# Skipped on home/LXC setups that don't set PROVISION_CADDY_SITES_DIR (the
+# nginx fragment above handles those).
+caddy_sites_dir="${PROVISION_CADDY_SITES_DIR:-}"
+caddy_container="${PROVISION_CADDY_CONTAINER:-caddy}"
+if [[ -n "${caddy_sites_dir}" && -d "${caddy_sites_dir}" ]]; then
   subdomain_base="${PROVISION_TENANT_SUBDOMAIN_BASE:-tenants.bitcoiners.ae}"
   # tenant_id is validated `^[a-z0-9-]{3,40}$` upstream → safe to interpolate.
   printf '%s.%s {\n    reverse_proxy http://bitcoiners-dca-%s-dashboard:8000 {\n        header_up X-Forwarded-Proto https\n    }\n}\n' \
     "${tenant_id}" "${subdomain_base}" "${tenant_id}" \
-    | docker exec -i "${caddy_container}" sh -c "cat > '/etc/caddy/sites/${tenant_id}.caddy'"
+    > "${caddy_sites_dir}/${tenant_id}.caddy"
   if docker exec "${caddy_container}" caddy reload --config /etc/caddy/Caddyfile >/dev/null 2>&1; then
     echo "    caddy route: ${tenant_id}.${subdomain_base} (reloaded)"
   else
     echo "    caddy route written but reload FAILED — run: docker exec ${caddy_container} caddy reload --config /etc/caddy/Caddyfile" >&2
   fi
 else
-  echo "    caddy route: skipped (no PROVISION_CADDY_CONTAINER set)"
+  echo "    caddy route: skipped (no PROVISION_CADDY_SITES_DIR set)"
 fi
 
 echo
