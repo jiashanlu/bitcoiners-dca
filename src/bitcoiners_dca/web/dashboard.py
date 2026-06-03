@@ -1144,7 +1144,12 @@ def create_app(
                 logger.exception("Failed to persist test_connection success")
             return _redirect(request, f"/exchanges?ok={name}")
         except Exception as e:
-            return _redirect(request, f"/exchanges?err={name}:{str(e)[:160]}")
+            # tenacity wraps the real ccxt/OKX error in a RetryError whose
+            # str() is a useless `RetryError[<Future ...>]`. Unwrap it so the
+            # customer sees the actionable message (e.g. "okx 50110: IP not in
+            # whitelist") instead of a Future repr.
+            from bitcoiners_dca.cli import _unwrap_retry_error
+            return _redirect(request, f"/exchanges?err={name}:{_unwrap_retry_error(e)[:160]}")
 
     @app.post("/exchanges/{name}/credentials", response_class=HTMLResponse)
     async def exchange_credentials(request: Request, name: str):
@@ -2101,22 +2106,43 @@ def create_app(
     @app.get("/api/cost-basis-vs-market")
     async def api_cost_basis_vs_market():
         db = _db()
+        # Use the exact-Decimal per-stable cost-basis methodology, not a float
+        # CAST that sums raw AED outflow (which counts idle stablecoin
+        # inventory) and reintroduces binary rounding error. Each BTC-receiving
+        # leg contributes its true AED cost basis: BTC/AED at face value,
+        # BTC/<stable> converted at that stablecoin's OWN weighted rate
+        # (USDC never borrows USDT's rate). Cumulative avg cost = running
+        # cost basis / running BTC acquired. Mirrors db.btc_cost_basis_aed.
+        rates = db.stable_aed_rates()
         rows = db._conn.execute(
-            """SELECT substr(timestamp, 1, 10) AS day,
-                      SUM(CAST(amount_quote AS REAL)) AS aed,
-                      SUM(CAST(amount_base AS REAL)) AS btc
+            """SELECT substr(timestamp, 1, 10) AS day, pair,
+                      amount_quote, amount_base
                FROM trades
-               WHERE side='buy' AND status='filled'
-               GROUP BY day ORDER BY day ASC"""
+               WHERE side='buy' AND status='filled' AND pair LIKE 'BTC/%'
+               ORDER BY timestamp ASC"""
         ).fetchall()
         out = []
-        cum_aed = 0.0
-        cum_btc = 0.0
+        cum_aed = Decimal(0)
+        cum_btc = Decimal(0)
+        # Collapse the per-leg series into one cumulative point per day.
+        by_day: dict[str, tuple[Decimal, Decimal]] = {}
         for r in rows:
-            cum_aed += float(r["aed"] or 0)
-            cum_btc += float(r["btc"] or 0)
-            avg = (cum_aed / cum_btc) if cum_btc > 0 else 0.0
-            out.append({"date": r["day"], "avg_cost_aed_per_btc": f"{avg:.2f}"})
+            pair = str(r["pair"] or "")
+            quote = Decimal(str(r["amount_quote"])) if r["amount_quote"] not in (None, "") else Decimal(0)
+            base = Decimal(str(r["amount_base"])) if r["amount_base"] not in (None, "") else Decimal(0)
+            if pair == "BTC/AED":
+                cum_aed += quote
+            else:
+                stable = pair.split("/")[1] if "/" in pair else ""
+                rate = rates.get(stable)
+                if rate is not None:
+                    cum_aed += quote * rate
+            cum_btc += base
+            by_day[r["day"]] = (cum_aed, cum_btc)
+        for day in sorted(by_day):
+            day_aed, day_btc = by_day[day]
+            avg = (day_aed / day_btc) if day_btc > 0 else Decimal(0)
+            out.append({"date": day, "avg_cost_aed_per_btc": f"{avg:.2f}"})
         current_market = None
         for ex in _exchanges():
             try:

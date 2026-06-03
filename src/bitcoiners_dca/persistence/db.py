@@ -16,7 +16,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Optional, Any
+from typing import Optional
 
 from bitcoiners_dca.core.models import Order, Withdrawal, ArbitrageOpportunity
 from bitcoiners_dca.core.strategy import ExecutionResult
@@ -417,36 +417,74 @@ class Database:
             "side='buy' AND status='filled' AND pair LIKE '%/AED'",
         )
 
+    def stable_aed_rates(self) -> dict[str, Decimal]:
+        """Per-stablecoin weighted-average AED acquisition rate.
+
+        For every <STABLE>/AED buy leg the bot recorded, compute
+        rate[STABLE] = (total AED spent on STABLE) / (total STABLE bought).
+        This is average-cost accounting, tracked PER ASSET — USDT and USDC
+        get SEPARATE rates and are never blended. Generalised: any non-BTC
+        base bought against AED is treated as a stablecoin funding leg, so a
+        future EURT/AED or DAI/AED route works without a code change.
+
+        This is the single shared source of truth for stable→AED conversion,
+        used by BOTH `btc_cost_basis_aed` and the tax-CSV writer so the two
+        can never drift. Assets with zero units bought are omitted (no rate).
+
+        Returns an empty dict if the bot has no stablecoin/AED buy history.
+        """
+        cur = self._conn.execute(
+            """SELECT pair, amount_quote, amount_base
+               FROM trades
+               WHERE side='buy' AND status='filled' AND pair LIKE '%/AED'"""
+        )
+        acc: dict[str, tuple[Decimal, Decimal]] = {}
+        for pair, amount_quote, amount_base in cur.fetchall():
+            base = str(pair or "").split("/")[0]
+            if base == "BTC" or not base:
+                continue
+            aed = Decimal(str(amount_quote)) if amount_quote not in (None, "") else Decimal(0)
+            units = Decimal(str(amount_base)) if amount_base not in (None, "") else Decimal(0)
+            acc_aed, acc_units = acc.get(base, (Decimal(0), Decimal(0)))
+            acc[base] = (acc_aed + aed, acc_units + units)
+
+        return {
+            asset: aed / units
+            for asset, (aed, units) in acc.items()
+            if units > 0
+        }
+
     def btc_cost_basis_aed(self) -> Decimal:
         """AED cost basis of the BTC the bot has acquired.
 
         Why this exists: `total_aed_spent` sums every AED outflow,
-        including USDT pre-buys for multi-hop routing. When the bot
-        carries unused USDT inventory, that inflates the denominator
+        including stablecoin pre-buys for multi-hop routing. When the bot
+        carries unused stablecoin inventory, that inflates the denominator
         and makes avg cost look artificially low vs spot.
 
-        Methodology — approximate-cost-basis:
+        Methodology — average-cost, per-stablecoin:
           - Direct BTC/AED buys: count `amount_quote` (AED) 1:1.
-          - BTC/USDT buys: convert `amount_quote` (USDT) → AED at the
-            bot's weighted-average USDT/AED purchase rate
-            (= total AED spent on USDT / total USDT bought).
-          - If bot has no USDT/AED history (e.g. user pre-funded all
-            their USDT externally), BTC/USDT trades are excluded — we
-            can't fabricate a rate.
+          - BTC/<STABLE> buys: convert `amount_quote` (in STABLE) → AED at
+            that stablecoin's own weighted-average <STABLE>/AED purchase
+            rate (see `stable_aed_rates`). USDT and USDC are converted at
+            SEPARATE rates — a USDC-funded leg never borrows the USDT rate.
+          - If the bot has no <STABLE>/AED history for the stablecoin a leg
+            spent (e.g. the user pre-funded that stablecoin externally),
+            those BTC/<STABLE> trades are excluded — we can't fabricate a
+            rate.
 
         Tradeoffs:
-          - If bot bought MORE USDT than it has spent on BTC, the
-            leftover USDT inventory is automatically excluded because
-            we multiply only `usdt_spent_on_btc` (not the full
-            `usdt_aed_spent`).
-          - If bot spent MORE USDT on BTC than it bought (because user
-            pre-funded USDT externally), we still attribute that excess
-            at the weighted rate. Strictly speaking those USDT cost the
-            bot nothing, but treating them as "free" produces an
-            unrealistically low avg cost — most users imagine those
-            USDT had AN AED cost in reality (just incurred outside the
-            bot). The weighted-rate approximation matches user
-            intuition.
+          - If the bot bought MORE of a stablecoin than it has spent on BTC,
+            the leftover inventory is automatically excluded because we
+            multiply only the amount actually spent on BTC, not the full
+            amount acquired.
+          - If the bot spent MORE of a stablecoin on BTC than it bought
+            (because the user pre-funded it externally), we still attribute
+            that excess at the bot's weighted rate. Strictly those units
+            cost the bot nothing, but treating them as "free" produces an
+            unrealistically low avg cost — most users imagine those units
+            had AN AED cost in reality (just incurred outside the bot). The
+            weighted-rate approximation matches user intuition.
 
         Returns 0 if no BTC has been bought yet.
         """
@@ -455,28 +493,27 @@ class Database:
             "amount_quote", "side='buy' AND status='filled' AND pair = 'BTC/AED'"
         )
 
-        # Bot's USDT/AED pool.
-        usdt_aed_spent = self._sum_decimal(
-            "amount_quote", "side='buy' AND status='filled' AND pair='USDT/AED'"
-        )
-        usdt_bought = self._sum_decimal(
-            "amount_base", "side='buy' AND status='filled' AND pair='USDT/AED'"
-        )
+        # Shared per-stablecoin rate table — same source the tax CSV uses.
+        rates = self.stable_aed_rates()
 
-        # USDT consumed buying BTC.
-        usdt_spent_on_btc = self._sum_decimal(
-            "amount_quote", "side='buy' AND status='filled' AND pair='BTC/USDT'"
+        # BTC/<STABLE> legs, converted at each stablecoin's OWN rate.
+        via_stable_aed = Decimal(0)
+        cur = self._conn.execute(
+            """SELECT pair, amount_quote
+               FROM trades
+               WHERE side='buy' AND status='filled'
+                     AND pair LIKE 'BTC/%' AND pair <> 'BTC/AED'"""
         )
+        for pair, amount_quote in cur.fetchall():
+            stable = str(pair or "").split("/")[1] if "/" in str(pair or "") else ""
+            rate = rates.get(stable)
+            if rate is None:
+                # No bot-tracked <STABLE>/AED buys — nothing to attribute.
+                continue
+            spent = Decimal(str(amount_quote)) if amount_quote not in (None, "") else Decimal(0)
+            via_stable_aed += spent * rate
 
-        if usdt_bought > 0 and usdt_spent_on_btc > 0:
-            weighted_rate = usdt_aed_spent / usdt_bought
-            via_usdt_aed = usdt_spent_on_btc * weighted_rate
-        else:
-            # No bot-tracked USDT/AED buys, OR no BTC/USDT trades —
-            # nothing to attribute via the USDT channel.
-            via_usdt_aed = Decimal(0)
-
-        return direct_aed + via_usdt_aed
+        return direct_aed + via_stable_aed
 
     # ─── Read helpers used by the dashboard ─────────────────────────────
     #

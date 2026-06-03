@@ -63,30 +63,34 @@ def export_uae_tax_csv(
     total_aed = Decimal(0)
     total_btc = Decimal(0)
     total_fees = Decimal(0)
+    total_cost_basis_aed = Decimal(0)
 
-    # Weighted <stable>/AED rate from the AED-quoted legs in this period, used
-    # to convert a multi-hop BTC/USDT leg's fee (denominated in USDT) into AED
-    # for the fee TOTAL — otherwise every multi-hop cycle under-reported fees
-    # by the whole BTC-purchase leg (audit 2026-06-02 P2). Same weighting as
-    # btc_cost_basis_aed. rate[ccy] = AED spent on ccy / units of ccy bought.
-    _stable_aed: dict[str, tuple[Decimal, Decimal]] = {}
-    for r in rows:
-        p = str(r["pair"] or "")
-        if r["side"] == "buy" and p.endswith("/AED"):
-            base = p.split("/")[0]
-            if base != "BTC":
-                aed = Decimal(str(r["amount_quote"] or 0))
-                units = Decimal(str(r["amount_base"] or 0))
-                acc_aed, acc_units = _stable_aed.get(base, (Decimal(0), Decimal(0)))
-                _stable_aed[base] = (acc_aed + aed, acc_units + units)
+    # Per-stablecoin weighted <stable>/AED rate, sourced from the SHARED
+    # helper so the CSV and Database.btc_cost_basis_aed can never drift.
+    # USDT and USDC keep SEPARATE rates (average-cost, per asset). Used both
+    # to convert a multi-hop BTC/<stable> leg's fee (denominated in the
+    # stablecoin) into AED for the fee TOTAL — otherwise every multi-hop
+    # cycle under-reported fees by the whole BTC-purchase leg (audit
+    # 2026-06-02 P2) — AND to give each BTC/<stable> row a true AED cost
+    # basis (task #210). rate[ccy] = AED spent on ccy / units of ccy bought.
+    #
+    # Note: the helper weights over the WHOLE trade history, not just this
+    # report's date window. That's the right denominator for cost basis —
+    # the AED a unit of USDT cost doesn't change because of which tax year
+    # you slice — and it matches what btc_cost_basis_aed reports.
+    _stable_aed = db.stable_aed_rates()
+
+    def _stable_rate(ccy: str) -> Optional[Decimal]:
+        """AED-per-unit rate for a stablecoin, or None if it's AED / unknown."""
+        if ccy == "AED":
+            return Decimal(1)
+        return _stable_aed.get(ccy)
 
     def _fee_to_aed(fee_val: Decimal, fee_ccy: str) -> Optional[Decimal]:
-        if fee_ccy == "AED":
-            return fee_val
-        acc = _stable_aed.get(fee_ccy)
-        if acc and acc[1] > 0:
-            return fee_val * (acc[0] / acc[1])
-        return None  # no rate available this period — can't convert
+        rate = _stable_rate(fee_ccy)
+        if rate is None:
+            return None  # no rate available — can't convert
+        return fee_val * rate
 
     with file_path.open("w", newline="") as f:
         writer = csv.writer(f)
@@ -101,6 +105,7 @@ def export_uae_tax_csv(
                 "Price (AED per BTC)",
                 "Fee",
                 "Fee Ccy",
+                "AED Cost Basis",
                 "Order ID",
             ]
         )
@@ -117,6 +122,20 @@ def export_uae_tax_csv(
             pair = str(row["pair"] or "")
             fee_ccy = pair.split("/")[1] if "/" in pair else "AED"
 
+            # Per-row AED cost basis for the BTC-receiving legs (task #210).
+            # BTC/AED: the AED outlay itself. BTC/<stable>: the stablecoin
+            # amount converted at that stablecoin's OWN weighted AED rate
+            # (USDC never borrows USDT's rate). Non-BTC legs (a USDT/AED
+            # pre-buy) and stablecoins with no AED history get a blank cell.
+            row_cost_basis: Optional[Decimal] = None
+            if row["side"] == "buy" and pair.startswith("BTC/"):
+                if pair == "BTC/AED":
+                    row_cost_basis = amount_aed
+                else:
+                    quote_rate = _stable_rate(fee_ccy)
+                    if quote_rate is not None:
+                        row_cost_basis = amount_aed * quote_rate
+
             writer.writerow(
                 [
                     ts_str,
@@ -128,6 +147,7 @@ def export_uae_tax_csv(
                     f"{price:.2f}",
                     f"{fee:.8f}".rstrip("0").rstrip(".") or "0",
                     fee_ccy,
+                    f"{row_cost_basis:.2f}" if row_cost_basis is not None else "",
                     row["order_id"],
                 ]
             )
@@ -155,12 +175,18 @@ def export_uae_tax_csv(
                     total_fees += fee_aed
                 if pair.startswith("BTC/"):
                     total_btc += amount_btc
+                if row_cost_basis is not None:
+                    total_cost_basis_aed += row_cost_basis
 
         # Summary section
         writer.writerow([])
         writer.writerow(["=== SUMMARY ==="])
         writer.writerow(["Total AED spent (buys)", f"{total_aed:.2f}"])
         writer.writerow(["Total BTC acquired", f"{total_btc:.8f}"])
+        # Cost basis of the BTC actually acquired — excludes idle stablecoin
+        # inventory that "Total AED spent" includes. Mirrors the per-stable
+        # average-cost methodology in Database.btc_cost_basis_aed (task #210).
+        writer.writerow(["BTC cost basis (AED)", f"{total_cost_basis_aed:.2f}"])
         writer.writerow(["Total fees (AED)", f"{total_fees:.2f}"])
         if total_btc > 0:
             avg_price = total_aed / total_btc

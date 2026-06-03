@@ -177,6 +177,84 @@ def test_cost_basis_attributes_pre_existing_usdt_at_weighted_rate(tmp_db):
     assert tmp_db.btc_cost_basis_aed() == Decimal("481")
 
 
+def test_cost_basis_usdc_funded(tmp_db):
+    """USDC-funded BTC cost basis — mirrors the USDT path, proving the
+    rate logic is generalised per-asset and not USDT-hardcoded.
+
+    Setup:
+      - USDC/AED buy: AED 3680 → 1000 USDC (rate = 3.68 AED/USDC).
+      - BTC/USDC buy: 200 USDC → 0.0006 BTC.
+      - 800 USDC sits idle.
+
+    Expectation: cost basis = 200 USDC × 3.68 = 736.0 AED (idle 800
+    excluded), NOT the 3680 raw outflow.
+    """
+    tmp_db.record_trade(_hop("USDC/AED", "uc-1", "3680", "1000"))
+    tmp_db.record_trade(_hop("BTC/USDC", "bc-1", "200", "0.0006"))
+
+    assert tmp_db.total_aed_spent() == Decimal("3680")
+    assert tmp_db.stable_aed_rates()["USDC"] == Decimal("3.68")
+    assert tmp_db.btc_cost_basis_aed() == Decimal("736.0")
+
+
+def test_cost_basis_usdt_and_usdc_kept_separate(tmp_db):
+    """A wallet holding BOTH USDT and USDC must keep SEPARATE rates — the
+    USDT rate must never bleed into a BTC/USDC row (or vice versa).
+
+    Setup:
+      - USDT/AED: 100 USDT for 370 AED (rate 3.70 AED/USDT).
+      - USDC/AED: 100 USDC for 380 AED (rate 3.80 AED/USDC).
+      - BTC/USDT: 50 USDT → 0.00015 BTC  → 50 × 3.70 = 185.0 AED.
+      - BTC/USDC: 50 USDC → 0.00015 BTC  → 50 × 3.80 = 190.0 AED.
+
+    If the rates blended (e.g. a single combined 3.75 rate), both legs
+    would compute 187.5 and the total would be 375.0 — wrong. The
+    per-asset rates must yield 185 + 190 = 375.0... so to make the bleed
+    detectable we assert on the INDIVIDUAL rates too, not just the sum.
+    """
+    tmp_db.record_trade(_hop("USDT/AED", "u-1", "370", "100"))
+    tmp_db.record_trade(_hop("USDC/AED", "uc-1", "380", "100"))
+    tmp_db.record_trade(_hop("BTC/USDT", "b-1", "50", "0.00015"))
+    tmp_db.record_trade(_hop("BTC/USDC", "bc-1", "50", "0.00015"))
+
+    rates = tmp_db.stable_aed_rates()
+    assert rates["USDT"] == Decimal("3.70")
+    assert rates["USDC"] == Decimal("3.80")
+    # USDT leg attributed at 3.70, USDC leg at 3.80 — never blended.
+    # 50×3.70 + 50×3.80 = 185 + 190 = 375.0
+    assert tmp_db.btc_cost_basis_aed() == Decimal("375.0")
+
+
+def test_cost_basis_usdc_rate_does_not_bleed_into_usdt_only_wallet(tmp_db):
+    """If the wallet only has a USDC/AED history but spends USDT on BTC,
+    the USDC rate must NOT be borrowed — the BTC/USDT leg is excluded
+    (no USDT/AED history to attribute it to)."""
+    tmp_db.record_trade(_hop("USDC/AED", "uc-1", "380", "100"))  # only USDC priced
+    tmp_db.record_trade(_hop("BTC/USDT", "b-1", "50", "0.00015"))  # spent USDT
+
+    # No USDT/AED history → BTC/USDT leg can't be attributed → 0.
+    assert tmp_db.btc_cost_basis_aed() == Decimal("0")
+
+
+def test_cost_basis_pure_stable_funded_cycle(tmp_db):
+    """A pure stable-funded cycle (no direct BTC/AED leg at all): all BTC
+    came in via USDC. Cost basis must come entirely from the converted
+    BTC/USDC leg.
+
+    Setup:
+      - USDC/AED: 1000 USDC for 3700 AED (rate 3.70).
+      - BTC/USDC: 1000 USDC → 0.003 BTC (spends the whole pool).
+
+    Expectation: cost basis = 1000 × 3.70 = 3700.0 AED == raw outflow
+    (because the whole pool was consumed — no idle inventory).
+    """
+    tmp_db.record_trade(_hop("USDC/AED", "uc-1", "3700", "1000"))
+    tmp_db.record_trade(_hop("BTC/USDC", "bc-1", "1000", "0.003"))
+
+    assert tmp_db.total_aed_spent() == Decimal("3700")
+    assert tmp_db.btc_cost_basis_aed() == Decimal("3700.0")
+
+
 # === Withdrawals ===
 
 def test_record_withdrawal_roundtrip(tmp_db):
