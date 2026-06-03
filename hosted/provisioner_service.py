@@ -37,8 +37,13 @@ HOSTED_DIR = Path(os.environ.get("PROVISIONER_HOSTED_DIR", "/opt/bitcoiners-dca/
 PROVISION_SCRIPT = HOSTED_DIR / "provision.sh"
 TENANTS_DIR = Path(os.environ.get("PROVISION_BASE_DIR", "/opt/bitcoiners-dca")) / "tenants"
 # IP/hostname bitcoiners-app should reach the tenant dashboard on. On a
-# dedicated tenants-LXC this is the LXC's LAN IP. Required.
+# dedicated tenants-LXC this is the LXC's LAN IP.
 TENANT_HOSTNAME = os.environ.get("PROVISIONER_TENANT_HOSTNAME", "")
+# Hetzner/Caddy mode: when set, tenants are reached over the public internet
+# at https://<tenant_id>.<base> (Caddy per-tenant subdomain on :443), NOT the
+# LAN-IP:port form. provision.sh writes the matching Caddy route. One of
+# TENANT_SUBDOMAIN_BASE or TENANT_HOSTNAME must be set.
+TENANT_SUBDOMAIN_BASE = os.environ.get("PROVISIONER_TENANT_SUBDOMAIN_BASE", "")
 
 TENANT_ID_RE = re.compile(r"^[a-z0-9-]{3,40}$")
 
@@ -158,17 +163,30 @@ def provision(
         log.error(f"docker compose up failed: {e.stderr}")
         raise HTTPException(500, f"compose up failed: {e.stderr.strip()[:500]}")
 
-    if not TENANT_HOSTNAME:
-        raise HTTPException(500, "PROVISIONER_TENANT_HOSTNAME not configured")
+    # Reachability address bitcoiners-app stores + proxies to. Two modes:
+    if TENANT_SUBDOMAIN_BASE:
+        # Hetzner/Caddy: per-tenant HTTPS subdomain via Caddy reverse-proxy.
+        # provision.sh wrote the matching `<tenant>.<base>` Caddy route and
+        # the dashboard joined the shared `tenants` network.
+        internal_host = f"https://{body.tenant_id}.{TENANT_SUBDOMAIN_BASE}"
+        internal_port = 443
+    elif TENANT_HOSTNAME:
+        # Home tenants-LXC: the LXC's LAN IP + the host-bound dashboard port
+        # (not the container's 8000).
+        internal_host = TENANT_HOSTNAME
+        internal_port = dash_port
+    else:
+        raise HTTPException(
+            500,
+            "provisioner misconfigured: set PROVISIONER_TENANT_SUBDOMAIN_BASE "
+            "(Hetzner/Caddy) or PROVISIONER_TENANT_HOSTNAME (LAN)",
+        )
 
     return ProvisionResponse(
         tenant_id=body.tenant_id,
         container_name=f"bitcoiners-dca-{body.tenant_id}-dashboard",
-        # internal_host is the address bitcoiners-app uses to reach the
-        # dashboard. On a dedicated tenants-LXC, that's the LXC's LAN IP +
-        # the host-bound TENANT_DASH_PORT (not the container's port 8000).
-        internal_host=TENANT_HOSTNAME,
-        internal_port=dash_port,
+        internal_host=internal_host,
+        internal_port=internal_port,
         license_token=license_token,
     )
 

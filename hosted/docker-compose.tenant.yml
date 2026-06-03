@@ -49,6 +49,8 @@ services:
       - ${TENANT_DATA_DIR}/reports:/app/reports
     env_file:
       - ${TENANT_DATA_DIR}/.env
+    networks:
+      - default
     labels:
       - "bitcoiners-dca.tenant=${TENANT_ID}"
     healthcheck:
@@ -115,6 +117,16 @@ services:
       - ${TENANT_DATA_DIR}/.env
     depends_on:
       - daemon
+    networks:
+      # `default` = per-tenant bridge (dashboard ↔ daemon). `tenants` = the
+      # shared external network Caddy lives on; the dashboard MUST join it so
+      # Caddy can reverse-proxy `<tenant>.tenants.bitcoiners.ae` →
+      # `bitcoiners-dca-${TENANT_ID}-dashboard:8000` by container name. Without
+      # this the dashboard sits on its own `<tenant>_default` net and Caddy
+      # 502s — every Vercel /dca/console request fails with "tenant routing
+      # misconfigured". (Provisioner P0 fix 2026-06-03.)
+      - default
+      - tenants
     labels:
       - "bitcoiners-dca.tenant=${TENANT_ID}"
     healthcheck:
@@ -124,3 +136,12 @@ services:
       interval: 60s
       timeout: 5s
       retries: 3
+
+networks:
+  # Per-tenant bridge network (compose creates `<tenant>_default`).
+  default:
+  # Shared external network Caddy uses to reach tenant dashboards. Pre-created
+  # on the Hetzner host by Caddy's compose; on home tenants-LXC by
+  # setup_tenants_lxc.sh. `external: true` → compose attaches, never creates.
+  tenants:
+    external: true
