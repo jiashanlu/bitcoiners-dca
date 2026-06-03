@@ -58,6 +58,12 @@ echo "    Base dir: ${tenant_dir}"
 
 mkdir -p "${tenant_dir}"/{config,data,reports}
 chmod 700 "${tenant_dir}"
+# The bot containers run as the non-root `dca` user (uid/gid 1001 — see the
+# bot Dockerfile, task #150). Pre-own the bind-mounted state dirs so the
+# daemon/dashboard can write SQLite, secrets, config edits + tax CSVs.
+# Numeric 1001:1001 (the host has no `dca` named user — only the image does;
+# the kernel stores the numeric id, which is what matters). Idempotent.
+chown -R 1001:1001 "${tenant_dir}"/{config,data,reports}
 
 # Pick an unused localhost port in 8100-8999.
 #
@@ -176,6 +182,8 @@ BINANCE_API_SECRET=
 TG_BOT_TOKEN=
 ENV
 chmod 600 "${tenant_dir}/.env"
+# The non-root bot (uid 1001) reads this via compose env_file — it must own it.
+chown 1001:1001 "${tenant_dir}/.env"
 
 # Render docker-compose.yml for this tenant
 export TENANT_ID="${tenant_id}"

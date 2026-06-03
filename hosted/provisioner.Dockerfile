@@ -4,6 +4,15 @@
 # socket bind-mounted at /var/run/docker.sock and the docker CLI installed
 # (so it can `docker compose up` on tenant directories).
 #
+# SECURITY (task #150): this image INTENTIONALLY runs as root — no USER
+# directive. It bind-mounts the docker socket (root-equivalent regardless
+# of container uid), writes Caddy route files into /caddy-sites (rw), and
+# chowns tenant dirs to the bot's uid 1001. A non-root USER would break
+# socket/compose access and buy nothing while the socket is mounted. The
+# real hardening is a docker-socket-proxy (separate, larger task); until
+# then the provisioner stays root by necessity. The BOT image (Dockerfile)
+# DOES run non-root (USER dca).
+#
 # Build:
 #   docker build -f hosted/provisioner.Dockerfile -t bitcoiners-provisioner:latest .
 #
