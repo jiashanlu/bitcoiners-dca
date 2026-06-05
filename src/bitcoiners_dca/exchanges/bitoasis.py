@@ -117,6 +117,15 @@ class BitOasisRateLimitError(ExchangeError):
     """Raised on 429 — too many requests."""
 
 
+class BitOasisServerError(ExchangeError):
+    """Raised on transient 5xx — BitOasis origin overloaded or Cloudflare
+    'bad gateway' (502/503/504/500). These are gateway-level failures, not
+    application responses, and almost always clear on the next attempt, so
+    they're retried on idempotent reads (balances, health check, tickers).
+    NOT used on order/withdrawal placement — those take the no-retry path so
+    a transient failure can't double-submit (see place_*/withdraw below)."""
+
+
 class BitOasisExchange(Exchange):
     name = "bitoasis"
 
@@ -168,6 +177,14 @@ class BitOasisExchange(Exchange):
             raise BitOasisRateLimitError(
                 f"BitOasis rate-limited: {resp.text[:200]}"
             )
+        # Transient gateway/overload codes — retryable on idempotent calls.
+        # 502/504 are the Cloudflare bad-gateway/timeout pair seen when
+        # BitOasis's origin is overloaded; 503 is explicit unavailability;
+        # 500 on a read is virtually always infra, not a real app error.
+        if resp.status_code in (500, 502, 503, 504):
+            raise BitOasisServerError(
+                f"BitOasis HTTP {resp.status_code}: {resp.text[:300]}"
+            )
         if resp.status_code >= 400:
             raise ExchangeError(
                 f"BitOasis HTTP {resp.status_code}: {resp.text[:300]}"
@@ -185,7 +202,12 @@ class BitOasisExchange(Exchange):
             stop=stop_after_attempt(RETRY_ATTEMPTS),
             wait=wait_exponential(min=RETRY_WAIT_MIN, max=RETRY_WAIT_MAX),
             retry=retry_if_exception_type(
-                (httpx.NetworkError, httpx.TimeoutException, BitOasisRateLimitError)
+                (
+                    httpx.NetworkError,
+                    httpx.TimeoutException,
+                    BitOasisRateLimitError,
+                    BitOasisServerError,
+                )
             ),
             reraise=True,
         ):

@@ -37,6 +37,7 @@ def _bare_scheduler() -> DCAScheduler:
     s.notifier.notify_error = AsyncMock()
     s.db = MagicMock()
     s.funding_monitor = None
+    s._health_fail_streak = {}
     return s
 
 
@@ -98,6 +99,86 @@ async def test_health_check_runs_when_no_cycle():
 
     ex.health_check.assert_awaited_once()
     s.db.set_meta.assert_called_once()
+
+
+# ─── health-check alert dampening (consecutive-failure gate) ───────────
+
+
+def _failing_exchange(name: str):
+    ex = MagicMock()
+    ex.name = name
+    ex.health_check = AsyncMock(side_effect=RuntimeError("BitOasis HTTP 502"))
+    return ex
+
+
+@pytest.mark.asyncio
+async def test_single_health_failure_does_not_alert():
+    """One transient failure (streak=1) stays silent — no page for a blip."""
+    s = _bare_scheduler()
+    s.exchanges = [_failing_exchange("bitoasis")]
+
+    await s._run_health_check()
+
+    s.notifier.notify_error.assert_not_awaited()
+    assert s._health_fail_streak["bitoasis"] == 1
+
+
+@pytest.mark.asyncio
+async def test_two_consecutive_failures_alert_once():
+    """Threshold (2) crossing pages exactly once, not on every check."""
+    s = _bare_scheduler()
+    s.exchanges = [_failing_exchange("bitoasis")]
+
+    await s._run_health_check()  # streak 1 — silent
+    await s._run_health_check()  # streak 2 — alert
+    await s._run_health_check()  # streak 3 — already paged, stay quiet
+
+    s.notifier.notify_error.assert_awaited_once()
+    assert s._health_fail_streak["bitoasis"] == 3
+
+
+@pytest.mark.asyncio
+async def test_recovery_resets_streak_and_rearming():
+    """After an alert + recovery, the gate re-arms: a later blip is silent
+    again and only a fresh 2-in-a-row pages a second time."""
+    s = _bare_scheduler()
+    ex = _failing_exchange("bitoasis")
+    s.exchanges = [ex]
+
+    await s._run_health_check()  # 1
+    await s._run_health_check()  # 2 → alert #1
+    assert s.notifier.notify_error.await_count == 1
+
+    ex.health_check.side_effect = None
+    ex.health_check.return_value = True
+    await s._run_health_check()  # recovery → streak reset
+    assert s._health_fail_streak["bitoasis"] == 0
+
+    ex.health_check.side_effect = RuntimeError("BitOasis HTTP 502")
+    await s._run_health_check()  # 1 — silent again (re-armed)
+    assert s.notifier.notify_error.await_count == 1
+    await s._run_health_check()  # 2 → alert #2
+    assert s.notifier.notify_error.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_one_exchange_failing_does_not_mute_another():
+    """Streaks are per-exchange — a flapping BitOasis can't suppress an OKX
+    alert and vice versa."""
+    s = _bare_scheduler()
+    bad = _failing_exchange("bitoasis")
+    good = MagicMock()
+    good.name = "okx"
+    good.health_check = AsyncMock(return_value=True)
+    s.exchanges = [bad, good]
+
+    await s._run_health_check()
+    await s._run_health_check()
+
+    # bitoasis paged once; okx never failed so its streak stays 0.
+    s.notifier.notify_error.assert_awaited_once()
+    assert s._health_fail_streak["bitoasis"] == 2
+    assert s._health_fail_streak["okx"] == 0
 
 
 # ─── funding monitor ───────────────────────────────────────────────────

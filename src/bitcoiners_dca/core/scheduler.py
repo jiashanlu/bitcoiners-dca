@@ -40,6 +40,15 @@ from bitcoiners_dca.utils.config import AppConfig
 logger = logging.getLogger(__name__)
 
 
+# Consecutive failed health checks an exchange must rack up before we page the
+# operator. Health checks run every 5 min; at 2, an exchange has to be down for
+# ~10 min before anyone hears about it. This is the second line of defence
+# behind each adapter's own transient-error retry — together they keep a brief
+# Cloudflare 502 / network blip from generating a spurious alert while still
+# surfacing a genuine sustained outage.
+HEALTH_ALERT_THRESHOLD = 2
+
+
 # === DAY-OF-WEEK MAPPING ===
 
 _DOW_MAP = {
@@ -182,6 +191,14 @@ class DCAScheduler:
         # "Cannot send a request, as the client has been closed" on httpx).
         # Set synchronously at cycle entry so any later-firing job sees it.
         self._cycle_in_progress = False
+
+        # Per-exchange consecutive health-check failure streak. We only alert
+        # once an exchange has failed HEALTH_ALERT_THRESHOLD checks IN A ROW —
+        # a single transient blip (e.g. a BitOasis/Cloudflare 502 that outlasts
+        # the adapter's retry window) shouldn't page anyone; a real sustained
+        # outage should. Reset to 0 on the first success, which also emits a
+        # recovery notice if we'd previously alerted.
+        self._health_fail_streak: dict[str, int] = {}
 
     def _historical_price_7d_ago(self) -> Optional[Decimal]:
         """Convenience for the legacy path. Reads from MarketDataProvider."""
@@ -467,10 +484,30 @@ class DCAScheduler:
             try:
                 await ex.health_check()
             except Exception as e:
-                logger.error("Health check FAILED for %s: %s", ex.name, e)
-                await self.notifier.notify_error(
-                    f"{ex.name} health check failed", str(e)
+                streak = self._health_fail_streak.get(ex.name, 0) + 1
+                self._health_fail_streak[ex.name] = streak
+                logger.error(
+                    "Health check FAILED for %s (streak=%d): %s",
+                    ex.name, streak, e,
                 )
+                # Alert exactly once, on the check that first crosses the
+                # threshold. Below it: treat as a transient blip and stay
+                # silent. Above it: we've already paged — don't re-spam every
+                # 5 min for the duration of a sustained outage.
+                if streak == HEALTH_ALERT_THRESHOLD:
+                    await self.notifier.notify_error(
+                        f"{ex.name} health check failed",
+                        f"{e}\n\n(failed {streak} consecutive checks "
+                        f"~{streak * 5}min)",
+                    )
+            else:
+                prior = self._health_fail_streak.get(ex.name, 0)
+                if prior >= HEALTH_ALERT_THRESHOLD:
+                    logger.info(
+                        "Health check RECOVERED for %s after %d consecutive "
+                        "failures", ex.name, prior,
+                    )
+                self._health_fail_streak[ex.name] = 0
 
         try:
             self.db.set_meta(
