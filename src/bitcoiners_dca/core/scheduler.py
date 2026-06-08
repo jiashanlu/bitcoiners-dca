@@ -228,7 +228,19 @@ class DCAScheduler:
         self.strategy = fresh["strategy"]
         self.router = fresh["router"]
         self.monitor = fresh["monitor"]
-        self.risk = fresh.get("risk", self.risk)
+        # Hot-reload the risk CAPS in place on the existing RiskManager rather
+        # than swapping the instance. The rebuild factory intentionally returns
+        # no "risk" key: a fresh RiskManager would drop the on_auto_pause hook
+        # wired in __init__, and a swap isn't needed — all risk STATE (pause
+        # flag, consecutive-failure count, daily spend) lives in the DB; only
+        # the caps live on the instance. Before this, dashboard edits to
+        # risk.max_* silently never took effect until a container restart
+        # (fresh.get("risk", ...) always fell back to the stale startup caps,
+        # clamping a raised single-buy cap back down to the boot-time value).
+        self.risk.max_daily_aed = self.config.risk.max_daily_aed
+        self.risk.max_single_buy_aed = self.config.risk.max_single_buy_aed
+        self.risk.max_consecutive_failures = self.config.risk.max_consecutive_failures
+        self.risk.timezone_str = self.config.strategy.timezone or "Asia/Dubai"
         # If cron-relevant fields changed, swap the trigger on the live job.
         # Before this fix, customers saved Strategy → frequency: hourly +
         # every_n_hours: 2 and the daemon kept firing on the old schedule
