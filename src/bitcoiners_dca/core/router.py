@@ -103,11 +103,39 @@ class RoutingDecision:
         return self.alternatives[0] if self.alternatives else None
 
     def price_premium_vs_alt_pct(self) -> Decimal:
-        """How much MORE the next-best alternative would have cost."""
+        """How much MORE the next-best alternative would have cost.
+
+        Valid because every candidate's `effective_price` is normalised to
+        the cycle's quote currency by `_effective_price_in_quote` before
+        scoring — see that helper. Without normalisation this compared a
+        USDT-denominated price against an AED one and returned the FX rate
+        as a bogus "saving" (e.g. "Saved 269%" for a BTC/USDT vs BTC/AED).
+        """
         if not self.best_alt:
             return Decimal(0)
         diff = self.best_alt.effective_price - self.chosen.effective_price
         return (diff / self.chosen.effective_price) * Decimal(100)
+
+
+def _effective_price_in_quote(route: TradeRoute, sample_amount: Decimal) -> Decimal:
+    """Route effective price in the cycle's QUOTE currency (e.g. AED) per unit
+    of target asset, after fees — the unit every candidate must share to be
+    ranked or compared against each other.
+
+    `TradeRoute.effective_price()` returns the price in the route's INPUT
+    currency. For most routes input == quote (AED-direct, AED→USDT→BTC) so the
+    two coincide. But an 'intermediate-direct' route funded from idle USDT has
+    input=USDT, so its native price is in USDT/BTC — numerically ~3.67x smaller
+    than an AED/BTC price. Ranking or comparing those side-by-side silently
+    mixed currencies: a USDT route always 'won' on magnitude, and the savings
+    line surfaced the USDT→AED FX rate as a fake premium. `quote_to_input_rate`
+    (input-per-quote, the same field the #212 balance fix uses) converts back.
+    """
+    eff = route.effective_price(sample_amount)
+    rate = route.quote_to_input_rate
+    if rate and rate > 0:
+        eff = eff / rate
+    return eff
 
 
 # === Quote bundle, fetched once per exchange to avoid duplicate ticker hits. ===
@@ -623,7 +651,7 @@ class SmartRouter:
         max_spread_pct: Decimal,
         market_data: list[_ExchangeMarketData],
     ) -> RouteCandidate:
-        eff = route.effective_price(sample_amount)
+        eff = _effective_price_in_quote(route, sample_amount)
         hop_mins = self._lookup_minimums(route, market_data)
         try:
             min_input = route.min_input_amount(hop_mins)
@@ -928,7 +956,7 @@ def _reprice_decision_with_local_fees(
             quote_to_input_rate=c.route.quote_to_input_rate,
         )
         c.route = new_route
-        c.effective_price = new_route.effective_price(sample)
+        c.effective_price = _effective_price_in_quote(new_route, sample)
         c.score = c.effective_price
         return c
 

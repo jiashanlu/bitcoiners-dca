@@ -211,11 +211,17 @@ class Notifier:
         )
         if result.overlay_applied:
             msg += f"*Overlay:* {result.overlay_applied}\n"
+        # Label the fill price in the order's ACTUAL quote currency. A stable-
+        # funded cycle fills on BTC/USDT, so price_filled_avg is in USDT — the
+        # old hardcoded "AED" mislabelled it (and was off by the USDT→AED rate).
+        base_ccy, _, quote_ccy = order.pair.partition("/")
+        base_ccy = base_ccy or "BTC"
+        quote_ccy = quote_ccy or "AED"
         msg += (
             f"*Route:* {route_label or order.exchange}\n"
             f"*Type:* {_classify_execution(order)}\n"
-            f"*Bought:* {_fmt_dec(order.amount_base) if order.amount_base else '?'} BTC "
-            f"@ AED {_fmt_dec(order.price_filled_avg, 2) if order.price_filled_avg else '?'}/BTC\n"
+            f"*Bought:* {_fmt_dec(order.amount_base) if order.amount_base else '?'} {base_ccy} "
+            f"@ {quote_ccy} {_fmt_dec(order.price_filled_avg, 2) if order.price_filled_avg else '?'}/{base_ccy}\n"
             f"*Fee:* {_format_fee(order)}\n"
             f"*Order ID:* `{order.order_id}`"
         )

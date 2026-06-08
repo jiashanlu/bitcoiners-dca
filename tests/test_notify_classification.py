@@ -191,3 +191,33 @@ def test_three_hop_route_compounds():
     # (1.006)(1.0005)(1.001) = 1.0075053... → 0.7505...%
     result = _route_taker_fee_pct(route)
     assert abs(result - Decimal("0.7505")) < Decimal("0.001")
+
+
+# ─── fill-price currency label (stable-funded cycle) ───────────────────
+
+
+def test_cycle_message_labels_fill_price_in_order_quote_ccy():
+    """A USDT-funded cycle fills on BTC/USDT — the price line must read 'USDT',
+    not the old hardcoded 'AED' (which mislabelled a USDT price by the FX rate).
+
+    Regression (Ben, 2026-06-08): "@ AED 63135/BTC" was shown for a BTC/USDT
+    fill whose price is in USDT.
+    """
+    from bitcoiners_dca.core.notifications import Notifier
+    from bitcoiners_dca.core.strategy import ExecutionResult
+    from bitcoiners_dca.utils.config import NotificationsConfig
+
+    order = _o(type_=OrderType.MARKET, pair="BTC/USDT",
+               price_filled_avg=Decimal("63135.40"))
+    result = ExecutionResult(
+        timestamp=datetime.now(timezone.utc),
+        intended_amount_aed=Decimal("50"),
+        overlay_applied=None,
+        routing_decision=None,
+        orders=[order],
+    )
+    msg = Notifier(NotificationsConfig())._format_cycle_message(result)
+
+    assert "USDT 63135.4/BTC" in msg
+    bought_line = msg.split("*Bought:*")[1].split("\n")[0]
+    assert "AED" not in bought_line

@@ -277,3 +277,45 @@ async def test_intermediate_direct_balance_converted_to_aed_equivalent():
     assert "BTC/USDT" not in excluded_pairs
     # Prefer-stablecoin nudge is carried as a multiplier (applied, not dead).
     assert c.score_multiplier < Decimal(1)
+
+
+@pytest.mark.asyncio
+async def test_intermediate_direct_effective_price_normalised_to_aed():
+    """A USDT-funded BTC/USDT route must be scored and compared in AED, not in
+    its native USDT units.
+
+    Regression (Ben, 2026-06-08): the BTC/USDT route's effective_price was left
+    in USDT (~100k) while the BTC/AED alt was in AED (~367k). They were ranked
+    and diffed against each other directly, so the savings line reported
+    "Saved ~269%" — which is just the USDT→AED FX rate (367k/100k), not a real
+    premium. After normalisation both prices are AED/BTC and the premium is the
+    tiny genuine fee/spread gap.
+    """
+    usdt_ask = Decimal("3.67")
+    okx = MultiPairFakeExchange("okx", markets={
+        "BTC/AED":  ("367000", "366900"),
+        "USDT/AED": (str(usdt_ask), "3.66"),
+        "BTC/USDT": ("100000", "99990"),
+    }, balances={"AED": "5000", "USDT": "300"})
+
+    router = SmartRouter(
+        enable_two_hop=True,
+        intermediates=["USDT"],
+        prefer_intermediate_balance=True,
+        prefer_intermediate_min=Decimal("10"),
+    )
+    decision = await router.pick([okx], required_quote_amount=Decimal("1000"))
+
+    inter_direct = [
+        c for c in [decision.chosen] + decision.alternatives
+        if c.route.is_direct and c.route.hops[0].pair == "BTC/USDT"
+    ][0]
+    # AED-normalised: ~100k USDT/BTC * 3.67 ≈ 367k AED/BTC, NOT the raw ~100k.
+    assert inter_direct.effective_price > Decimal("350000")
+    # Sanity: it's the BTC/USDT native price scaled by the FX rate (± fees).
+    native = inter_direct.route.effective_price(Decimal("1000"))
+    assert abs(inter_direct.effective_price - native / inter_direct.route.quote_to_input_rate) < Decimal("0.01")
+
+    # The savings premium is now the genuine (tiny) gap, never the FX rate.
+    premium = decision.price_premium_vs_alt_pct()
+    assert abs(premium) < Decimal("5"), f"phantom cross-currency premium: {premium}%"
