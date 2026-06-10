@@ -43,6 +43,10 @@ services:
     cpus: 0.5
     pids_limit: 200
     command: ["run", "--config", "/app/config/config.yaml"]
+    # Must exceed the scheduler's SHUTDOWN_CYCLE_WAIT_SECONDS (120s) so a
+    # deploy's force-recreate doesn't SIGKILL the daemon while it waits
+    # for an in-flight maker cycle to finish (audit 2026-06-10 P2).
+    stop_grace_period: 150s
     volumes:
       - ${TENANT_DATA_DIR}/config:/app/config:ro
       - ${TENANT_DATA_DIR}/data:/app/data
@@ -53,11 +57,19 @@ services:
       - default
     labels:
       - "bitcoiners-dca.tenant=${TENANT_ID}"
+    # Heartbeat-freshness healthcheck (audit 2026-06-10 P2): the old
+    # file-existence test passed forever once the DB existed — a stalled
+    # daemon looked healthy indefinitely. The scheduler writes
+    # daemon.last_heartbeat_at every 5 minutes; >15 min stale = unhealthy.
+    # A tenant with no heartbeat row yet (creds not configured, daemon
+    # idling pre-scheduler) stays healthy — stale detection only arms
+    # after the first heartbeat.
     healthcheck:
-      test: ["CMD", "test", "-f", "/app/data/dca.db"]
+      test: ["CMD", "python", "-c", "import os,sqlite3,sys\nfrom datetime import datetime,timezone\np='/app/data/dca.db'\nsys.exit(1) if not os.path.exists(p) else None\ntry:\n    r=sqlite3.connect(p).execute(\"SELECT value FROM meta WHERE key='daemon.last_heartbeat_at'\").fetchone()\nexcept Exception:\n    sys.exit(0)\nsys.exit(0 if not (r and r[0]) else (0 if (datetime.now(timezone.utc)-datetime.fromisoformat(r[0])).total_seconds()<900 else 1))"]
       interval: 60s
-      timeout: 5s
+      timeout: 10s
       retries: 3
+      start_period: 90s
 
   dashboard:
     image: ${IMAGE_TAG}
@@ -100,11 +112,17 @@ services:
       # cf-access-authenticated-user-email header is also present.
       DCA_TRUSTED_PROXY_HOSTS: "app.bitcoiners.ae,dev-app.bitcoiners.ae"
     ports:
-      # Bind to the LAN. bitcoiners-app (on a different LXC) reaches the
-      # dashboard at http://<tenants-lxc-lan-ip>:${TENANT_DASH_PORT}/.
-      # The tenants-LXC firewall (ufw) restricts this port to the source IP
-      # of bitcoiners-app — nobody else on the LAN can reach it.
-      - "0.0.0.0:${TENANT_DASH_PORT}:8000"
+      # Bind address is environment-specific (audit 2026-06-10 P2 —
+      # 0.0.0.0 on Hetzner published every tenant dashboard on the public
+      # IP, leaving only the CF-header app gate between the internet and
+      # customer trade data):
+      #   Hetzner prod: default 127.0.0.1 — cloudflared (host service)
+      #     reaches it on loopback; nothing else needs the port.
+      #   Home dev (tenants-LXC): set TENANT_DASH_BIND=0.0.0.0 in the
+      #     tenant .env — bitcoiners-app sits on a DIFFERENT LXC and
+      #     reaches the dashboard over the LAN; ufw restricts the port to
+      #     the bitcoiners-app source IP.
+      - "${TENANT_DASH_BIND:-127.0.0.1}:${TENANT_DASH_PORT}:8000"
     volumes:
       # Dashboard writes to all three: config edits (strategy YAML),
       # secrets DB (Fernet-encrypted credentials), reports (tax CSV

@@ -15,6 +15,13 @@ services:
     image: bitcoiners-provisioner:latest
     container_name: bitcoiners-provisioner
     restart: unless-stopped
+    # Resource limits (audit 2026-06-10 P3): this container holds the
+    # docker socket — a runaway/retry-storm provisioner must not be able
+    # to starve the tenant bots on the same host.
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 0.5
+    pids_limit: 200
     ports:
       # Bind to loopback only. Caddy reaches the provisioner by container name
       # on the `tenants` network, and the CF tunnel's cloudflared (host systemd
