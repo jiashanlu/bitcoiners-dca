@@ -48,12 +48,34 @@ _PERIODS_PER_YEAR: dict[str, int] = {
 }
 
 
+# Clean divisors of 24 — the only cadences a `*/N` cron expresses without
+# drifting across the day boundary.
+_CLEAN_HOUR_DIVISORS = (24, 12, 8, 6, 4, 3, 2, 1)
+
+
+def snap_every_n_hours(n) -> int:
+    """Snap `every_n_hours` to the closest clean divisor of 24 at or below n.
+
+    SINGLE source of truth, shared by the scheduler's cron builder AND the
+    budget→per-cycle derivation. Before this, the cron builder snapped a
+    non-divisor (e.g. 5 → fires every 4h) while derive_per_cycle sized the
+    amount for the RAW cadence (a 5h-sized buy every 4h = ~25% budget
+    overspend on every cycle, audit 2026-06-10 P1).
+    """
+    try:
+        n = int(n or 1)
+    except (TypeError, ValueError):
+        n = 1
+    n = min(24, max(1, n))
+    return next(d for d in _CLEAN_HOUR_DIVISORS if d <= n)
+
+
 def _effective_cycles_per_year(frequency: str, every_n_hours: int = 1) -> int:
     """Effective cycles per year accounting for hourly's `every_n_hours`
     sub-divider. For non-hourly frequencies, every_n_hours is ignored."""
     if frequency == "hourly":
-        n = max(1, every_n_hours or 1)
-        return _CYCLES_PER_YEAR["hourly"] // n
+        # Snapped, NOT raw — must match the cadence the cron actually fires.
+        return _CYCLES_PER_YEAR["hourly"] // snap_every_n_hours(every_n_hours)
     return _CYCLES_PER_YEAR[frequency]
 
 
@@ -535,11 +557,28 @@ class DCAStrategy:
                     f"refusing to thread to next hop. Funds (~{current_amount} "
                     f"{hop.input_ccy}) may remain on {hop.exchange}."
                 )
+            # Thread the NET amount to the next hop. Some exchanges (OKX
+            # spot buys) bill the fee in the RECEIVED asset — the wallet
+            # actually holds amount_base − fee_base, so spending the gross
+            # fill on hop K+1 overdraws by the fee: the exchange either
+            # rejects with insufficient-funds or silently dips into any
+            # pre-existing balance of that asset (audit 2026-06-10 P1).
             current_amount = order.amount_base
+            if order.fee_base and order.fee_base > 0:
+                current_amount = current_amount - order.fee_base
+                if current_amount <= 0:
+                    raise ExchangeError(
+                        f"Hop {i+1}/{len(route.hops)} fee ({order.fee_base}) "
+                        f"consumed the entire fill ({order.amount_base}) — "
+                        f"refusing to thread a non-positive amount"
+                    )
             result.notes.append(
                 f"Hop {i+1}/{len(route.hops)}: {hop.exchange} {hop.pair} "
                 f"({order.type.value}) → {order.amount_base} {hop.output_ccy} "
-                f"(filled @ {order.price_filled_avg})"
+                f"(filled @ {order.price_filled_avg}"
+                + (f", fee {order.fee_base} {hop.output_ccy} deducted before next hop"
+                   if order.fee_base and order.fee_base > 0 else "")
+                + ")"
             )
         return orders
 

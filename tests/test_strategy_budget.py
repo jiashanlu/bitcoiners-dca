@@ -123,3 +123,36 @@ def test_strategy_yaml_respects_explicit_budget():
     assert cfg.budget_amount == Decimal("1000")
     assert cfg.budget_period == "monthly"
     assert cfg.amount_aed == Decimal("230.77")
+
+
+# === audit 2026-06-10 P1: derive and cron must agree on every_n_hours ===
+
+def test_non_divisor_every_n_hours_derives_for_snapped_cadence():
+    """every_n_hours=5 actually FIRES every 4h (the cron snaps to a clean
+    divisor of 24). The per-cycle amount must be sized for the snapped
+    cadence too — sizing for 5h while firing every 4h overspent the
+    stated budget by ~25% on every cycle."""
+    from bitcoiners_dca.core.strategy import derive_per_cycle
+
+    snapped = derive_per_cycle(
+        Decimal("240"), "daily", "hourly", every_n_hours=5
+    )
+    explicit_4h = derive_per_cycle(
+        Decimal("240"), "daily", "hourly", every_n_hours=4
+    )
+    assert snapped == explicit_4h == Decimal("40.00")  # 240/day ÷ 6 cycles
+
+
+def test_snap_every_n_hours_contract():
+    from bitcoiners_dca.core.strategy import snap_every_n_hours
+
+    assert snap_every_n_hours(1) == 1
+    assert snap_every_n_hours(2) == 2
+    assert snap_every_n_hours(5) == 4
+    assert snap_every_n_hours(7) == 6
+    assert snap_every_n_hours(11) == 8
+    assert snap_every_n_hours(24) == 24
+    assert snap_every_n_hours(99) == 24    # clamped into 1..24
+    assert snap_every_n_hours(0) == 1
+    assert snap_every_n_hours(None) == 1
+    assert snap_every_n_hours("3") == 3

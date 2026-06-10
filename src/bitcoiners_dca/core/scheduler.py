@@ -83,24 +83,24 @@ def _build_cron_trigger(cfg: AppConfig) -> CronTrigger:
     kwargs: dict = {"minute": int(minute), "timezone": tz}
 
     if freq == "hourly":
-        n = max(1, int(getattr(cfg.strategy, "every_n_hours", 1) or 1))
-        if n == 1:
-            # Every hour at the configured minute — `hour` wildcard.
-            pass
-        elif 24 % n == 0:
-            # 2,3,4,6,8,12 → clean repeating cron (e.g. */2 = 0,2,4,…22)
-            kwargs["hour"] = f"*/{n}"
-        else:
-            # Non-divisors of 24 (5, 7, 9, 10, 11, …) would drift across
-            # the day boundary if we used */N. Snap to the closest clean
-            # divisor below and warn — keeps cron deterministic.
-            cleaner = max(d for d in (1, 2, 3, 4, 6, 8, 12) if d <= n)
+        # snap_every_n_hours is the SINGLE source of truth shared with
+        # derive_per_cycle — before this, the cron snapped a non-divisor
+        # (e.g. 5 → fires every 4h) while the per-cycle amount stayed sized
+        # for the raw 5h cadence, overspending the user's budget ~25% on
+        # every cycle (audit 2026-06-10 P1).
+        from bitcoiners_dca.core.strategy import snap_every_n_hours
+        raw = getattr(cfg.strategy, "every_n_hours", 1)
+        n = snap_every_n_hours(raw)
+        if n != max(1, int(raw or 1)):
             logger.warning(
-                "every_n_hours=%d isn't a clean divisor of 24; using every %d hours instead. "
-                "Stick to 1, 2, 3, 4, 6, 8, or 12 for predictable cadence.",
-                n, cleaner,
+                "every_n_hours=%s isn't a clean divisor of 24; using every %d "
+                "hours instead (and sizing the per-cycle amount to match). "
+                "Stick to 1, 2, 3, 4, 6, 8, 12, or 24 for predictable cadence.",
+                raw, n,
             )
-            kwargs["hour"] = f"*/{cleaner}" if cleaner > 1 else "*"
+        if n > 1:
+            kwargs["hour"] = f"*/{n}"
+        # n == 1: every hour at the configured minute — `hour` wildcard.
     elif freq == "daily":
         kwargs["hour"] = int(hour)
     elif freq == "weekly":

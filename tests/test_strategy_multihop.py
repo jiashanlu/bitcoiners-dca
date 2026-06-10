@@ -175,3 +175,42 @@ async def test_intermediate_direct_sizes_order_in_usdt_not_aed():
     assert abs(spent - expected_usdt) < Decimal("1")
     # Never exceeds the held idle USDT balance.
     assert spent <= Decimal("500")
+
+
+@pytest.mark.asyncio
+async def test_two_hop_threads_net_of_base_billed_fee():
+    """OKX bills spot buy fees in the RECEIVED asset — after hop 1 the
+    wallet holds amount_base − fee_base. Threading the gross fill made
+    hop 2 overdraw by the fee (audit 2026-06-10 P1)."""
+
+    class BaseFeeExchange(TwoHopStubExchange):
+        async def place_market_buy(self, pair, quote_amount):
+            order = await super().place_market_buy(pair, quote_amount)
+            # Re-bill the fee in BASE units (OKX-style) instead of quote.
+            fee_base = (order.amount_base or Decimal(0)) * Decimal("0.001")
+            return order.model_copy(update={
+                "fee_quote": Decimal(0),
+                "fee_base": fee_base,
+                "amount_base": order.amount_base,  # gross fill, fee billed on top
+            })
+
+    okx = BaseFeeExchange("okx", prices={
+        "BTC/AED":  "301050",
+        "USDT/AED": "3.665",
+        "BTC/USDT": "81934.6",
+    }, balances={"AED": "100000"})
+
+    cfg = StrategyConfig(base_amount_aed=Decimal("1000"), pair="BTC/AED")
+    router = SmartRouter(enable_two_hop=True, intermediates=["USDT"])
+    strategy = DCAStrategy(cfg, router)
+
+    result = await strategy.execute([okx])
+
+    assert len(result.orders) == 2
+    hop1 = result.orders[0]
+    hop2 = result.orders[1]
+    net_usdt = hop1.amount_base - hop1.fee_base
+    # Hop 2 spends the NET USDT the wallet actually holds, not the gross.
+    assert hop2.amount_quote == net_usdt
+    assert hop2.amount_quote < hop1.amount_base
+    assert result.errors == []
