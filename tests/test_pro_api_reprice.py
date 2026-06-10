@@ -63,8 +63,9 @@ def test_reprice_corrects_usdt_leg_fee():
         alternatives=[RouteCandidate(two_hop, server_two_eff, server_two_eff, Decimal(0))],
     )
 
-    out = _reprice_decision_with_local_fees(decision, [md], Decimal(1000))
+    out = _reprice_decision_with_local_fees(decision, [md], Decimal(1000), "BTC/AED")
 
+    assert out is not None
     repriced = [out.chosen] + out.alternatives
     two = next(c for c in repriced if len(c.route.hops) == 2)
     one = next(c for c in repriced if len(c.route.hops) == 1)

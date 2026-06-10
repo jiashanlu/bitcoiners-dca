@@ -492,21 +492,25 @@ class SmartRouter:
                     ):
                         # AED-per-intermediate from the <inter>/AED ticker
                         # (the same pair as the two-hop leg-1). Without it we
-                        # cannot convert units — leave quote_balance None
-                        # (trust-user / don't filter on a wrong-unit number)
-                        # and don't size in input units.
+                        # cannot convert units, so the route is unusable.
                         inter_quote_tk = md.tickers.get(f"{inter}/{quote_ccy}")
                         aed_per_inter = (
                             inter_quote_tk.ask
                             if inter_quote_tk and inter_quote_tk.ask and inter_quote_tk.ask > 0
                             else None
                         )
-                        if aed_per_inter is not None:
-                            quote_bal_aed = inter_balance * aed_per_inter
-                            quote_to_input_rate = Decimal(1) / aed_per_inter
-                        else:
-                            quote_bal_aed = None
-                            quote_to_input_rate = None
+                        if aed_per_inter is None:
+                            # No <inter>/<quote> ticker → no conversion rate.
+                            # The route could neither be ranked in quote units
+                            # (its native price is ~FX-rate smaller, so it
+                            # would always "win") nor sized in input units
+                            # (the quote budget would be spent raw as <inter>,
+                            # an ~FX-rate overspend). Skip it — the two-hop
+                            # route via the same intermediate remains
+                            # available. (Audit 2026-06-10 P0/P1.)
+                            continue
+                        quote_bal_aed = inter_balance * aed_per_inter
+                        quote_to_input_rate = Decimal(1) / aed_per_inter
                         hop = TradeHop(
                             md.exchange.name,
                             direct_pair_via_inter,
@@ -859,6 +863,7 @@ def _market_data_to_payload(
 def _decode_remote_decision(
     data: dict,
     pair: str,
+    market_data: list["_ExchangeMarketData"],
 ) -> Optional[RoutingDecision]:
     """Translate the /api/pro/route JSON response into a RoutingDecision.
 
@@ -870,7 +875,19 @@ def _decode_remote_decision(
           stub: false }
 
     Returns None if the shape is malformed — caller falls back to local.
+
+    Currency safety (audit 2026-06-10 P0): the wire format has no
+    quote_to_input_rate field, but the server emits "held-USDT"
+    intermediate-direct candidates whose input currency is NOT the cycle
+    quote. Rebuilding those without a rate re-creates the #212 bug through
+    the remote path: the AED budget number gets spent as raw USDT (~3.67x
+    overspend), the balance clamp compares mixed units, and the local
+    re-pricing ranks the USDT-denominated price as ~3.67x "cheaper" so the
+    broken route always wins. We therefore reconstruct the rate from the
+    bot's OWN tickers (never trust the wire for a unit-conversion factor)
+    and reject any candidate whose rate can't be derived locally.
     """
+    quote_ccy = pair.split("/")[1]
 
     def _to_candidate(c: dict) -> RouteCandidate:
         hops_raw = c.get("hops") or []
@@ -887,28 +904,60 @@ def _decode_remote_decision(
             for h in hops_raw
         )
         qb = c.get("quote_balance")
+        qb = Decimal(str(qb)) if qb is not None else None
+        rate = None
+        input_ccy = hops[0].input_ccy
+        if input_ccy != quote_ccy:
+            local_ask = None
+            for md in market_data:
+                if md.exchange.name == hops[0].exchange:
+                    tk = md.tickers.get(f"{input_ccy}/{quote_ccy}")
+                    if tk is not None and tk.ask and tk.ask > 0:
+                        local_ask = tk.ask
+                    break
+            if local_ask is None:
+                raise ValueError(
+                    f"route spends {input_ccy} but cycle quote is {quote_ccy} "
+                    f"and no local {input_ccy}/{quote_ccy} ticker exists on "
+                    f"{hops[0].exchange} to derive a conversion rate"
+                )
+            rate = Decimal(1) / local_ask
+            # The server reports a held-intermediate balance in INPUT units
+            # (e.g. raw USDT). Convert to quote units so the strategy's
+            # balance clamp compares like-for-like — mirrors what the local
+            # enumerator stores.
+            if qb is not None:
+                qb = qb / rate
         route = TradeRoute(
             hops=hops,
-            quote_balance=Decimal(str(qb)) if qb is not None else None,
+            quote_balance=qb,
             cross_exchange=False,
+            quote_to_input_rate=rate,
         )
         return RouteCandidate(
             route=route,
             effective_price=Decimal(str(c["effective_price"])),
             score=Decimal(str(c["effective_price"])),
             max_spread_pct=Decimal(str(c.get("max_spread_pct", 0))),
-            quote_balance=Decimal(str(qb)) if qb is not None else None,
+            quote_balance=qb,
             note=c.get("note", ""),
         )
 
     try:
         chosen = _to_candidate(data["chosen"])
-        alternatives = [_to_candidate(c) for c in data.get("alternatives", [])]
     except (KeyError, TypeError, ValueError) as e:
         logger.warning(
-            "[pro-api] malformed /api/pro/route response, falling back: %s", e
+            "[pro-api] cannot decode remote chosen route, falling back: %s", e
         )
         return None
+    alternatives = []
+    for c in data.get("alternatives", []):
+        try:
+            alternatives.append(_to_candidate(c))
+        except (KeyError, TypeError, ValueError) as e:
+            # A bad alternative shouldn't sink the whole remote decision —
+            # drop it; the chosen route already decoded safely.
+            logger.warning("[pro-api] dropping undecodable alternative: %s", e)
 
     return RoutingDecision(
         chosen=chosen,
@@ -922,7 +971,8 @@ def _reprice_decision_with_local_fees(
     decision: RoutingDecision,
     market_data: list["_ExchangeMarketData"],
     required_quote_amount: Optional[Decimal],
-) -> RoutingDecision:
+    pair: str,
+) -> Optional[RoutingDecision]:
     """Re-rank a remote decision using the bot's OWN per-pair taker fees.
 
     The Pro API server prices hops from a single scalar taker (the direct
@@ -932,7 +982,14 @@ def _reprice_decision_with_local_fees(
     recompute effective_price locally with the correct per-pair fee, then
     re-sort. This keeps fee correctness even if the server never consumes
     `taker_pct_by_pair`.
+
+    Returns None (caller falls back to local routing) if no candidate can
+    be ranked safely — a route spending a non-quote input currency without
+    a conversion rate must never enter the sort: its numerically smaller
+    price would always "win" and then overspend by the FX rate at
+    execution (audit 2026-06-10 P0).
     """
+    quote_ccy = pair.split("/")[1]
     taker_by: dict[tuple[str, str], Decimal] = {}
     for md in market_data:
         for p in md.tickers:
@@ -961,9 +1018,22 @@ def _reprice_decision_with_local_fees(
         return c
 
     all_c = [reprice(decision.chosen)] + [reprice(a) for a in decision.alternatives]
-    all_c.sort(key=lambda c: c.score)
-    decision.chosen = all_c[0]
-    decision.alternatives = all_c[1:]
+    safe = [
+        c for c in all_c
+        if c.route.input_ccy == quote_ccy
+        or (c.route.quote_to_input_rate and c.route.quote_to_input_rate > 0)
+    ]
+    if len(safe) < len(all_c):
+        logger.warning(
+            "[pro-api] dropped %d remote candidate(s) spending a non-%s input "
+            "with no conversion rate — unrankable cross-currency price",
+            len(all_c) - len(safe), quote_ccy,
+        )
+    if not safe:
+        return None
+    safe.sort(key=lambda c: c.score)
+    decision.chosen = safe[0]
+    decision.alternatives = safe[1:]
     decision.reason = (
         f"Picked {decision.chosen.label} @ effective "
         f"{decision.chosen.effective_price:.2f} (Pro API route, locally "
@@ -1069,7 +1139,7 @@ async def _remote_pick(
         )
         return None
 
-    decision = _decode_remote_decision(data, pair)
+    decision = _decode_remote_decision(data, pair, market_data)
     if decision is None:
         await pro_api_status.record_fallback(
             "/api/pro/route", "malformed response (decode failed)",
@@ -1079,8 +1149,13 @@ async def _remote_pick(
     # Re-price with local per-pair fees so a fee-blind server can't bias the
     # pick (audit 2026-06-02 pro-api-payload-drops-per-pair-fees).
     decision = _reprice_decision_with_local_fees(
-        decision, market_data, required_quote_amount
+        decision, market_data, required_quote_amount, pair
     )
+    if decision is None:
+        await pro_api_status.record_fallback(
+            "/api/pro/route", "no safely-rankable remote candidate",
+        )
+        return None
     logger.info(
         "[pro-api] remote pick: %s @ %s",
         decision.chosen.label,

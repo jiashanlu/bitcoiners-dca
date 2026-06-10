@@ -389,6 +389,20 @@ class DCAStrategy:
                 f"{exec_amount} {chosen_route.input_ccy} "
                 f"(rate {_q2i})"
             )
+        elif chosen_route.input_ccy != self.config.pair.split("/")[1]:
+            # Last line of defense (audit 2026-06-10 P0): a route that spends
+            # a different currency than the cycle quote MUST carry a
+            # conversion rate — the router/decoder guarantee it. Executing
+            # the raw quote-denominated budget as input currency would
+            # overspend by the FX rate (~3.67x for USDT), bypassing every
+            # risk cap. Refuse the cycle rather than guess.
+            result.errors.append(
+                f"refusing route {decision.chosen.label}: input currency "
+                f"{chosen_route.input_ccy} differs from cycle quote "
+                f"{self.config.pair.split('/')[1]} but the route carries no "
+                f"conversion rate — executing would overspend by the FX rate"
+            )
+            return result
         try:
             orders = await self._execute_route(
                 chosen_route, exec_amount, exchange_map, result,
