@@ -169,20 +169,21 @@ class DCAScheduler:
         )
         self._rebuild_dependencies = rebuild_dependencies
         self.market_data = MarketDataProvider(db=db)
-        self.funding_monitor: Optional[FundingMonitor] = None
-        if config.funding_monitor.enabled:
-            self.funding_monitor = FundingMonitor(
-                db=db,
-                alert_threshold_pct=config.funding_monitor.alert_threshold_pct,
-                alert_negative_threshold_pct=config.funding_monitor.alert_negative_threshold_pct,
-                alert_cooldown_hours=config.funding_monitor.alert_cooldown_hours,
-                instruments=[
-                    {"exchange": i.exchange, "symbol": i.symbol}
-                    for i in config.funding_monitor.instruments
-                ],
-            )
+        self.funding_monitor = self._build_funding_monitor(config)
         self._scheduler = AsyncIOScheduler()
         self._stop_event = asyncio.Event()
+        # Serialises the periodic jobs against each other and against the
+        # cycle's hot-reload. _cycle_in_progress only protects the CYCLE from
+        # the 5-min jobs; the jobs were not protected from each other — the
+        # arbitrage job's _reload_if_changed swapped self.exchanges and
+        # closed the old clients while a concurrently-running health check
+        # was still iterating its snapshot of the old list, producing
+        # "client has been closed" failures, false health-streak increments
+        # and spurious pages (audit 2026-06-10 P2). Jobs hold this for their
+        # whole body; the cycle holds it only across its reload call (the
+        # flag covers the rest), so the lock is never held while awaiting
+        # itself.
+        self._jobs_lock = asyncio.Lock()
         # True for the full duration of a DCA cycle. The 5-minute jobs
         # (arbitrage / health / funding) check this and bail rather than
         # call _reload_if_changed() — a rebuild closes the live exchange
@@ -199,6 +200,20 @@ class DCAScheduler:
         # outage should. Reset to 0 on the first success, which also emits a
         # recovery notice if we'd previously alerted.
         self._health_fail_streak: dict[str, int] = {}
+
+    def _build_funding_monitor(self, config: AppConfig) -> Optional[FundingMonitor]:
+        if not config.funding_monitor.enabled:
+            return None
+        return FundingMonitor(
+            db=self.db,
+            alert_threshold_pct=config.funding_monitor.alert_threshold_pct,
+            alert_negative_threshold_pct=config.funding_monitor.alert_negative_threshold_pct,
+            alert_cooldown_hours=config.funding_monitor.alert_cooldown_hours,
+            instruments=[
+                {"exchange": i.exchange, "symbol": i.symbol}
+                for i in config.funding_monitor.instruments
+            ],
+        )
 
     def _historical_price_7d_ago(self) -> Optional[Decimal]:
         """Convenience for the legacy path. Reads from MarketDataProvider."""
@@ -228,6 +243,44 @@ class DCAScheduler:
         self.strategy = fresh["strategy"]
         self.router = fresh["router"]
         self.monitor = fresh["monitor"]
+        # Notifier is the ALERTING surface of a money bot — a customer who
+        # fixes their Telegram chat_id/token via the dashboard reasonably
+        # believes it took effect, but the daemon kept the boot-time
+        # Notifier and sent (or failed to send) to the old destination
+        # until restart (audit 2026-06-10 P2). Stateless → cheap to swap.
+        # Key-presence check (not .get default) so legacy rebuild factories
+        # without a "notifier" key leave the attribute untouched.
+        if "notifier" in fresh:
+            self.notifier = fresh["notifier"]
+        # FundingMonitor: rebuild on config change, and add/remove/
+        # reschedule its job to match — previously enable/threshold edits
+        # never applied, and enabling after boot never installed the job.
+        old_fm_cfg = getattr(old_cfg, "funding_monitor", None)
+        new_fm_cfg = getattr(self.config, "funding_monitor", None)
+        if new_fm_cfg is not None and old_fm_cfg != new_fm_cfg:
+            self.funding_monitor = self._build_funding_monitor(self.config)
+            try:
+                job = self._scheduler.get_job("funding_monitor")
+                if self.funding_monitor is None:
+                    if job is not None:
+                        self._scheduler.remove_job("funding_monitor")
+                        logger.info("Funding monitor disabled — job removed")
+                else:
+                    trigger = IntervalTrigger(
+                        seconds=self.config.funding_monitor.poll_interval_seconds
+                    )
+                    if job is None:
+                        self._scheduler.add_job(
+                            self._run_funding_check, trigger=trigger,
+                            id="funding_monitor", replace_existing=True,
+                        )
+                        logger.info("Funding monitor enabled — job installed")
+                    else:
+                        self._scheduler.reschedule_job(
+                            "funding_monitor", trigger=trigger
+                        )
+            except Exception as e:
+                logger.warning("funding_monitor job update failed: %s", e)
         # Hot-reload the risk CAPS in place on the existing RiskManager rather
         # than swapping the instance. The rebuild factory intentionally returns
         # no "risk" key: a fresh RiskManager would drop the on_auto_pause hook
@@ -293,9 +346,18 @@ class DCAScheduler:
                 self.db.release_cycle_lock()
         finally:
             self._cycle_in_progress = False
+        # Refresh the "when is the next buy due" marker the startup
+        # catch-up reads — apscheduler has already advanced next_run_time
+        # past this fire.
+        self._persist_next_fire()
 
     async def _run_dca_cycle_inner(self) -> None:
-        await self._reload_if_changed()
+        # Reload swaps + closes exchange clients — take the jobs lock so a
+        # mid-iteration health/arbitrage/funding job can't be left holding
+        # dying clients (the _cycle_in_progress flag keeps jobs from
+        # STARTING during the cycle, but not from finishing).
+        async with self._jobs_lock:
+            await self._reload_if_changed()
 
         # Risk pre-check — paused state + daily/single-buy caps.
         decision = self.risk.evaluate(self.config.strategy.amount_aed)
@@ -328,7 +390,6 @@ class DCAScheduler:
             if decision.reasons:
                 result.notes.extend(decision.reasons)
             self.db.record_cycle(result)
-            await self.notifier.notify_cycle(result)
             # Differentiate three outcomes for the risk-manager streak:
             #   real success    → reset counter
             #   deliberate skip → leave counter unchanged (overlay said no,
@@ -336,6 +397,11 @@ class DCAScheduler:
             #   real failure    → increment counter
             # Previously every 0-order cycle counted as failure → hourly
             # frequency + time_of_day [9..18] auto-paused after 5 night cycles.
+            # This runs BEFORE notify_cycle: a notification FORMATTING crash
+            # must not convert a successful, money-spending buy into a
+            # recorded failure (failure-streak increment toward auto-pause +
+            # duplicate synthetic failed cycle row + false 'cycle failed'
+            # alert — audit 2026-06-10 P3).
             if result.order and not result.errors:
                 self.risk.record_cycle_result(success=True)
             elif result.deliberate_skip and not result.errors:
@@ -343,6 +409,17 @@ class DCAScheduler:
                 pass
             else:
                 self.risk.record_cycle_result(success=False)
+            try:
+                await self.notifier.notify_cycle(result)
+            except Exception:
+                # Transport errors are already swallowed inside the
+                # notifier; this catches FORMATTING crashes. The cycle
+                # itself succeeded and is recorded — never let the message
+                # template take it down.
+                logger.exception(
+                    "notify_cycle failed — cycle succeeded and is recorded; "
+                    "suppressing notification error"
+                )
             # Multi-hop orphan detection: any error mentioning "Orphan"
             # means a hop succeeded then the next failed, leaving funds
             # stuck on the exchange in an intermediate currency. Surface
@@ -412,33 +489,35 @@ class DCAScheduler:
         """Poll for arbitrage. Alerts only on net-positive opportunities."""
         if self._cycle_in_progress:
             return  # don't rebuild/close clients out from under a live DCA cycle
-        await self._reload_if_changed()
-        try:
-            if len(self.exchanges) < 2:
-                return  # need at least 2 exchanges
-            opps = await self.monitor.detect(self.exchanges)
-            for opp in opps:
-                self.db.record_arbitrage(opp, alerted=True)
-                await self.notifier.notify_arbitrage(opp)
-            if opps:
-                logger.info("Found %d arbitrage opportunities", len(opps))
-        except Exception as e:
-            logger.exception("Arbitrage check failed: %s", e)
+        async with self._jobs_lock:
+            await self._reload_if_changed()
+            try:
+                if len(self.exchanges) < 2:
+                    return  # need at least 2 exchanges
+                opps = await self.monitor.detect(self.exchanges)
+                for opp in opps:
+                    self.db.record_arbitrage(opp, alerted=True)
+                    await self.notifier.notify_arbitrage(opp)
+                if opps:
+                    logger.info("Found %d arbitrage opportunities", len(opps))
+            except Exception as e:
+                logger.exception("Arbitrage check failed: %s", e)
 
     async def _run_funding_check(self) -> None:
         if self._cycle_in_progress:
             return  # a cycle is mid-flight — defer to the next 5-min tick
         if not self.funding_monitor:
             return
-        try:
-            readings = await self._funding_readings()
-            for r in readings:
-                msg = self.funding_monitor.evaluate_alert(r)
-                if msg:
-                    logger.info("Funding alert: %s", msg)
-                    await self.notifier.notify_error("Funding-rate alert", msg)
-        except Exception as e:
-            logger.warning("Funding monitor poll failed: %s", e)
+        async with self._jobs_lock:
+            try:
+                readings = await self._funding_readings()
+                for r in readings:
+                    msg = self.funding_monitor.evaluate_alert(r)
+                    if msg:
+                        logger.info("Funding alert: %s", msg)
+                        await self.notifier.notify_error("Funding-rate alert", msg)
+            except Exception as e:
+                logger.warning("Funding monitor poll failed: %s", e)
 
     async def _funding_readings(self):
         """Try the hosted Pro API first (one central poll across all
@@ -497,6 +576,12 @@ class DCAScheduler:
         # would otherwise log a spurious "health check failed" alert.
         if self._cycle_in_progress:
             return
+
+        async with self._jobs_lock:
+            await self._run_health_check_inner()
+
+    async def _run_health_check_inner(self) -> None:
+        from datetime import datetime, timezone
 
         for ex in self.exchanges:
             try:
@@ -591,6 +676,58 @@ class DCAScheduler:
                 self.config.funding_monitor.poll_interval_seconds,
             )
 
+    NEXT_FIRE_META_KEY = "dca.next_fire_at"
+
+    def _persist_next_fire(self) -> None:
+        """Record when the next DCA cycle is due. Read back on startup to
+        detect a fire time that passed while the process was down."""
+        try:
+            job = self._scheduler.get_job("dca_cycle")
+            if job is not None and job.next_run_time is not None:
+                self.db.set_meta(
+                    self.NEXT_FIRE_META_KEY, job.next_run_time.isoformat()
+                )
+        except Exception as e:
+            logger.warning("Failed to persist next fire time: %s", e)
+
+    async def _catch_up_missed_cycle(self) -> None:
+        """Run one cycle now if a scheduled fire passed while we were down.
+
+        The in-memory job store + misfire_grace_time only cover IN-PROCESS
+        lateness; across a restart the cron computes its next fire from
+        `now`, so a daily tenant recreated across its 09:00 fire silently
+        lost that day's buy — and a monthly tenant the whole month (audit
+        2026-06-10 P2). The risk caps + cross-process cycle lock make an
+        immediate catch-up run safe.
+        """
+        from datetime import datetime, timezone
+
+        raw = None
+        try:
+            raw = self.db.get_meta(self.NEXT_FIRE_META_KEY)
+        except Exception as e:
+            logger.warning("Failed to read next-fire meta: %s", e)
+        if not raw:
+            return
+        try:
+            due = datetime.fromisoformat(raw)
+        except ValueError:
+            return
+        if due <= datetime.now(timezone.utc):
+            logger.warning(
+                "Missed DCA cycle detected (was due %s, process was down) — "
+                "running catch-up now", raw,
+            )
+            try:
+                await self.notifier.notify_error(
+                    "Missed cycle caught up",
+                    f"A scheduled buy (due {raw}) was missed while the bot "
+                    f"was offline. Running it now.",
+                )
+            except Exception:
+                logger.exception("catch-up notification failed")
+            await self._run_dca_cycle()
+
     async def run_forever(self) -> None:
         """Start the scheduler and block until SIGTERM/SIGINT.
 
@@ -601,6 +738,14 @@ class DCAScheduler:
 
         self._install_jobs()
         self._scheduler.start()
+
+        # Detect + run a cycle whose fire time passed while we were down,
+        # THEN persist the fresh next-fire marker for the next restart.
+        try:
+            await self._catch_up_missed_cycle()
+        except Exception:
+            logger.exception("missed-cycle catch-up failed")
+        self._persist_next_fire()
 
         # Wire SIGTERM/SIGINT to clean shutdown
         loop = asyncio.get_running_loop()
@@ -618,9 +763,39 @@ class DCAScheduler:
         finally:
             await self.shutdown()
 
+    # How long shutdown waits for an in-flight cycle before closing clients
+    # anyway. Sized to one maker window (tenant default 120s) — the tenant
+    # compose sets stop_grace_period above this so docker doesn't SIGKILL
+    # us mid-wait. Waiting only happens when a cycle IS in flight.
+    SHUTDOWN_CYCLE_WAIT_SECONDS = 120
+
     async def shutdown(self) -> None:
         logger.info("Shutting down scheduler...")
         self._scheduler.shutdown(wait=False)
+        # Closing exchange clients UNDER an in-flight cycle crashes it
+        # mid-hop: its cancel/fallback logic never runs, a resting maker
+        # order is orphaned on the exchange, and a fill during the restart
+        # window never reaches the trades table (daily-cap undercount + tax
+        # CSV gap — audit 2026-06-10 P2). Deploys force-recreate containers
+        # routinely, so wait (bounded) for the cycle to finish first.
+        if self._cycle_in_progress:
+            logger.info(
+                "DCA cycle in flight — waiting up to %ds before closing "
+                "clients", self.SHUTDOWN_CYCLE_WAIT_SECONDS,
+            )
+            for _ in range(self.SHUTDOWN_CYCLE_WAIT_SECONDS):
+                if not self._cycle_in_progress:
+                    break
+                await asyncio.sleep(1)
+            if self._cycle_in_progress:
+                logger.warning(
+                    "Cycle still in flight after %ds — closing anyway; the "
+                    "next cycle's pre-sweep cancels any resting bot order",
+                    self.SHUTDOWN_CYCLE_WAIT_SECONDS,
+                )
+        # Record when the next buy was due so a restart that overshoots it
+        # triggers the startup catch-up.
+        self._persist_next_fire()
         for ex in self.exchanges:
             try:
                 await ex.close()

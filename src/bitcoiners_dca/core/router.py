@@ -113,6 +113,11 @@ class RoutingDecision:
         """
         if not self.best_alt:
             return Decimal(0)
+        # Zero-guard: a malformed candidate (e.g. remote route decoded with
+        # effective_price=0) must degrade to "no premium", not crash the
+        # cycle NOTIFICATION into a recorded failure (audit 2026-06-10 P3).
+        if self.chosen.effective_price <= 0:
+            return Decimal(0)
         diff = self.best_alt.effective_price - self.chosen.effective_price
         return (diff / self.chosen.effective_price) * Decimal(100)
 
@@ -905,6 +910,9 @@ def _decode_remote_decision(
         )
         qb = c.get("quote_balance")
         qb = Decimal(str(qb)) if qb is not None else None
+        eff = Decimal(str(c["effective_price"]))
+        if eff <= 0:
+            raise ValueError(f"non-positive effective_price {eff} from server")
         rate = None
         input_ccy = hops[0].input_ccy
         if input_ccy != quote_ccy:
@@ -936,8 +944,8 @@ def _decode_remote_decision(
         )
         return RouteCandidate(
             route=route,
-            effective_price=Decimal(str(c["effective_price"])),
-            score=Decimal(str(c["effective_price"])),
+            effective_price=eff,
+            score=eff,
             max_spread_pct=Decimal(str(c.get("max_spread_pct", 0))),
             quote_balance=qb,
             note=c.get("note", ""),

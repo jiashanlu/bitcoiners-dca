@@ -11,6 +11,7 @@ Commands:
 """
 from __future__ import annotations
 import asyncio
+import logging
 import shutil
 from decimal import Decimal
 from pathlib import Path
@@ -388,51 +389,86 @@ async def _buy_once(config_path: str, dry: bool):
         max_consecutive_failures=cfg.risk.max_consecutive_failures,
         timezone_str=cfg.strategy.timezone or "Asia/Dubai",
     )
-    decision = rm.evaluate(Decimal(str(cfg.strategy.amount_aed)))
-    if not decision.allow:
-        console.print(f"[red]Risk caps blocked the cycle: {'; '.join(decision.reasons)}[/red]")
-        for ex in exchanges:
-            await ex.close()
-        db.close()
-        return
+    # try/except/finally (audit 2026-06-10 P2): a crash in execute/record/
+    # notify previously leaked every exchange client + the sqlite handle
+    # (Buy-Now runs in the long-lived dashboard process, so failures
+    # accumulated open sessions), and — unlike the scheduler path — never
+    # counted toward the auto-pause failure streak, so a tenant whose buys
+    # only run via Buy-Now could crash-fail forever without tripping
+    # max_consecutive_failures.
+    try:
+        decision = rm.evaluate(Decimal(str(cfg.strategy.amount_aed)))
+        if not decision.allow:
+            console.print(f"[red]Risk caps blocked the cycle: {'; '.join(decision.reasons)}[/red]")
+            return
 
-    result = await strategy.execute(
-        exchanges,
-        historical_price_7d_ago=snap.price_7d_ago_aed,
-        # cap_aed (the real ceiling), not amount_aed (the approved base) —
-        # passing the base neutered every overlay boost (audit 2026-06-10).
-        risk_cap_aed=decision.cap_aed,
-        market_context=snap.to_context_dict(),
-    )
-    if decision.reasons:
-        result.notes.extend(decision.reasons)
-    db.record_cycle(result)
-    await notifier.notify_cycle(result)
-    # Mirror scheduler's risk-result reporting so Buy-now successes
-    # reset the failure counter and Buy-now failures count toward the
-    # auto-pause threshold (W3.4). Deliberate skips don't move the
-    # counter (W3.2).
-    if result.order and not result.errors:
-        rm.record_cycle_result(success=True)
-    elif result.deliberate_skip and not result.errors:
-        pass
-    else:
+        result = await strategy.execute(
+            exchanges,
+            historical_price_7d_ago=snap.price_7d_ago_aed,
+            # cap_aed (the real ceiling), not amount_aed (the approved base) —
+            # passing the base neutered every overlay boost (audit 2026-06-10).
+            risk_cap_aed=decision.cap_aed,
+            market_context=snap.to_context_dict(),
+        )
+        if decision.reasons:
+            result.notes.extend(decision.reasons)
+        db.record_cycle(result)
+        # Mirror scheduler's risk-result reporting so Buy-now successes
+        # reset the failure counter and Buy-now failures count toward the
+        # auto-pause threshold (W3.4). Deliberate skips don't move the
+        # counter (W3.2). Runs BEFORE notify so a notification formatting
+        # crash can't turn a successful buy into a recorded failure.
+        if result.order and not result.errors:
+            rm.record_cycle_result(success=True)
+        elif result.deliberate_skip and not result.errors:
+            pass
+        else:
+            rm.record_cycle_result(success=False)
+        try:
+            await notifier.notify_cycle(result)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "notify_cycle failed — buy itself succeeded and is recorded"
+            )
+
+        if result.order:
+            console.print(f"[green]✓ Bought {result.order.amount_base} BTC on {result.order.exchange} for AED {result.intended_amount_aed}[/green]")
+            if result.routing_decision:
+                console.print(f"  {result.routing_decision.reason}")
+            if result.overlay_applied:
+                console.print(f"  Overlay: {result.overlay_applied}")
+        else:
+            console.print("[red]No order placed.[/red]")
+        for e in result.errors:
+            console.print(f"[yellow]! {e}[/yellow]")
+    except Exception as e:
+        # Parity with the scheduler's crash path: count the failure toward
+        # auto-pause and persist a synthetic failed cycle row so the
+        # dashboard shows WHY there's no buy, then re-raise so the caller
+        # (dashboard Buy-Now wrapper / CLI exit code) still sees the error.
         rm.record_cycle_result(success=False)
-
-    if result.order:
-        console.print(f"[green]✓ Bought {result.order.amount_base} BTC on {result.order.exchange} for AED {result.intended_amount_aed}[/green]")
-        if result.routing_decision:
-            console.print(f"  {result.routing_decision.reason}")
-        if result.overlay_applied:
-            console.print(f"  Overlay: {result.overlay_applied}")
-    else:
-        console.print("[red]No order placed.[/red]")
-    for e in result.errors:
-        console.print(f"[yellow]! {e}[/yellow]")
-
-    for ex in exchanges:
-        await ex.close()
-    db.close()
+        try:
+            from datetime import datetime, timezone
+            from bitcoiners_dca.core.strategy import ExecutionResult
+            db.record_cycle(ExecutionResult(
+                timestamp=datetime.now(timezone.utc),
+                intended_amount_aed=Decimal(str(cfg.strategy.amount_aed)),
+                overlay_applied=None,
+                routing_decision=None,
+                errors=[str(e)[:500]],
+            ))
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "failed to record buy-once failure"
+            )
+        raise
+    finally:
+        for ex in exchanges:
+            try:
+                await ex.close()
+            except Exception:
+                pass
+        db.close()
 
 
 @app.command()
@@ -578,6 +614,10 @@ async def _run_daemon(config_path: str):
             "router": fresh_router,
             "strategy": fresh_strategy,
             "monitor": fresh_monitor,
+            # Notifier is the alerting surface — dashboard edits to the
+            # Telegram chat_id/token must apply on the next tick, not on
+            # the next container restart (audit 2026-06-10 P2).
+            "notifier": Notifier(fresh_cfg.notifications),
         }
 
     scheduler = DCAScheduler(
