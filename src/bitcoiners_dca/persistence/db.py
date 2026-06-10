@@ -13,6 +13,7 @@ Tables:
 from __future__ import annotations
 import json
 import sqlite3
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -132,6 +133,14 @@ class Database:
         # Identifies THIS process as a cycle-lock owner — daemon and dashboard
         # each construct their own Database, so each gets a distinct token.
         self._lock_owner = uuid.uuid4().hex
+        # Serialises WRITES on this shared connection across threads. The
+        # connection is opened check_same_thread=False (FastAPI threadpool)
+        # in autocommit mode with explicit BEGIN IMMEDIATE transactions —
+        # without this lock another thread's INSERT could interleave INTO
+        # an open transaction (joining its fate on ROLLBACK) or hit
+        # 'cannot start a transaction within a transaction' (audit
+        # 2026-06-10 P3). Reads stay lock-free under WAL.
+        self._write_lock = threading.Lock()
 
     def _migrate(self) -> None:
         """Additive migrations for tenant DBs created before a column existed.
@@ -156,25 +165,26 @@ class Database:
         # converts via fee_base × price_filled_avg when needed so the
         # column always carries an AED number. raw_json still has both
         # fields for full fidelity. Audit follow-up 2026-05-24.
-        self._conn.execute(
-            """INSERT OR REPLACE INTO trades
-               (timestamp, exchange, order_id, pair, side, amount_quote,
-                amount_base, price_avg, fee_quote, status, raw_json,
-                amount_quote_aed)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                order.created_at.isoformat(),
-                order.exchange, order.order_id, order.pair, order.side.value,
-                str(order.amount_quote),
-                str(order.amount_base) if order.amount_base else None,
-                str(order.price_filled_avg) if order.price_filled_avg else None,
-                str(order.effective_fee_quote),
-                order.status.value,
-                order.model_dump_json(),
-                str(order.amount_quote_aed) if order.amount_quote_aed is not None else None,
-            ),
-        )
-        self._conn.commit()
+        with self._write_lock:
+            self._conn.execute(
+                """INSERT OR REPLACE INTO trades
+                   (timestamp, exchange, order_id, pair, side, amount_quote,
+                    amount_base, price_avg, fee_quote, status, raw_json,
+                    amount_quote_aed)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    order.created_at.isoformat(),
+                    order.exchange, order.order_id, order.pair, order.side.value,
+                    str(order.amount_quote),
+                    str(order.amount_base) if order.amount_base else None,
+                    str(order.price_filled_avg) if order.price_filled_avg else None,
+                    str(order.effective_fee_quote),
+                    order.status.value,
+                    order.model_dump_json(),
+                    str(order.amount_quote_aed) if order.amount_quote_aed is not None else None,
+                ),
+            )
+            self._conn.commit()
 
     def record_withdrawal(self, w: Withdrawal) -> None:
         self._conn.execute(
@@ -238,11 +248,14 @@ class Database:
         # in BEGIN/COMMIT means either everything lands or nothing does.
         # Note: connection is opened with isolation_level=None (autocommit)
         # so we explicitly drive the transaction with BEGIN here.
-        # BEGIN IMMEDIATE takes the write lock at statement 1 rather than
-        # lazily on first write, so a concurrent writer (FastAPI threadpool
-        # sharing this connection) can't interleave between the cycle_log
-        # insert and the per-hop trade inserts and break cycle atomicity
-        # (audit 2026-06-02 P3).
+        # BEGIN IMMEDIATE takes the SQLite write lock at statement 1;
+        # self._write_lock additionally keeps OTHER THREADS on this shared
+        # connection from issuing writes that would join this transaction
+        # mid-flight (audit 2026-06-02 P3 + 2026-06-10 P3).
+        with self._write_lock:
+            self._record_cycle_locked(result)
+
+    def _record_cycle_locked(self, result: ExecutionResult) -> None:
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             self._conn.execute(
@@ -388,6 +401,10 @@ class Database:
         the cycle finishes (use try/finally). False if another cycle holds it.
         """
         now = datetime.now(timezone.utc)
+        with self._write_lock:
+            return self._try_acquire_cycle_lock_locked(now, ttl_seconds)
+
+    def _try_acquire_cycle_lock_locked(self, now, ttl_seconds: int) -> bool:
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             row = self._conn.execute(

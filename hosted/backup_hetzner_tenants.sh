@@ -51,13 +51,37 @@ log() { echo "[$(date -u +%FT%TZ) backup-hetzner-tenants] $*"; }
 mkdir -p "${DEST_DIR}"
 chmod 700 "${BACKUP_BASE}"
 
+# Consistent SQLite snapshots BEFORE the tar. Tarring a live WAL database
+# copies the -wal/-shm files at different instants than the main file —
+# a torn snapshot that can fail integrity_check on restore (audit
+# 2026-06-10 P2; the old --warning=no-file-changed comment claimed WAL
+# made it restorable, which is only true if all three files are copied
+# atomically — tar doesn't do that). sqlite3's Online Backup API
+# (Connection.backup via each tenant's own container python) produces a
+# point-in-time-consistent dca.db.snapshot INSIDE the data dir, which the
+# tar below picks up. Restore procedure: prefer dca.db.snapshot when
+# present. Skips (container down, no DB yet) keep the old behaviour for
+# that tenant — partial beats nothing.
+log "Creating consistent SQLite snapshots on Hetzner"
+ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=accept-new "${HETZNER_HOST}" '
+  for d in /opt/bitcoiners-dca/tenants/*/; do
+    t=$(basename "$d")
+    c="bitcoiners-dca-${t}-daemon"
+    if [ -f "${d}data/dca.db" ] && docker ps --format "{{.Names}}" | grep -qx "$c"; then
+      docker exec "$c" python -c "
+import sqlite3
+src = sqlite3.connect(\"/app/data/dca.db\")
+dst = sqlite3.connect(\"/app/data/dca.db.snapshot\")
+src.backup(dst)
+dst.close(); src.close()
+" && echo "snapshot OK: $t" || echo "snapshot FAILED: $t (live file will be tarred as-is)" >&2
+    fi
+  done
+' || log "WARNING: snapshot pass had failures — continuing with live files"
+
 # Streaming tar over SSH — avoids creating intermediate files on Hetzner
 # (Hetzner is a 40GB box; we don't want 50 GB of historical backups
 # accumulating there).
-#
-# --warning=no-file-changed: SQLite live writes during snapshot. WAL
-# mode means the snapshot is restorable; checkpoint happens on next
-# dashboard startup.
 #
 # --ignore-failed-read: a permission glitch on one tenant dir shouldn't
 # nuke the whole backup. Better partial than nothing.

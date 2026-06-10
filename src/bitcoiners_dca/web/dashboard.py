@@ -2179,11 +2179,15 @@ def create_app(
     @app.get("/api/cumulative-btc")
     async def api_cumulative_btc():
         db = _db()
+        # pair LIKE 'BTC/%' — only BTC-receiving legs. Without the filter,
+        # the USDT/AED leg of a two-hop cycle contributed its USDT amount
+        # as "BTC" — the same '1003 BTC from 12 cycles' bug the Database
+        # layer already fixed in total_btc_bought (audit 2026-06-10 P2).
         rows = db._conn.execute(
             """SELECT substr(timestamp, 1, 10) AS day,
                       SUM(CAST(amount_base AS REAL)) AS btc_for_day
                FROM trades
-               WHERE side='buy' AND status='filled'
+               WHERE side='buy' AND status='filled' AND pair LIKE 'BTC/%'
                GROUP BY day ORDER BY day ASC"""
         ).fetchall()
         out = []
