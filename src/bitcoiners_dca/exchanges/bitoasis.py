@@ -649,6 +649,22 @@ class BitOasisExchange(Exchange):
         side = OrderSide(str(raw.get("side", "buy")).lower())
         order_type = OrderType(str(raw.get("type", "market")).lower())
 
+        # amount_base must be the EXECUTED quantity, not the requested one.
+        # BitOasis's `base_amount` is the order SIZE — it stays at full size
+        # on OPEN and CANCELED orders. Reporting it as amount_base made an
+        # unfilled maker order look fully bought: the strategy's post-cancel
+        # re-read recorded a phantom PARTIAL for the whole size and
+        # maker_fallback never fell back to taker (audit 2026-06-10 P1).
+        # Trust `executed_amount` when the API provides it; otherwise only a
+        # terminal DONE status proves base_amount was actually executed.
+        executed = raw.get("executed_amount")
+        if executed not in (None, ""):
+            amount_base = _dec(executed)
+        elif status == OrderStatus.FILLED:
+            amount_base = _dec(raw.get("base_amount"))
+        else:
+            amount_base = None  # unfilled / unknown — never claim a fill
+
         return Order(
             exchange=self.name,
             order_id=str(raw.get("id") or ""),
@@ -656,7 +672,7 @@ class BitOasisExchange(Exchange):
             side=side,
             type=order_type,
             amount_quote=quote_amount,
-            amount_base=_dec(raw.get("base_amount")),
+            amount_base=amount_base,
             price_filled_avg=_dec(
                 raw.get("avg_execution_price") or raw.get("price")
             ),

@@ -361,9 +361,27 @@ class BinanceExchange(Exchange):
         except Exception as e:
             raise ExchangeError(f"Binance localentity withdraw failed: {e}") from e
 
+        # The endpoint returns {trId, accepted, info}. accepted=false means
+        # Binance REJECTED the withdrawal (questionnaire/travel-rule
+        # validation) even though HTTP was 200 — reporting that as a PENDING
+        # success told the user their BTC was on its way when nothing will
+        # ever move (audit 2026-06-10 P1).
+        accepted = raw.get("accepted")
+        if accepted is False or str(accepted).lower() == "false":
+            raise WithdrawalDeniedError(
+                f"Binance rejected the travel-rule withdrawal: "
+                f"{raw.get('info') or raw}"
+            )
+        tr_id = str(raw.get("trId") or raw.get("id") or "")
+        if not tr_id:
+            raise ExchangeError(
+                f"Binance localentity withdraw returned no trId — cannot "
+                f"track it: {raw}"
+            )
+
         return Withdrawal(
             exchange=self.name,
-            withdrawal_id=str(raw.get("trId") or raw.get("id") or ""),
+            withdrawal_id=tr_id,
             asset="BTC", amount=amount_btc, address=address,
             fee=Decimal("0.0002"),
             status=WithdrawalStatus.PENDING,
@@ -456,23 +474,82 @@ class BinanceExchange(Exchange):
             q["city"] = (rcvr_info.get("rcvrCountrySubDivision") or "Dubai").strip()
         return q
 
+    # ccxt fetch_withdrawals normalizes Binance's int status to these
+    # strings. The previous map keyed on raw ints 0/1/6, which never match
+    # — every withdrawal reported PENDING forever and failures were
+    # unmappable (audit 2026-06-10).
+    _CCXT_WITHDRAWAL_STATUS = {
+        "pending": WithdrawalStatus.PROCESSING,
+        "ok": WithdrawalStatus.COMPLETE,
+        "canceled": WithdrawalStatus.FAILED,
+        "failed": WithdrawalStatus.FAILED,
+    }
+    # Raw Binance ints, for the localentity history path that bypasses
+    # ccxt's parser: 0 email-sent, 1 cancelled, 2 awaiting approval,
+    # 3 rejected, 4 processing, 5 failure, 6 completed.
+    _RAW_WITHDRAWAL_STATUS = {
+        0: WithdrawalStatus.PENDING,
+        1: WithdrawalStatus.FAILED,
+        2: WithdrawalStatus.PENDING,
+        3: WithdrawalStatus.FAILED,
+        4: WithdrawalStatus.PROCESSING,
+        5: WithdrawalStatus.FAILED,
+        6: WithdrawalStatus.COMPLETE,
+    }
+
     async def get_withdrawal(self, withdrawal_id: str) -> Withdrawal:
         raw_list = await self._client.fetch_withdrawals(code="BTC", limit=50)
         for w in raw_list:
             if str(w.get("id")) == withdrawal_id:
-                status_map = {
-                    0: WithdrawalStatus.PENDING,  # email sent
-                    1: WithdrawalStatus.PROCESSING,
-                    6: WithdrawalStatus.COMPLETE,
-                }
+                status = w.get("status")
+                if isinstance(status, str):
+                    mapped = self._CCXT_WITHDRAWAL_STATUS.get(
+                        status.lower(), WithdrawalStatus.PENDING
+                    )
+                else:
+                    mapped = self._RAW_WITHDRAWAL_STATUS.get(
+                        status, WithdrawalStatus.PENDING
+                    )
                 return Withdrawal(
                     exchange=self.name, withdrawal_id=withdrawal_id,
                     asset="BTC", amount=_to_decimal(w.get("amount")),
                     address=w.get("address", ""),
                     fee=Decimal("0.0002"),
-                    status=status_map.get(w.get("status"), WithdrawalStatus.PENDING),
+                    status=mapped,
                     txid=w.get("txid"),
                     created_at=datetime.fromtimestamp(w.get("timestamp", 0) / 1000, tz=timezone.utc),
+                )
+
+        # UAE travel-rule withdrawals return a trId that lives in the
+        # localentity id space — it never appears in the capital withdraw
+        # history ccxt reads above, so the trId we hand back from
+        # withdraw_btc was previously unpollable (audit 2026-06-10 P1).
+        entries: list[dict] = []
+        try:
+            method = getattr(
+                self._client, "sapiGetLocalentityWithdrawHistory", None
+            )
+            if method is not None:
+                entries = await method({}) or []
+        except Exception as e:  # noqa: BLE001 — fall through to not-found
+            logger.warning("Binance localentity history fetch failed: %s", e)
+        for w in entries:
+            if withdrawal_id in (str(w.get("trId")), str(w.get("id"))):
+                try:
+                    raw_status = int(w.get("status"))
+                except (TypeError, ValueError):
+                    raw_status = -1
+                return Withdrawal(
+                    exchange=self.name, withdrawal_id=withdrawal_id,
+                    asset=str(w.get("coin") or "BTC"),
+                    amount=_to_decimal(w.get("amount")),
+                    address=w.get("address", ""),
+                    fee=_to_decimal(w.get("transactionFee")) or Decimal("0.0002"),
+                    status=self._RAW_WITHDRAWAL_STATUS.get(
+                        raw_status, WithdrawalStatus.PENDING
+                    ),
+                    txid=w.get("txId"),
+                    created_at=datetime.now(timezone.utc),
                 )
         raise ExchangeError(f"Binance withdrawal {withdrawal_id} not found")
 

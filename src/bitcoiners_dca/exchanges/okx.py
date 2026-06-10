@@ -6,6 +6,7 @@ OKX UAE-licensed entity (VARA registration) is the canonical OKX endpoint
 for UAE residents. AED pairs are direct (BTC/AED is supported).
 """
 from __future__ import annotations
+import asyncio
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -174,23 +175,80 @@ class OKXExchange(Exchange):
                 ))
         return out
 
+    async def _order_for_client_id(self, pair: str, cl_ord_id: str):
+        """Look up an order by our clOrdId. Returns the raw ccxt order dict
+        if it exists, False if confirmed absent, None if the lookup itself
+        failed (state unknown)."""
+        try:
+            raw = await self._client.fetch_order(
+                None, pair, params={"clOrdId": cl_ord_id}
+            )
+            return raw if raw else False
+        except ccxt_async.OrderNotFound:
+            return False
+        except Exception as e:  # noqa: BLE001 — any failure means "unknown"
+            logger.warning(
+                "OKX clOrdId lookup failed for %s: %s", cl_ord_id, e
+            )
+            return None
+
+    async def _place_idempotent(
+        self, pair: str, quote_amount: Decimal, cl_ord_id: str, place,
+    ) -> Order:
+        """Place an order with retries that can never double-buy.
+
+        `place` is an async callable that performs the actual create call.
+        Only _SAFE_RETRY_EXCEPTIONS are retried, and before EVERY re-attempt
+        we look the clOrdId up server-side:
+
+          - A network error on placement does not mean the order failed —
+            it may have landed and filled. A MARKET order fills instantly,
+            so OKX's duplicate-clOrdId rejection (which only guards while
+            the original order is still live) does NOT stop a re-placement
+            from buying twice (audit 2026-06-10 P1). The previous blind
+            tenacity @retry relied exactly on that rejection.
+          - If the lookup finds the order, return it — never re-place.
+          - If the lookup itself fails, the state is UNKNOWN: refuse to
+            re-place and surface an error. A failed cycle beats a
+            double-buy; the next cycle's sweep reconciles.
+        """
+        last_exc: Optional[Exception] = None
+        for attempt in range(3):
+            if attempt:
+                await asyncio.sleep(min(2 ** (attempt - 1), 8))
+                existing = await self._order_for_client_id(pair, cl_ord_id)
+                if existing is None:
+                    raise ExchangeError(
+                        f"OKX order state unknown after network error "
+                        f"(clOrdId={cl_ord_id}) — not re-placing to avoid a "
+                        f"double-buy"
+                    ) from last_exc
+                if existing is not False:
+                    logger.warning(
+                        "OKX retry: clOrdId=%s already exists server-side — "
+                        "returning it instead of re-placing", cl_ord_id,
+                    )
+                    return self._normalize_order(existing, pair, quote_amount)
+            try:
+                raw = await place()
+                return self._normalize_order(raw, pair, quote_amount)
+            except _SAFE_RETRY_EXCEPTIONS as e:
+                last_exc = e
+                logger.warning(
+                    "OKX placement attempt %d failed (%s) — will verify "
+                    "before retrying", attempt + 1, e,
+                )
+        raise last_exc  # type: ignore[misc]  # loop always sets it before exit
+
     # Internal place-only path. ONLY retries the create_market_buy_order
-    # call. `_poll_until_settled` MUST NOT be inside the @retry — a
+    # call. `_poll_until_settled` MUST NOT be inside the retry — a
     # network blip during the poll would re-enter and place a SECOND
     # real order. Critical safety boundary.
     #
     # IDEMPOTENCY: the caller (place_market_buy) generates the clOrdId
-    # ONCE and passes it in here. Every retry attempt uses the SAME
-    # clOrdId so OKX's server-side dedupe (error 51001, 5-second window)
-    # catches the duplicate and we don't pay twice. Audit 2026-05-21
-    # flagged that calling make_bot_client_order_id() inside the retry
-    # would defeat the dedupe; this signature change closes the hole.
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(min=1, max=8),
-        retry=retry_if_exception_type(_SAFE_RETRY_EXCEPTIONS),
-        reraise=True,
-    )
+    # ONCE and passes it in here (audit 2026-05-21). Re-attempts go
+    # through _place_idempotent, which verifies the clOrdId server-side
+    # before ever re-placing (audit 2026-06-10).
     async def _create_market_buy_only(
         self, pair: str, quote_amount: Decimal, cl_ord_id: str,
     ) -> Order:
@@ -204,16 +262,19 @@ class OKXExchange(Exchange):
             # retries — see method docstring.
             "clOrdId": cl_ord_id,
         }
-        logger.info(
-            "OKX place_market_buy: pair=%s amount=%s params=%s",
-            pair, float(quote_amount), params,
-        )
-        raw = await self._client.create_market_buy_order(
-            symbol=pair,
-            amount=float(quote_amount),  # ccxt expects float
-            params=params,
-        )
-        return self._normalize_order(raw, pair, quote_amount)
+
+        async def _place():
+            logger.info(
+                "OKX place_market_buy: pair=%s amount=%s params=%s",
+                pair, float(quote_amount), params,
+            )
+            return await self._client.create_market_buy_order(
+                symbol=pair,
+                amount=float(quote_amount),  # ccxt expects float
+                params=params,
+            )
+
+        return await self._place_idempotent(pair, quote_amount, cl_ord_id, _place)
 
     async def place_market_buy(self, pair: str, quote_amount: Decimal) -> Order:
         if self.dry_run:
@@ -271,15 +332,10 @@ class OKXExchange(Exchange):
         return await self._poll_until_settled(pair, order)
 
     # Same idempotency story as _create_market_buy_only above: the outer
-    # wrapper generates clOrdId once, the @retry-wrapped inner reuses it
-    # so OKX dedupes on duplicate-clientOrderId for any retry. Audit P0
-    # 2026-05-21.
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(min=1, max=8),
-        retry=retry_if_exception_type(_SAFE_RETRY_EXCEPTIONS),
-        reraise=True,
-    )
+    # wrapper generates clOrdId once (audit 2026-05-21); re-attempts verify
+    # the clOrdId server-side via _place_idempotent before re-placing
+    # (audit 2026-06-10 — a partially/instantly filled limit order is no
+    # longer live, so the duplicate-clOrdId rejection can't be relied on).
     async def _create_limit_buy_only(
         self,
         pair: str,
@@ -288,22 +344,25 @@ class OKXExchange(Exchange):
         cl_ord_id: str,
     ) -> Order:
         base_amount = quote_amount / limit_price
-        logger.info(
-            "OKX place_limit_buy: pair=%s quote_amount=%s limit_price=%s → base_amount=%s",
-            pair, quote_amount, limit_price, base_amount,
-        )
-        raw = await self._client.create_limit_buy_order(
-            symbol=pair, amount=float(base_amount), price=float(limit_price),
-            # See place_market_buy: cash mode forces spot settlement so
-            # OKX doesn't route through margin and reject for borrow-side
-            # liquidity that DCA accounts don't have. clOrdId is stable
-            # across retries — caller generates it once.
-            params={
-                "tdMode": "cash",
-                "clOrdId": cl_ord_id,
-            },
-        )
-        return self._normalize_order(raw, pair, quote_amount)
+
+        async def _place():
+            logger.info(
+                "OKX place_limit_buy: pair=%s quote_amount=%s limit_price=%s → base_amount=%s",
+                pair, quote_amount, limit_price, base_amount,
+            )
+            return await self._client.create_limit_buy_order(
+                symbol=pair, amount=float(base_amount), price=float(limit_price),
+                # See place_market_buy: cash mode forces spot settlement so
+                # OKX doesn't route through margin and reject for borrow-side
+                # liquidity that DCA accounts don't have. clOrdId is stable
+                # across retries — caller generates it once.
+                params={
+                    "tdMode": "cash",
+                    "clOrdId": cl_ord_id,
+                },
+            )
+
+        return await self._place_idempotent(pair, quote_amount, cl_ord_id, _place)
 
     async def place_limit_buy(
         self,
