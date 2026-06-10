@@ -38,18 +38,21 @@ jobs:
         run: |
           docker build -t bitcoiners-dca:latest -t bitcoiners-dca:git-${GITEA_SHA:0:7} .
 
-      - name: Test gate — pytest inside the built image
+      - name: Test gate — pytest against the built image
         # The image previously shipped to prod without any test run in CI
-        # (audit 2026-06-10 P2). Running the suite inside the image gates
-        # on the actual artifact: runtime deps come from the image, only
-        # the test runner + the tests directory are added.
+        # (audit 2026-06-10 P2). A throwaway build stage layers the tests
+        # onto the EXACT image being shipped and runs the suite during the
+        # build — a -v mount would not work here because the job container
+        # talks to the HOST docker daemon, so host-side volume paths don't
+        # match the job workspace (the #154 runner quirk).
         run: |
-          docker run --rm \
-            -v "$PWD/tests:/work/tests:ro" \
-            -w /work \
-            --entrypoint sh \
-            bitcoiners-dca:latest \
-            -c "pip install -q pytest pytest-asyncio && python -m pytest tests -q"
+          docker build -t bitcoiners-dca:testgate -f - . <<'EOF'
+          FROM bitcoiners-dca:latest
+          COPY tests /work/tests
+          WORKDIR /work
+          RUN pip install -q pytest pytest-asyncio && python -m pytest tests -q
+          EOF
+          docker rmi bitcoiners-dca:testgate >/dev/null 2>&1 || true
 
       - name: Build bitcoiners-provisioner:latest
         run: |
