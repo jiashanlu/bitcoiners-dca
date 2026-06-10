@@ -224,7 +224,9 @@ async def test_excludes_route_when_cycle_below_btc_denominated_min():
     bo_excluded = next(e for e in decision.excluded
                        if e.route.hops[0].exchange == "bitoasis")
     assert "0.000048" in bo_excluded.reason
-    assert bo_excluded.min_input_amount == Decimal("14.400")
+    # 0.000048 BTC × 300,000 = 14.40, plus the 1% snapshot-drift safety
+    # margin the floor now carries (audit 2026-06-10 P3).
+    assert bo_excluded.min_input_amount == Decimal("14.400") * Decimal("1.01")
 
 
 @pytest.mark.asyncio

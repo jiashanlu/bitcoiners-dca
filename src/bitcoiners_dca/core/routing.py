@@ -203,10 +203,21 @@ class TradeRoute:
             # it in the route's overall input currency. For a BUY chain
             # AED→USDT→BTC, walking back through hop_1 means multiplying
             # by hop_1.price (3.67 AED/USDT) to express USDT floor in AED.
+            # Fee-aware: each earlier hop delivers its output NET of the
+            # taker fee, so meeting a downstream floor requires
+            # price × (1 + taker) of input, not just price — without the
+            # fee factor the floor was underestimated by ~the fee on every
+            # earlier hop and borderline cycles hard-rejected at the
+            # exchange (audit 2026-06-10 P3).
             for prev in self.hops[:i]:
-                hop_floor = hop_floor * prev.price
+                hop_floor = hop_floor * prev.price * (Decimal(1) + prev.taker_pct)
             if hop_floor > floor:
                 floor = hop_floor
+        if floor > 0:
+            # Small safety margin: hop prices are snapshots; by execution
+            # time a 1% drift can put an exactly-at-floor order back under
+            # the partner minimum.
+            floor = floor * Decimal("1.01")
         return floor
 
     def effective_price(self, input_amount: Decimal = Decimal(1000)) -> Decimal:

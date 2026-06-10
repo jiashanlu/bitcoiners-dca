@@ -377,6 +377,24 @@ class DCAStrategy:
             )
             amount = new_amount
             result.intended_amount_aed = amount
+            # The router verified the PRE-clamp amount against the partner
+            # minimum; the clamp can push it back under the floor, and a
+            # known-below-minimum order is a guaranteed hard rejection at
+            # the exchange (audit 2026-06-10 P2). Same quote-units math as
+            # the router's filter (#212).
+            floor_in_quote = decision.chosen.min_input_amount
+            _rate = decision.chosen.route.quote_to_input_rate
+            if _rate and _rate > 0 and floor_in_quote > 0:
+                floor_in_quote = floor_in_quote / _rate
+            if floor_in_quote > 0 and amount < floor_in_quote:
+                result.notes.append(
+                    f"clamped amount {amount} is below the venue minimum "
+                    f"(~{floor_in_quote:.2f} in quote units) — skipping this "
+                    f"cycle instead of sending a guaranteed rejection. "
+                    f"Top up the exchange balance or lower the cycle size."
+                )
+                result.deliberate_skip = True
+                return result
 
         # 3. Execute the route hop-by-hop
         exchange_map = {ex.name: ex for ex in exchanges}

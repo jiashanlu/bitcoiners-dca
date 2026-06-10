@@ -256,6 +256,15 @@ class SmartRouter:
                     self.intermediates,
                 )
                 if remote is not None:
+                    # Remote candidates previously bypassed every local
+                    # protection — partner-minimum, spread, balance and the
+                    # preferred-exchange bonus only ran on the local path
+                    # (audit 2026-06-10 P2). Run them through the same
+                    # filter pipeline; None → fall through to local.
+                    remote = self._filter_remote_decision(
+                        remote, market_data, required_quote_amount
+                    )
+                if remote is not None:
                     return remote
             except Exception as e:  # noqa: BLE001 — defensive: never let
                 # remote failure break a cycle
@@ -389,8 +398,22 @@ class SmartRouter:
 
             balances: dict[str, Decimal] = {}
             for c, b in zip(ccys_to_balance, balances_raw):
-                if not isinstance(b, Exception):
-                    balances[c] = b.free if b else Decimal(0)
+                if isinstance(b, Exception):
+                    # A transient fetch failure is NOT "adapter doesn't
+                    # support balances" — leaving the key absent grants this
+                    # exchange the None-balance trust pass that an honestly
+                    # low-balance exchange doesn't get. Retry once; only
+                    # then fall back to trust, loudly (audit 2026-06-10 P3).
+                    try:
+                        b = await ex.get_balance(c)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(
+                            "%s balance fetch for %s failed twice (%s) — "
+                            "routes on it will skip the balance filter this "
+                            "cycle", ex.name, c, e,
+                        )
+                        continue
+                balances[c] = b.free if b else Decimal(0)
 
             minimums: dict[str, OrderMinimum] = {}
             for p, m in zip(pairs_to_try, mins_raw):
@@ -653,6 +676,41 @@ class SmartRouter:
         out.sort(key=lambda c: c.effective_price)
         return out
 
+    def _filter_remote_decision(
+        self,
+        decision: RoutingDecision,
+        market_data: list["_ExchangeMarketData"],
+        required_quote_amount: Optional[Decimal],
+    ) -> Optional[RoutingDecision]:
+        """Run remote candidates through the LOCAL filter pipeline.
+
+        Remote candidates are ordinary RouteCandidates after decode+reprice;
+        feeding them through _apply_filters restores the partner-minimum,
+        spread and balance protections plus the preferred-exchange bonus
+        with one code path (audit 2026-06-10 P2 — the remote early-return
+        previously bypassed all of them). Returns None when nothing
+        survives, sending the caller to the local SmartRouter.
+        """
+        cands = [decision.chosen] + decision.alternatives
+        for c in cands:
+            c.hop_minimums = self._lookup_minimums(c.route, market_data)
+            try:
+                c.min_input_amount = c.route.min_input_amount(c.hop_minimums)
+            except (NotImplementedError, ValueError):
+                c.min_input_amount = Decimal(0)
+        usable, excluded = self._apply_filters(cands, required_quote_amount)
+        if not usable:
+            logger.warning(
+                "[pro-api] all %d remote candidate(s) filtered out by local "
+                "checks (%d excluded by partner minimums) — falling back to "
+                "local routing", len(cands), len(excluded),
+            )
+            return None
+        decision.chosen = usable[0]
+        decision.alternatives = usable[1:]
+        decision.excluded = excluded
+        return decision
+
     def _score(
         self,
         route: TradeRoute,
@@ -723,7 +781,21 @@ class SmartRouter:
             if c.max_spread_pct <= self.exclude_if_spread_pct_above
         ]
         if not usable:
-            usable = candidates[:]  # all wide; fall back to all candidates
+            # Every venue is wider than the threshold. Proceeding is the
+            # documented behaviour (DCA users prefer a fill over a skipped
+            # cycle), but it must be VISIBLE — silently paying a thin-book
+            # spread looked identical to a normal pick (audit 2026-06-10 P3).
+            logger.warning(
+                "All %d route(s) exceed the %s%% spread threshold — "
+                "proceeding with wide-spread candidates",
+                len(candidates), self.exclude_if_spread_pct_above,
+            )
+            for c in candidates:
+                c.note = (
+                    (c.note + " · " if c.note else "")
+                    + f"wide-spread fallback ({c.max_spread_pct:.3f}%)"
+                )
+            usable = candidates[:]
 
         # Balance filter (None = trust user; treat 0 as "underfunded")
         underfunded_fallback = False
@@ -894,25 +966,57 @@ def _decode_remote_decision(
     """
     quote_ccy = pair.split("/")[1]
 
+    target_asset = pair.split("/")[0]
+
     def _to_candidate(c: dict) -> RouteCandidate:
         hops_raw = c.get("hops") or []
         if not hops_raw:
             raise ValueError("candidate has no hops")
-        hops = tuple(
-            TradeHop(
+        # Trust the server only for route STRUCTURE — and verify even that
+        # against locally-fetched data. A wrong/poisoned hop previously
+        # executed verbatim: the wire price became the maker limit price
+        # and an unknown pair/exchange surfaced only as a hard exchange
+        # rejection mid-cycle (audit 2026-06-10 P2).
+        hops_list = []
+        for h in hops_raw:
+            if str(h["side"]).lower() != "buy":
+                raise ValueError(
+                    f"remote hop side {h['side']!r} — only buys are executed"
+                )
+            md_for = next(
+                (m for m in market_data if m.exchange.name == h["exchange"]),
+                None,
+            )
+            if md_for is None:
+                raise ValueError(
+                    f"remote hop exchange {h['exchange']!r} is not locally "
+                    f"configured"
+                )
+            tk = md_for.tickers.get(h["pair"])
+            if tk is None or not tk.ask or tk.ask <= 0:
+                raise ValueError(
+                    f"remote hop pair {h['pair']!r} has no local ticker on "
+                    f"{h['exchange']}"
+                )
+            hops_list.append(TradeHop(
                 exchange=h["exchange"],
                 pair=h["pair"],
-                side=h["side"],
-                price=Decimal(str(h["price"])),
+                side="buy",
+                # OUR observed ask, never the wire's — clamp, don't trust.
+                price=tk.ask,
                 taker_pct=Decimal(str(h["taker_pct"])),
+            ))
+        hops = tuple(hops_list)
+        if hops[-1].output_ccy != target_asset:
+            raise ValueError(
+                f"remote route ends in {hops[-1].output_ccy}, cycle target "
+                f"is {target_asset}"
             )
-            for h in hops_raw
-        )
         qb = c.get("quote_balance")
         qb = Decimal(str(qb)) if qb is not None else None
         eff = Decimal(str(c["effective_price"]))
-        if eff <= 0:
-            raise ValueError(f"non-positive effective_price {eff} from server")
+        if not eff.is_finite() or eff <= 0:
+            raise ValueError(f"non-finite/non-positive effective_price {eff}")
         rate = None
         input_ccy = hops[0].input_ccy
         if input_ccy != quote_ccy:
@@ -1069,6 +1173,25 @@ async def _remote_pick(
     """
     if not _PRO_API_URL:
         return None
+    # The request carries the license token AND the tenant's full balances;
+    # plaintext http would expose both to any on-path observer (audit
+    # 2026-06-10 P3). https only — loopback exempt for local dev, and an
+    # explicit env override for self-hosters who terminate TLS elsewhere.
+    if not _PRO_API_URL.startswith("https://"):
+        is_loopback = _PRO_API_URL.startswith(
+            ("http://localhost", "http://127.0.0.1", "http://[::1]")
+        )
+        if not is_loopback and os.environ.get(
+            "BITCOINERS_DCA_PRO_API_ALLOW_HTTP", ""
+        ) != "1":
+            logger.warning(
+                "[pro-api] BITCOINERS_DCA_PRO_API_URL is not https:// — "
+                "refusing to send the license token + balances in "
+                "plaintext. Using local routing. (Set "
+                "BITCOINERS_DCA_PRO_API_ALLOW_HTTP=1 only if TLS is "
+                "terminated by a trusted local proxy.)"
+            )
+            return None
     try:
         import httpx  # local import — httpx is already a dep for ccxt async
     except ImportError:
