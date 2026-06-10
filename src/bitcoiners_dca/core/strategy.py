@@ -247,7 +247,18 @@ class DCAStrategy:
         # orders that lock up AED and cause every subsequent cycle to fail
         # with "available AED insufficient". Idempotent: 0 open orders is
         # the common case and finishes in milliseconds.
-        sweep_pairs = {"BTC/AED", "USDT/AED", "BTC/USDT"}
+        #
+        # Pairs derive from the router's intermediates — the static
+        # {BTC/AED, USDT/AED, BTC/USDT} set missed every USDC leg, so a
+        # crashed maker cycle on a USDC pair locked funds the sweep never
+        # freed (audit 2026-06-10 P2).
+        target, _, quote = self.config.pair.partition("/")
+        sweep_pairs = {self.config.pair}
+        for inter in getattr(self.router, "intermediates", None) or ["USDT"]:
+            if inter in (quote, target):
+                continue
+            sweep_pairs.add(f"{inter}/{quote}")
+            sweep_pairs.add(f"{target}/{inter}")
         for ex in exchanges:
             for pair in sweep_pairs:
                 try:
@@ -259,6 +270,14 @@ class DCAStrategy:
                         )
                 except NotImplementedError:
                     pass
+                except ExchangeError as e:
+                    # The sweep FOUND a stale bot order and couldn't cancel
+                    # it. Buying anyway risks both orders filling — abort
+                    # this cycle instead (audit 2026-06-10 P2).
+                    result.errors.append(
+                        f"pre-cycle sweep failed on {ex.name} {pair}: {e}"
+                    )
+                    return result
                 except Exception as e:
                     # Don't fail the cycle just because the sweep had a hiccup.
                     result.notes.append(f"pre-cycle sweep on {ex.name} {pair} skipped: {e}")
@@ -349,11 +368,18 @@ class DCAStrategy:
             and chosen_balance > 0
             and chosen_balance < amount
         ):
-            # Two-layer clamp:
-            #   1. Hard ceiling: never spend more than max_pct_of_balance
-            #      of available balance in a single cycle (default 25%).
-            #      Stops a misconfigured 15000-AED amount from sweeping
-            #      a 3700-AED balance to zero on one Buy Now click.
+            # Two-layer clamp — applies ONLY in this underfunded branch
+            # (balance < configured amount). It is deliberately NOT a
+            # global invariant: most DCA users hold roughly one cycle's
+            # worth on-exchange, and globally capping every buy at 25% of
+            # balance would shrink perfectly normal cycles to a quarter
+            # (audit 2026-06-10 P3 flagged the older comment as claiming
+            # more than the code enforces — the comment was wrong, not
+            # the code).
+            #   1. Misconfiguration ceiling: when underfunded, never spend
+            #      more than max_pct_of_balance of what's available
+            #      (default 25%) — stops a fat-fingered 15000-AED amount
+            #      from sweeping a 3700-AED balance to zero on one click.
             #   2. Within that ceiling, take 99% of the lesser of (a) the
             #      available balance, (b) the configured amount — leaves
             #      fee headroom so the exchange doesn't reject for being

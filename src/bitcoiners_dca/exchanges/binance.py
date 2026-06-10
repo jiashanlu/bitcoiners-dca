@@ -72,7 +72,10 @@ class BinanceExchange(Exchange):
             "options": {"defaultType": "spot"},
         })
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
+    # reraise=True: surface the REAL final error, not tenacity's
+    # RetryError[<Future>] wrapper — the wrapper broke error classification
+    # and user-facing messages (audit 2026-06-10 P3).
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), reraise=True)
     async def health_check(self) -> bool:
         try:
             await self._client.load_markets()

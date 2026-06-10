@@ -225,7 +225,10 @@ class BitOasisExchange(Exchange):
         except Exception as e:
             raise ExchangeError(f"BitOasis health check failed: {e}") from e
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=4))
+    # reraise=True: surface the REAL final error, not tenacity's
+    # RetryError[<Future>] wrapper — the wrapper broke error classification
+    # and user-facing messages (audit 2026-06-10 P3).
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=4), reraise=True)
     async def get_ticker(self, pair: str = "BTC/AED") -> Ticker:
         bo = _to_bitoasis_pair(pair)
         data = await self._request(

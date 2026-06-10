@@ -225,14 +225,26 @@ class Exchange(ABC):
 
         Adapters can override with a bulk-cancel endpoint if available.
         """
+        import logging as _logging
+        _log = _logging.getLogger(__name__)
         try:
             client = getattr(self, "_client", None)
             if client is None:
                 return 0
             open_orders = await client.fetch_open_orders(pair)
-        except Exception:
+        except Exception as e:
+            # Can't LIST → can't know whether a stale bot order is resting.
+            # Previously silent (return 0) — indistinguishable from "all
+            # clear". Pairs a venue simply doesn't list land here every
+            # cycle, so warning (not raising) is the right volume
+            # (audit 2026-06-10 P2).
+            _log.warning(
+                "%s pre-cycle sweep could not list open orders for %s: %s",
+                self.name, pair, e,
+            )
             return 0
         n = 0
+        failures: list[str] = []
         for o in open_orders or []:
             oid = o.get("id")
             if not oid:
@@ -244,10 +256,17 @@ class Exchange(ABC):
             try:
                 await self.cancel_order(pair, str(oid))
                 n += 1
-            except Exception:
-                # Individual cancel failures shouldn't abort the sweep — log
-                # but continue. A re-running cycle picks up whatever's left.
-                continue
+            except Exception as e:  # noqa: BLE001
+                # A KNOWN stale bot order we failed to cancel can fill on
+                # top of the new cycle's buy — that's a double-spend risk,
+                # not a hiccup. Collect and surface (audit 2026-06-10 P2).
+                failures.append(f"{oid}: {e}")
+        if failures:
+            raise ExchangeError(
+                f"{self.name} sweep on {pair}: canceled {n} but FAILED to "
+                f"cancel {len(failures)} stale bot order(s) — they may fill "
+                f"on top of this cycle's buy. First error: {failures[0]}"
+            )
         return n
 
     async def wait_for_fill(

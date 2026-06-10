@@ -258,3 +258,48 @@ async def test_binance_get_withdrawal_travel_rule_rejection_maps_failed():
     ])
     w = await ex.get_withdrawal("556")
     assert w.status == WithdrawalStatus.FAILED
+
+
+# ─── audit 2026-06-10 P2/P3: sweep failure surfacing + reraise ─────────
+
+
+@pytest.mark.asyncio
+async def test_sweep_raises_when_bot_order_cannot_be_cancelled():
+    """A KNOWN stale bot order that fails to cancel can fill on top of the
+    new cycle's buy — the sweep must surface that, not swallow it."""
+    from bitcoiners_dca.exchanges.base import BOT_CLORD_PREFIX
+
+    ex = _bare_okx()
+    ex._client.fetch_open_orders = AsyncMock(return_value=[
+        {"id": "stale-1", "clientOrderId": f"{BOT_CLORD_PREFIX}abc"},
+    ])
+    ex.cancel_order = AsyncMock(side_effect=RuntimeError("cancel rejected"))
+
+    with pytest.raises(ExchangeError, match="FAILED to cancel"):
+        await ex.cancel_all_open_orders("BTC/USDT")
+
+
+@pytest.mark.asyncio
+async def test_sweep_list_failure_returns_zero_not_raise():
+    """Pairs the venue doesn't list fail the LIST step every cycle — that
+    stays non-fatal (warning), unlike a failed cancel of a known order."""
+    ex = _bare_okx()
+    ex._client.fetch_open_orders = AsyncMock(side_effect=RuntimeError("no such pair"))
+    assert await ex.cancel_all_open_orders("BTC/USDC") == 0
+
+
+@pytest.mark.asyncio
+async def test_health_check_reraises_real_error_not_retryerror():
+    """tenacity must surface the REAL final exception (reraise=True) so
+    error classification and user messages see 'okx 50110: ...', not
+    'RetryError[<Future ...>]'."""
+    ex = _bare_okx()
+    ex._client.load_markets = AsyncMock(
+        side_effect=ccxt_async.AuthenticationError("okx 50110: IP not whitelisted")
+    )
+    ex._client.fetch_balance = AsyncMock()
+
+    # The adapter wraps into ExchangeError carrying the REAL message —
+    # reraise=True means that's what callers get, never RetryError.
+    with pytest.raises(ExchangeError, match="50110"):
+        await ex.health_check()
