@@ -313,10 +313,16 @@ class DCAScheduler:
                 "Starting DCA cycle (risk-approved amount=AED %s)", decision.amount_aed
             )
             snap = self.market_data.snapshot()
+            # cap_aed, NOT amount_aed: amount_aed is the risk-approved BASE,
+            # and capping overlay output at the base silently neutered every
+            # boost multiplier — dip 2x / drawdown 4x / MVRV 1.5x bought
+            # exactly the base on every scheduled cycle (audit 2026-06-10).
+            # cap_aed is the real ceiling: min(single-buy cap, daily
+            # remainder), or None when no caps are configured.
             result = await self.strategy.execute(
                 self.exchanges,
                 historical_price_7d_ago=snap.price_7d_ago_aed,
-                risk_cap_aed=decision.amount_aed,
+                risk_cap_aed=decision.cap_aed,
                 market_context=snap.to_context_dict(),
             )
             if decision.reasons:

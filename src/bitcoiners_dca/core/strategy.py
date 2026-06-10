@@ -409,6 +409,14 @@ class DCAStrategy:
             )
             result.orders = orders
             if orders:
+                # Stamp the cycle's AED spend on the SPENDING leg (hop 1)
+                # only. For AED-quoted hops this equals amount_quote; for a
+                # stable-funded hop it is the AED budget the stablecoin spend
+                # represents. Hop 2+ stays None — counting them too would
+                # double-count multi-hop cycles. The daily cap and AED totals
+                # read this column (audit 2026-06-10 P1: stable-funded cycles
+                # were invisible to max_daily_aed).
+                orders[0].amount_quote_aed = amount
                 final = orders[-1]
                 result.notes.append(
                     f"Final hop: bought {final.amount_base or '?'} "

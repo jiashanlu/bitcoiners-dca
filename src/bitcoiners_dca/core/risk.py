@@ -42,11 +42,19 @@ class RiskDecision:
 
     - `allow=False` means skip the cycle entirely (paused, or daily cap met).
     - `allow=True` with `amount_aed < intended` means clamp the spend.
+    - `cap_aed` is the binding spend ceiling for THIS cycle — the lesser of
+      the single-buy cap and today's daily-cap remainder, or None when no
+      caps are configured. Callers must pass THIS (not `amount_aed`) as the
+      strategy's `risk_cap_aed`: `amount_aed` is the risk-approved BASE
+      amount, and clamping overlay output to the base silently neutered
+      every boost multiplier (dip 2x, drawdown 4x, MVRV 1.5x bought exactly
+      the base on every production path — audit 2026-06-10 P1).
     - `reasons` contains every factor considered, for audit + notifications.
     """
     allow: bool
     amount_aed: Decimal
     reasons: list[str] = field(default_factory=list)
+    cap_aed: Optional[Decimal] = None
 
 
 class RiskManager:
@@ -97,9 +105,19 @@ class RiskManager:
         Trade timestamps are stored as UTC ISO8601, so a UTC range filter
         is the right comparison even when the user-tz "day" straddles UTC.
 
-        Only counts the AED-spending leg (pair LIKE '%/AED') — same logic
-        as Database.total_aed_spent so we don't double-count two-hop
-        cycles that persist both legs.
+        Counts the AED-equivalent of each cycle's SPENDING leg, including
+        stable-funded cycles and PARTIAL fills (audit 2026-06-10 P1: both
+        were invisible to the cap — `pair LIKE '%/AED'` skipped BTC/USDT
+        spends from held stablecoins, and `status='filled'` skipped partial
+        maker fills that moved real money). Per-row value:
+          - `amount_quote_aed` when set (the strategy stamps it on hop 1,
+            in AED, for every route shape — hop 2+ stays NULL so multi-hop
+            cycles aren't double-counted);
+          - else `amount_quote` for legacy /AED rows written before the
+            column existed.
+        Partial fills count at the full submitted amount, not the filled
+        portion — a spend CAP should over-count the rare partial, never
+        under-count it.
         """
         from zoneinfo import ZoneInfo
         from datetime import timedelta
@@ -116,17 +134,19 @@ class RiskManager:
         # Sum exactly with Decimal — CAST(... AS REAL) coerces the TEXT-stored
         # money to float, diverging from the cap arithmetic (audit P3).
         cur = self.db._conn.execute(
-            """SELECT amount_quote
+            """SELECT amount_quote, amount_quote_aed, pair
                FROM trades
-               WHERE side='buy' AND status='filled'
-                 AND pair LIKE '%/AED'
+               WHERE side='buy' AND status IN ('filled', 'partial')
                  AND timestamp >= ? AND timestamp < ?""",
             (start_iso, end_iso),
         )
         total = Decimal(0)
-        for (val,) in cur.fetchall():
-            if val is not None and val != "":
-                total += Decimal(str(val))
+        for amount_quote, amount_quote_aed, trade_pair in cur.fetchall():
+            if amount_quote_aed not in (None, ""):
+                total += Decimal(str(amount_quote_aed))
+            elif str(trade_pair or "").endswith("/AED") and amount_quote not in (None, ""):
+                # Legacy rows written before amount_quote_aed existed.
+                total += Decimal(str(amount_quote))
         return total
 
     # === STATE MUTATIONS ===
@@ -173,6 +193,9 @@ class RiskManager:
             )
 
         amount = intended_amount_aed
+        # The binding ceiling for the cycle, independent of the base amount.
+        # Overlay boosts may grow the buy up to THIS, never past it.
+        cap: Optional[Decimal] = self.max_single_buy_aed
 
         if self.max_single_buy_aed and amount > self.max_single_buy_aed:
             reasons.append(
@@ -189,6 +212,7 @@ class RiskManager:
                     amount_aed=Decimal("0"),
                     reasons=[f"daily cap reached: AED {spent}/{self.max_daily_aed}"],
                 )
+            cap = remaining if cap is None else min(cap, remaining)
             if amount > remaining:
                 reasons.append(
                     f"clamped to daily-cap remainder "
@@ -202,7 +226,7 @@ class RiskManager:
                 reasons=reasons + ["computed amount is zero"],
             )
 
-        return RiskDecision(allow=True, amount_aed=amount, reasons=reasons)
+        return RiskDecision(allow=True, amount_aed=amount, reasons=reasons, cap_aed=cap)
 
     # === LIFECYCLE HOOKS ===
 

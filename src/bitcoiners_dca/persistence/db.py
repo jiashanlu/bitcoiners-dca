@@ -13,6 +13,7 @@ Tables:
 from __future__ import annotations
 import json
 import sqlite3
+import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -36,6 +37,7 @@ CREATE TABLE IF NOT EXISTS trades (
     fee_quote TEXT,
     status TEXT NOT NULL,
     raw_json TEXT,
+    amount_quote_aed TEXT,
     UNIQUE(exchange, order_id)
 );
 
@@ -126,6 +128,26 @@ class Database:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(SCHEMA)
+        self._migrate()
+        # Identifies THIS process as a cycle-lock owner — daemon and dashboard
+        # each construct their own Database, so each gets a distinct token.
+        self._lock_owner = uuid.uuid4().hex
+
+    def _migrate(self) -> None:
+        """Additive migrations for tenant DBs created before a column existed.
+
+        CREATE TABLE IF NOT EXISTS doesn't alter existing tables, so columns
+        added to SCHEMA must also be back-filled here.
+        """
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(trades)")}
+        if "amount_quote_aed" not in cols:
+            # AED-equivalent spent by this order — set only on the cycle's
+            # spending leg, so daily-cap and totals queries can count
+            # stable-funded (non-/AED) cycles without double-counting
+            # multi-hop legs (audit 2026-06-10 P1).
+            self._conn.execute(
+                "ALTER TABLE trades ADD COLUMN amount_quote_aed TEXT"
+            )
 
     def record_trade(self, order: Order) -> None:
         # Persist the effective fee in QUOTE terms. OKX returns fees
@@ -137,8 +159,9 @@ class Database:
         self._conn.execute(
             """INSERT OR REPLACE INTO trades
                (timestamp, exchange, order_id, pair, side, amount_quote,
-                amount_base, price_avg, fee_quote, status, raw_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                amount_base, price_avg, fee_quote, status, raw_json,
+                amount_quote_aed)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 order.created_at.isoformat(),
                 order.exchange, order.order_id, order.pair, order.side.value,
@@ -148,6 +171,7 @@ class Database:
                 str(order.effective_fee_quote),
                 order.status.value,
                 order.model_dump_json(),
+                str(order.amount_quote_aed) if order.amount_quote_aed is not None else None,
             ),
         )
         self._conn.commit()
@@ -249,8 +273,9 @@ class Database:
                 self._conn.execute(
                     """INSERT OR REPLACE INTO trades
                        (timestamp, exchange, order_id, pair, side, amount_quote,
-                        amount_base, price_avg, fee_quote, status, raw_json)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        amount_base, price_avg, fee_quote, status, raw_json,
+                        amount_quote_aed)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         o.created_at.isoformat(),
                         o.exchange, o.order_id, o.pair, o.side.value,
@@ -266,6 +291,7 @@ class Database:
                         str(o.effective_fee_quote),
                         o.status.value,
                         o.model_dump_json(),
+                        str(o.amount_quote_aed) if o.amount_quote_aed is not None else None,
                     ),
                 )
             self._conn.execute("COMMIT")
@@ -339,11 +365,24 @@ class Database:
     # same daily_spend in a cycle's fill window and each proceed, overspending
     # max_daily_aed by up to one cycle. This advisory lock serialises them.
     CYCLE_LOCK_META_KEY = "cycle_lock_at"
+    # Worst-case legitimate cycle: a 3-hop maker_fallback route is 3 maker
+    # windows (configurable up to 600s each) plus polling/retry overhead.
+    # The previous 900s default expired UNDER such a cycle, letting a
+    # concurrent Buy-Now acquire the lock and overspend the daily cap
+    # (audit 2026-06-10 P1).
+    CYCLE_LOCK_TTL_SECONDS = 2400
 
-    def try_acquire_cycle_lock(self, ttl_seconds: int = 900) -> bool:
+    def try_acquire_cycle_lock(self, ttl_seconds: int = CYCLE_LOCK_TTL_SECONDS) -> bool:
         """Acquire the cross-process cycle lock. Only one DCA cycle (cron or
         Buy-Now) may hold it at a time. Self-expires after ttl_seconds so a
-        crashed cycle can't wedge it (default 900s > the 600s maker timeout).
+        crashed cycle can't wedge it.
+
+        The lock value is "<iso-timestamp>|<owner>" where owner is unique to
+        this Database instance (i.e. this process). release_cycle_lock() only
+        clears a lock this process owns — before that check, a daemon cycle
+        finishing late could clear the DASHBOARD's freshly-acquired lock (or
+        vice versa), reopening the daily-cap overspend race the lock exists
+        to close.
 
         Returns True if acquired — caller MUST call release_cycle_lock() when
         the cycle finishes (use try/finally). False if another cycle holds it.
@@ -356,8 +395,9 @@ class Database:
             ).fetchone()
             held = (row["value"] if row else "") or ""
             if held:
+                held_ts = held.split("|", 1)[0]  # legacy rows have no owner part
                 try:
-                    age = (now - datetime.fromisoformat(held)).total_seconds()
+                    age = (now - datetime.fromisoformat(held_ts)).total_seconds()
                 except ValueError:
                     age = ttl_seconds + 1  # unparseable → treat as stale
                 if age < ttl_seconds:
@@ -367,7 +407,11 @@ class Database:
                 "INSERT INTO meta (key, value, updated_at) VALUES (?, ?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
                 "updated_at = excluded.updated_at",
-                (self.CYCLE_LOCK_META_KEY, now.isoformat(), now.isoformat()),
+                (
+                    self.CYCLE_LOCK_META_KEY,
+                    f"{now.isoformat()}|{self._lock_owner}",
+                    now.isoformat(),
+                ),
             )
             self._conn.execute("COMMIT")
             return True
@@ -376,8 +420,22 @@ class Database:
             raise
 
     def release_cycle_lock(self) -> None:
-        """Release the cross-process cycle lock (idempotent)."""
-        self.set_meta(self.CYCLE_LOCK_META_KEY, "")
+        """Release the cross-process cycle lock (idempotent).
+
+        Owner-checked: only clears a lock acquired by THIS process. A lock
+        held by another process (e.g. the dashboard re-acquired after our TTL
+        expired mid-cycle) is left untouched. Legacy owner-less values are
+        cleared for upgrade compatibility.
+        """
+        self._conn.execute(
+            "UPDATE meta SET value = '', updated_at = ? "
+            "WHERE key = ? AND (value LIKE ? OR value NOT LIKE '%|%')",
+            (
+                datetime.now(timezone.utc).isoformat(),
+                self.CYCLE_LOCK_META_KEY,
+                f"%|{self._lock_owner}",
+            ),
+        )
 
     def _sum_decimal(self, column: str, where: str, params: tuple = ()) -> Decimal:
         """Sum a money column EXACTLY with Decimal.
@@ -408,14 +466,27 @@ class Database:
         )
 
     def total_aed_spent(self) -> Decimal:
-        # Only count the AED-spending leg of each cycle: either a direct
-        # BTC/AED trade or the USDT/AED hop of a multi-hop route. Without
-        # this filter, two-hop cycles double-count (AED spent on USDT,
-        # then USDT spent on BTC — both denominated and summed).
-        return self._sum_decimal(
-            "amount_quote",
-            "side='buy' AND status='filled' AND pair LIKE '%/AED'",
+        # Only count the AED-spending leg of each cycle. Prefer the
+        # amount_quote_aed stamp (set by the strategy on hop 1 only — it
+        # covers stable-funded BTC/USDT cycles that the '%/AED' pair filter
+        # misses) and fall back to amount_quote for legacy /AED rows written
+        # before the column existed. Hop 2+ rows carry no stamp and a
+        # non-AED pair → counted as 0, so two-hop cycles don't double-count.
+        # PARTIAL fills are included at the submitted amount — real money
+        # moved; the tax CSV already counted them while this total didn't
+        # (audit 2026-06-10 P1).
+        cur = self._conn.execute(
+            """SELECT amount_quote, amount_quote_aed, pair
+               FROM trades
+               WHERE side='buy' AND status IN ('filled', 'partial')"""
         )
+        total = Decimal(0)
+        for amount_quote, amount_quote_aed, pair in cur.fetchall():
+            if amount_quote_aed not in (None, ""):
+                total += Decimal(str(amount_quote_aed))
+            elif str(pair or "").endswith("/AED") and amount_quote not in (None, ""):
+                total += Decimal(str(amount_quote))
+        return total
 
     def stable_aed_rates(self) -> dict[str, Decimal]:
         """Per-stablecoin weighted-average AED acquisition rate.

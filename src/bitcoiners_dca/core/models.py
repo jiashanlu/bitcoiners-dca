@@ -81,6 +81,13 @@ class Order(BaseModel):
     status: OrderStatus
     created_at: datetime
     filled_at: Optional[datetime] = None
+    # AED-equivalent this order spent. The strategy sets it on the SPENDING
+    # leg of each cycle only (hop 1): for AED-quoted pairs it equals
+    # amount_quote; for a stable-funded hop (BTC/USDT from held USDT) it is
+    # the AED budget the stablecoin spend represents. Later hops stay None
+    # so multi-hop cycles aren't double-counted. Lets the daily cap and AED
+    # totals see stable-funded cycles (audit 2026-06-10 P1).
+    amount_quote_aed: Optional[Decimal] = None
 
     @property
     def effective_fee_quote(self) -> Decimal:

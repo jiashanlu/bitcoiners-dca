@@ -198,3 +198,51 @@ async def test_auto_withdraw_never_fires_at_strategy_level(router):
 
     assert ex.withdrawals == [], "Cycle must not auto-fire withdrawals"
     assert result.withdrew_btc is None
+
+
+@pytest.mark.asyncio
+async def test_dip_boost_survives_real_risk_cap(router):
+    """Regression (audit 2026-06-10 P1): production passed the risk-approved
+    BASE as risk_cap_aed, so every boost was clamped back to 1x — dip 2x,
+    drawdown 4x and the MVRV boost silently bought the base on every
+    scheduled cycle. With the cap properly decoupled (RiskDecision.cap_aed),
+    a 2x dip on base 500 with a 5000 single-buy cap must spend 1000."""
+    cfg = StrategyConfig(
+        base_amount_aed=Decimal("500"),
+        dip_overlay_enabled=True,
+        dip_threshold_pct=Decimal("-10"),
+        dip_multiplier=Decimal("2.0"),
+    )
+    ex = StubExchange("okx", ask="297500")  # 15% below 350000 → dip triggers
+    strategy = DCAStrategy(cfg, router)
+
+    result = await strategy.execute(
+        [ex],
+        historical_price_7d_ago=Decimal("350000"),
+        risk_cap_aed=Decimal("5000"),   # the real cap, NOT the base
+    )
+
+    assert ex.buys == [("BTC/AED", Decimal("1000"))]
+    assert result.intended_amount_aed == Decimal("1000")
+
+
+@pytest.mark.asyncio
+async def test_boost_still_clamped_to_real_cap(router):
+    """The cap still binds: 2x on base 500 with a 600 cap spends 600."""
+    cfg = StrategyConfig(
+        base_amount_aed=Decimal("500"),
+        dip_overlay_enabled=True,
+        dip_threshold_pct=Decimal("-10"),
+        dip_multiplier=Decimal("2.0"),
+    )
+    ex = StubExchange("okx", ask="297500")
+    strategy = DCAStrategy(cfg, router)
+
+    result = await strategy.execute(
+        [ex],
+        historical_price_7d_ago=Decimal("350000"),
+        risk_cap_aed=Decimal("600"),
+    )
+
+    assert ex.buys == [("BTC/AED", Decimal("600"))]
+    assert result.intended_amount_aed == Decimal("600")

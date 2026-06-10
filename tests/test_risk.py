@@ -188,3 +188,103 @@ def test_manual_pause_does_not_fire_admin_hook(db):
 
     assert rm.is_paused()
     assert calls == [], "hook fired for manual pause"
+
+
+# === audit 2026-06-10 P1: cap_aed decoupled from the approved base ===
+
+def test_cap_aed_is_min_of_single_buy_and_daily_remainder(db):
+    _record_buy(db, "400")  # spent today
+    rm = RiskManager(db=db, max_daily_aed=Decimal("1000"),
+                     max_single_buy_aed=Decimal("800"))
+    decision = rm.evaluate(Decimal("100"))
+    # Base passes through untouched...
+    assert decision.amount_aed == Decimal("100")
+    # ...but the ceiling for overlay boosts is min(800, 1000-400) = 600.
+    assert decision.cap_aed == Decimal("600")
+
+
+def test_cap_aed_none_when_no_caps_configured(db):
+    rm = RiskManager(db=db)
+    decision = rm.evaluate(Decimal("100"))
+    assert decision.cap_aed is None
+
+
+def test_cap_aed_lets_boost_exceed_base_up_to_cap(db):
+    """The regression itself: a 2x dip boost on base 100 must be allowed to
+    reach 200 when the single-buy cap is 500 — the old code passed the
+    approved BASE (100) as the strategy clamp, silently neutering boosts."""
+    rm = RiskManager(db=db, max_single_buy_aed=Decimal("500"))
+    decision = rm.evaluate(Decimal("100"))
+    boosted = decision.amount_aed * 2          # what a 2x overlay produces
+    cap = decision.cap_aed
+    assert cap == Decimal("500")
+    assert boosted < cap                        # boost survives the clamp
+
+
+# === audit 2026-06-10 P1: daily cap sees stable-funded + partial spends ===
+
+def _record_stable_funded_buy(db: Database, aed_equiv: str, when=None):
+    """A BTC/USDT spend from held USDT — pair has no /AED leg; only the
+    amount_quote_aed stamp ties it back to the AED budget."""
+    when = when or datetime.now(timezone.utc)
+    db.record_trade(Order(
+        exchange="okx", order_id=f"s-{when.isoformat()}-{aed_equiv}",
+        pair="BTC/USDT", side=OrderSide.BUY, type=OrderType.MARKET,
+        amount_quote=Decimal(aed_equiv) / Decimal("3.67"),
+        amount_base=Decimal("0.0002"),
+        price_filled_avg=Decimal("100000"), fee_quote=Decimal("0.1"),
+        status=OrderStatus.FILLED, created_at=when, filled_at=when,
+        amount_quote_aed=Decimal(aed_equiv),
+    ))
+
+
+def test_daily_cap_counts_stable_funded_cycles(db):
+    rm = RiskManager(db=db, max_daily_aed=Decimal("1000"))
+    _record_stable_funded_buy(db, "700")
+    assert rm.daily_spend_aed() == Decimal("700")
+    decision = rm.evaluate(Decimal("500"))
+    # Only 300 of the daily cap remains — the USDT spend counted.
+    assert decision.amount_aed == Decimal("300")
+
+
+def test_daily_cap_counts_partial_fills(db):
+    when = datetime.now(timezone.utc)
+    db.record_trade(Order(
+        exchange="okx", order_id="p-1",
+        pair="BTC/AED", side=OrderSide.BUY, type=OrderType.LIMIT,
+        amount_quote=Decimal("400"), amount_base=Decimal("0.0005"),
+        price_filled_avg=Decimal("350000"),
+        status=OrderStatus.PARTIAL, created_at=when,
+        amount_quote_aed=Decimal("400"),
+    ))
+    rm = RiskManager(db=db, max_daily_aed=Decimal("1000"))
+    assert rm.daily_spend_aed() == Decimal("400")
+
+
+def test_daily_cap_does_not_double_count_two_hop(db):
+    """Hop 1 (USDT/AED) carries the AED stamp; hop 2 (BTC/USDT) doesn't.
+    Total must be the stamp once, not stamp + hop-2 notional."""
+    when = datetime.now(timezone.utc)
+    db.record_trade(Order(
+        exchange="okx", order_id="h1",
+        pair="USDT/AED", side=OrderSide.BUY, type=OrderType.MARKET,
+        amount_quote=Decimal("500"), amount_base=Decimal("136"),
+        price_filled_avg=Decimal("3.67"),
+        status=OrderStatus.FILLED, created_at=when, filled_at=when,
+        amount_quote_aed=Decimal("500"),
+    ))
+    db.record_trade(Order(
+        exchange="okx", order_id="h2",
+        pair="BTC/USDT", side=OrderSide.BUY, type=OrderType.MARKET,
+        amount_quote=Decimal("136"), amount_base=Decimal("0.0013"),
+        price_filled_avg=Decimal("100000"),
+        status=OrderStatus.FILLED, created_at=when, filled_at=when,
+    ))
+    rm = RiskManager(db=db, max_daily_aed=Decimal("1000"))
+    assert rm.daily_spend_aed() == Decimal("500")
+
+
+def test_legacy_aed_rows_without_stamp_still_count(db):
+    _record_buy(db, "250")   # no amount_quote_aed — pre-migration row shape
+    rm = RiskManager(db=db, max_daily_aed=Decimal("1000"))
+    assert rm.daily_spend_aed() == Decimal("250")

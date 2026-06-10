@@ -399,7 +399,9 @@ async def _buy_once(config_path: str, dry: bool):
     result = await strategy.execute(
         exchanges,
         historical_price_7d_ago=snap.price_7d_ago_aed,
-        risk_cap_aed=decision.amount_aed,
+        # cap_aed (the real ceiling), not amount_aed (the approved base) —
+        # passing the base neutered every overlay boost (audit 2026-06-10).
+        risk_cap_aed=decision.cap_aed,
         market_context=snap.to_context_dict(),
     )
     if decision.reasons:
