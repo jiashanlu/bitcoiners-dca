@@ -182,6 +182,16 @@ BINANCE_API_SECRET=
 TG_BOT_TOKEN=
 ENV
 chmod 600 "${tenant_dir}/.env"
+# Dashboard bind address (audit 2026-06-10 P2). envsubst leaves the
+# template's ${TENANT_DASH_BIND:-127.0.0.1} untouched, so docker compose
+# resolves it at up-time from the tenant .env: unset → loopback (Hetzner
+# prod — Caddy/cloudflared don't need a host port). Home dev sets
+# TENANT_DASH_BIND=0.0.0.0 in provisioner.env (bitcoiners-app reaches the
+# dashboard cross-LXC over the LAN; ufw restricts the source IP).
+if [[ -n "${TENANT_DASH_BIND:-}" ]]; then
+  echo "TENANT_DASH_BIND=${TENANT_DASH_BIND}" >> "${tenant_dir}/.env"
+fi
+
 # The non-root bot (uid 1001) reads this via compose env_file — it must own it.
 chown 1001:1001 "${tenant_dir}/.env"
 
