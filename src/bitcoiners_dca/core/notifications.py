@@ -117,6 +117,7 @@ class Notifier:
         config: NotificationsConfig,
         *,
         telegram_token_override: Optional[str] = None,
+        db_path: Optional[str] = None,
     ) -> None:
         """Constructor.
 
@@ -126,13 +127,19 @@ class Notifier:
         so it doesn't have to mutate process-wide os.environ during a
         live request (which leaked across concurrent handlers — audit
         B-#7 2026-05-21).
+
+        Pass `db_path` (the tenant's SQLite path) so the SecretStore
+        lookup reads the SAME database the rest of the process uses.
+        Without it, token resolution re-loaded config from a hardcoded
+        /app/config/config.yaml guess — in CLI/self-host contexts that
+        silently resolved a DIFFERENT (often empty/ghost) SecretStore
+        and the dashboard-saved token never applied (audit 2026-06-10 P3).
         """
         self.config = config
         self._token_override = telegram_token_override
+        self._db_path = db_path
 
     def _resolve_telegram_token(self) -> Optional[str]:
-        if self._token_override:
-            return self._token_override
         """Look up the Telegram bot token in this order:
 
           1. SecretStore — what the dashboard's `/settings` form writes.
@@ -144,24 +151,35 @@ class Notifier:
         Either path returns the raw token string; both being unset
         returns None and the caller skips silently.
         """
+        if self._token_override:
+            return self._token_override
         # SecretStore first. Lazy-import + try/except so this module stays
         # usable in contexts without a configured DB (CLI smoke tests,
-        # unit tests). The default config path resolves to the tenant's
-        # config.yaml via DCA_CONFIG env or the bot's runtime working
-        # directory.
+        # unit tests). Prefer the db_path threaded in at construction;
+        # the config-reload guess is the legacy fallback only.
         try:
             from bitcoiners_dca.persistence.secrets import SecretStore
-            from bitcoiners_dca.utils.config import load_config
-            cfg_path = os.environ.get("DCA_CONFIG") or "/app/config/config.yaml"
-            cfg = load_config(cfg_path)
-            store = SecretStore(cfg.persistence.db_path)
+            db_path = self._db_path
+            if not db_path:
+                from bitcoiners_dca.utils.config import load_config
+                cfg_path = os.environ.get("DCA_CONFIG") or "/app/config/config.yaml"
+                cfg = load_config(cfg_path)
+                db_path = cfg.persistence.db_path
+            store = SecretStore(db_path)
             stored = store.get("telegram.bot_token")
             if stored:
+                log.debug("telegram token resolved from SecretStore (%s)", db_path)
                 return stored
         except Exception as e:  # SecretStore unavailable, DB missing, etc.
             log.debug("telegram token: SecretStore lookup failed: %s", e)
         # Env fallback.
-        return os.environ.get(self.config.telegram.bot_token_env) or None
+        token = os.environ.get(self.config.telegram.bot_token_env) or None
+        if token:
+            log.debug(
+                "telegram token resolved from env %s",
+                self.config.telegram.bot_token_env,
+            )
+        return token
 
     async def notify_cycle(self, result: ExecutionResult) -> None:
         """Send a DCA cycle summary to all enabled channels."""
@@ -257,10 +275,11 @@ class Notifier:
         if not token or not chat_id:
             log.debug("telegram notify skipped: token or chat_id missing")
             return
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
         async with httpx.AsyncClient(timeout=15.0) as client:
             try:
                 resp = await client.post(
-                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    url,
                     json={
                         "chat_id": chat_id,
                         "text": text,
@@ -268,6 +287,25 @@ class Notifier:
                         "disable_web_page_preview": True,
                     },
                 )
+                if resp.status_code == 400:
+                    # Markdown parse failure — dynamic fragments (exchange
+                    # errors, route labels, order ids) can contain _ * ` [
+                    # which break Telegram's parser, and a dropped 400 ate
+                    # exactly the failure alerts the customer most needed
+                    # (audit 2026-06-10 P2). Resend as plain text: ugly
+                    # formatting beats no alert.
+                    log.warning(
+                        "telegram 400 (likely Markdown parse) — retrying "
+                        "without parse_mode: %s", resp.text[:200],
+                    )
+                    resp = await client.post(
+                        url,
+                        json={
+                            "chat_id": chat_id,
+                            "text": text,
+                            "disable_web_page_preview": True,
+                        },
+                    )
                 if resp.status_code >= 300:
                     log.warning(
                         "telegram notify non-2xx status=%s body=%s",

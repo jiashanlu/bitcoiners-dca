@@ -110,6 +110,36 @@ class StrategyYamlConfig(BaseModel):
         # dashboard form shows the value the user actually entered.
         if self.budget_amount is None:
             self.budget_amount = self.amount_aed
+            return self
+        # budget_* is the user's stated intent and the single source of
+        # truth; amount_aed is derived. Re-derive on EVERY load so a
+        # config.yaml edited outside the dashboard (frequency changed by
+        # hand, budget tweaked over SSH) can't leave the two halves
+        # silently contradicting — before this, the hot-reloaded cron
+        # picked up the new frequency but kept the per-cycle amount sized
+        # for the old cadence (audit 2026-06-10 P2). budget_period ==
+        # "cycle" is the legacy passthrough: the entered amount IS the
+        # per-cycle amount, and derive_per_cycle returns it unchanged.
+        from bitcoiners_dca.core.strategy import derive_per_cycle
+        try:
+            derived = derive_per_cycle(
+                self.budget_amount, self.budget_period,
+                self.frequency, self.every_n_hours,
+            )
+        except (ValueError, ArithmeticError):
+            # Unknown period/frequency — the Literal field types guard
+            # this in practice; keep the stored amount rather than crash.
+            return self
+        if derived != self.amount_aed:
+            import logging
+            logging.getLogger(__name__).warning(
+                "strategy.amount_aed (%s) disagrees with the configured "
+                "budget (%s %s at %s/every_n=%s) — re-derived to %s. The "
+                "budget is the source of truth.",
+                self.amount_aed, self.budget_amount, self.budget_period,
+                self.frequency, self.every_n_hours, derived,
+            )
+            self.amount_aed = derived
         return self
 
 

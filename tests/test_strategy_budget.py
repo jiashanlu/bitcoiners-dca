@@ -156,3 +156,39 @@ def test_snap_every_n_hours_contract():
     assert snap_every_n_hours(0) == 1
     assert snap_every_n_hours(None) == 1
     assert snap_every_n_hours("3") == 3
+
+
+# === audit 2026-06-10 P2: budget re-derived on every load ===
+
+def test_config_load_rederives_amount_from_budget():
+    """config.yaml edited by hand (frequency changed, amount_aed stale) —
+    the budget is the source of truth, so amount_aed re-derives on load."""
+    from bitcoiners_dca.utils.config import StrategyYamlConfig
+
+    cfg = StrategyYamlConfig(
+        amount_aed=Decimal("999"),       # stale hand-edited value
+        budget_amount=Decimal("240"),
+        budget_period="daily",
+        frequency="hourly",
+        every_n_hours=4,
+    )
+    assert cfg.amount_aed == Decimal("40.00")  # 240/day ÷ 6 cycles
+
+
+def test_config_load_passthrough_for_cycle_period():
+    from bitcoiners_dca.utils.config import StrategyYamlConfig
+
+    cfg = StrategyYamlConfig(
+        amount_aed=Decimal("999"),
+        budget_amount=Decimal("75"),
+        budget_period="cycle",
+    )
+    assert cfg.amount_aed == Decimal("75.00")
+
+
+def test_config_load_backfills_budget_when_absent():
+    from bitcoiners_dca.utils.config import StrategyYamlConfig
+
+    cfg = StrategyYamlConfig(amount_aed=Decimal("82.19"))
+    assert cfg.budget_amount == Decimal("82.19")
+    assert cfg.amount_aed == Decimal("82.19")

@@ -374,7 +374,7 @@ async def _buy_once(config_path: str, dry: bool):
     # Pass db so DCAStrategy can record withdrawals + run the
     # idempotency gate against recent withdrawals.
     strategy = _build_strategy(cfg, router, db=db)
-    notifier = Notifier(cfg.notifications)
+    notifier = Notifier(cfg.notifications, db_path=cfg.persistence.db_path)
     market_data = MarketDataProvider(db=db)
     snap = market_data.snapshot()
 
@@ -490,7 +490,7 @@ async def _arb_check(config_path: str):
         slippage_buffer_pct=cfg.arbitrage.slippage_buffer_pct,
     )
     db = Database(cfg.persistence.db_path)
-    notifier = Notifier(cfg.notifications)
+    notifier = Notifier(cfg.notifications, db_path=cfg.persistence.db_path)
 
     opps = await monitor.detect(exchanges)
     if not opps:
@@ -586,7 +586,7 @@ async def _run_daemon(config_path: str):
     router = _build_router(cfg)
     db = Database(cfg.persistence.db_path)
     strategy = _build_strategy(cfg, router, db=db)
-    notifier = Notifier(cfg.notifications)
+    notifier = Notifier(cfg.notifications, db_path=cfg.persistence.db_path)
     monitor = ArbitrageMonitor(
         min_spread_pct=cfg.arbitrage.min_spread_pct,
         slippage_buffer_pct=cfg.arbitrage.slippage_buffer_pct,
@@ -617,7 +617,9 @@ async def _run_daemon(config_path: str):
             # Notifier is the alerting surface — dashboard edits to the
             # Telegram chat_id/token must apply on the next tick, not on
             # the next container restart (audit 2026-06-10 P2).
-            "notifier": Notifier(fresh_cfg.notifications),
+            "notifier": Notifier(
+                fresh_cfg.notifications, db_path=fresh_cfg.persistence.db_path,
+            ),
         }
 
     scheduler = DCAScheduler(

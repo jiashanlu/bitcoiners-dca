@@ -135,3 +135,44 @@ def test_redact_strips_long_tokens_but_keeps_error_codes():
 def test_redact_truncates():
     msg = _redact_exchange_error(RuntimeError("x" * 500), limit=100)
     assert len(msg) <= 100
+
+
+# ─── audit 2026-06-10 P2: strategy-save validator gaps ─────────────────
+
+
+def _strategy_form(budget: str) -> dict:
+    return {"frequency": "weekly", "budget_period": "monthly",
+            "budget_amount": budget, "time": "09:00",
+            "timezone": "Asia/Dubai", "day_of_week": "monday"}
+
+
+def test_strategy_save_rejects_nan_and_infinity_budget():
+    client, _db = _client(StubWithdrawExchange())
+    for bad in ("NaN", "Infinity", "-5", "0"):
+        r = client.post("/strategy", data=_strategy_form(bad))
+        assert r.status_code == 200
+        assert "must be a positive number" in r.text, bad
+
+
+def test_strategy_save_clamps_dip_multiplier(tmp_path):
+    """A form bypass posting dip_multiplier=100 must persist a clamped
+    value — the dip field was the one overlay multiplier with no
+    server-side clamp (audit 2026-06-10 P2)."""
+    import yaml
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text("strategy:\n  amount_aed: '100'\n")
+    db = Database(os.path.join(tempfile.mkdtemp(), "s.db"))
+    app = create_app(config_path=str(cfg_path), db=db,
+                     exchanges=[StubWithdrawExchange()])
+    client = TestClient(app)
+
+    form = _strategy_form("1000")
+    form["dip_enabled"] = "on"
+    form["dip_multiplier"] = "100"          # form bypass
+    r = client.post("/strategy", data=form)
+    assert r.status_code == 200
+
+    saved = yaml.safe_load(cfg_path.read_text())
+    mult = Decimal(str(saved["overlays"]["buy_the_dip"]["multiplier"]))
+    assert mult <= Decimal("5")

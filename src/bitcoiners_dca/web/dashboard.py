@@ -986,6 +986,17 @@ def create_app(
             budget_amount = Decimal(raw_budget)
         except InvalidOperation:
             budget_amount = Decimal(0)
+        # Validator gaps (audit 2026-06-10 P2): Decimal('NaN')/'Infinity'
+        # parse fine and crashed derive_per_cycle's quantize with an
+        # unhandled 500; a zero/negative budget saved silently and halted
+        # every cycle. Reject both with a flash instead.
+        if not budget_amount.is_finite() or budget_amount <= 0:
+            return HTMLResponse(jinja.get_template("strategy.html").render(_ctx(
+                request, active="strategy",
+                flash={"kind": "err",
+                       "message": f"Budget amount '{raw_budget}' must be a "
+                                  f"positive number."},
+            )))
         amount_aed = derive_per_cycle(budget_amount, budget_period, frequency, every_n_hours)
 
         # Build patch dict from form
@@ -1002,7 +1013,13 @@ def create_app(
             "execution.maker.timeout_seconds": int(form.get("maker_timeout", 600)),
             "overlays.buy_the_dip.enabled": form.get("dip_enabled") == "on",
             "overlays.buy_the_dip.threshold_pct": str(form.get("dip_threshold", "-10")),
-            "overlays.buy_the_dip.multiplier": str(form.get("dip_multiplier", "2.0")),
+            # Clamped like the onchain multipliers below — the dip field was
+            # the one overlay multiplier a form bypass could set to 100x
+            # (audit 2026-06-10 P2). Wider band than onchain: dip is a
+            # buy-more overlay (UI min=1) and drawdown tiers go to 4x.
+            "overlays.buy_the_dip.multiplier":
+                str(_clamp_multiplier(form.get("dip_multiplier", "2.0"),
+                                      lo=Decimal("1.0"), hi=Decimal("5.0"))),
             "overlays.buy_the_dip.lookback_days": int(form.get("dip_lookback", 7)),
             "overlays.volatility_weighted.enabled": form.get("vol_enabled") == "on",
             "overlays.time_of_day.enabled": form.get("tod_enabled") == "on",
