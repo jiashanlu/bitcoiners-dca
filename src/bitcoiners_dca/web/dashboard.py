@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -54,6 +55,48 @@ from bitcoiners_dca.web.config_writer import ConfigWriter, ConfigWriteError
 from bitcoiners_dca.web.jinja_env import make_jinja
 
 logger = logging.getLogger(__name__)
+
+# Exchange exceptions can echo request details — API keys, signatures,
+# signed URLs. Surfacing them raw put credentials in the client response
+# and (for the test-connection redirect) in the URL → access logs +
+# browser history (audit 2026-06-10 P1, extends audit B-#15 2026-05-21).
+# Scrub anything secret-shaped before a message leaves the process; the
+# full exception still goes to the server log via logger.exception at
+# each call site.
+_REDACT_PATTERNS = [
+    re.compile(
+        r"(?i)\b(api[_-]?key|apikey|secret|passphrase|password|token|"
+        r"signature|sign|authorization)\b\s*[=:]\s*\S+"
+    ),
+    re.compile(r"[A-Za-z0-9+/=_-]{24,}"),            # key / token / sig shapes
+    re.compile(r"sk_(live|test)_[A-Za-z0-9]+"),
+    re.compile(r"price_[A-Za-z0-9]+"),
+    re.compile(r"(?i)x-(api|mbx|stripe)-?key:\s*\S+"),
+]
+
+
+def _redact_exchange_error(err, limit: int = 200) -> str:
+    """Short, secret-free rendering of an exchange error for UI surfaces.
+
+    Accepts an Exception (unwraps tenacity's RetryError to the real cause)
+    or a pre-stringified message.
+    """
+    if isinstance(err, BaseException):
+        from bitcoiners_dca.cli import _unwrap_retry_error
+        msg = _unwrap_retry_error(err)
+    else:
+        msg = str(err)
+    for pat in _REDACT_PATTERNS:
+        msg = pat.sub("[redacted]", msg)
+    return msg[:limit]
+
+
+# Serialises manual withdrawals within this dashboard process — withdraw-now
+# moves real BTC, and without it a double-click fired two transfers (audit
+# 2026-06-10 P1). One dashboard process per tenant, so a process-local lock
+# is the correct scope; the 2-minute cooldown (withdrawals table) covers
+# resubmits that arrive after the first request finished.
+_withdraw_in_flight = asyncio.Lock()
 
 # Background-task reference set. `asyncio.create_task()` returns a Task,
 # but if the only reference is the local variable it gets garbage-
@@ -1144,12 +1187,12 @@ def create_app(
                 logger.exception("Failed to persist test_connection success")
             return _redirect(request, f"/exchanges?ok={name}")
         except Exception as e:
-            # tenacity wraps the real ccxt/OKX error in a RetryError whose
-            # str() is a useless `RetryError[<Future ...>]`. Unwrap it so the
-            # customer sees the actionable message (e.g. "okx 50110: IP not in
-            # whitelist") instead of a Future repr.
-            from bitcoiners_dca.cli import _unwrap_retry_error
-            return _redirect(request, f"/exchanges?err={name}:{_unwrap_retry_error(e)[:160]}")
+            # Unwrap tenacity's useless RetryError repr AND redact anything
+            # secret-shaped — this message lands in the URL (access logs,
+            # browser history), so a raw exception that echoes the request
+            # would leak the API key (audit 2026-06-10 P1).
+            logger.exception("test-connection failed for %s", name)
+            return _redirect(request, f"/exchanges?err={name}:{_redact_exchange_error(e)}")
 
     @app.post("/exchanges/{name}/credentials", response_class=HTMLResponse)
     async def exchange_credentials(request: Request, name: str):
@@ -1494,7 +1537,7 @@ def create_app(
         # Expose the configured-exchange list to the manual Withdraw-now
         # form's dropdown. Auto-withdraw policy UI was removed — see
         # feedback-kill-auto-withdraw-until-lightning.
-        ex_names = list(cfg.exchanges.model_fields.keys()) if cfg.exchanges else []
+        ex_names = list(type(cfg.exchanges).model_fields.keys()) if cfg.exchanges else []
         policies = [{"exchange": name} for name in ex_names]
         return {"policies": policies}
 
@@ -1598,22 +1641,52 @@ def create_app(
             if rcvr_subdiv:
                 rcvr_info["rcvrCountrySubDivision"] = rcvr_subdiv
 
-        try:
-            withdrawal = await target.withdraw_btc(
-                amount_btc=amount_btc,
-                address=outgoing_destination,
-                network=outgoing_network,
-                rcvr_info=rcvr_info,
-            )
-        except Exception as e:
-            # `logger` is the module-level binding; the original code
-            # referenced `log` which doesn't exist here — the NameError
-            # bubbled past the user-facing handler and the operator
-            # saw a blank-screen 500 instead of the exchange's actual
-            # rejection reason. Log full traceback for debugging, then
-            # surface the underlying message back to the user.
-            logger.exception("manual withdraw failed")
-            return _back("err", f"{ex_name} rejected the withdrawal: {e}")
+        # Double-submit guards (audit 2026-06-10 P1) — real BTC moves here,
+        # and before these a double-click or browser form-resubmit fired
+        # TWO transfers.
+        #   1. In-flight lock: reject a second request while the first is
+        #      still talking to the exchange (non-blocking — queueing it
+        #      would just delay the duplicate, not prevent it).
+        #   2. Cooldown: a repeat for the same exchange within 2 minutes is
+        #      treated as a resubmission of the same intent. Reads the
+        #      withdrawals table, which we now actually write (3.).
+        if _withdraw_in_flight.locked():
+            return _back("err",
+                "A withdrawal is already in flight — wait for it to finish, "
+                "then check the history below before retrying.")
+        async with _withdraw_in_flight:
+            try:
+                if _db().recent_withdrawal_exists(ex_name, "BTC", since_minutes=2):
+                    return _back("err",
+                        f"A {ex_name} BTC withdrawal was submitted less than "
+                        f"2 minutes ago. If this is a separate, intentional "
+                        f"withdrawal, wait for the cooldown and submit again.")
+            except Exception:
+                logger.exception("withdrawal cooldown check failed")
+
+            try:
+                withdrawal = await target.withdraw_btc(
+                    amount_btc=amount_btc,
+                    address=outgoing_destination,
+                    network=outgoing_network,
+                    rcvr_info=rcvr_info,
+                )
+            except Exception as e:
+                # Log the full traceback server-side; surface only a
+                # REDACTED message — exchange errors can echo request
+                # details including the API key (audit 2026-06-10 P1).
+                logger.exception("manual withdraw failed")
+                return _back("err",
+                    f"{ex_name} rejected the withdrawal: "
+                    f"{_redact_exchange_error(e, 200)}")
+
+            # 3. Persist the withdrawal — audit trail + the cooldown gate
+            # above. The withdrawals table previously had ZERO writers, so
+            # the dashboard history and the idempotency check were dead.
+            try:
+                _db().record_withdrawal(withdrawal)
+            except Exception:
+                logger.exception("record_withdrawal after manual withdraw failed")
 
         # Save the address into the local address book so the next
         # withdrawal can auto-complete it. Failure here must NEVER
@@ -2296,24 +2369,9 @@ def _resolve_creds(
     return out
 
 
-# Exchange responses sometimes include the API key prefix or other
-# sensitive bytes in error strings (Binance 401, OKX signature
-# mismatches). _redact_exchange_error strips anything that looks like
-# a key/token before the message is surfaced in the dashboard.
-# Audit B-#15 2026-05-21.
-import re as _re_redact
-_REDACT_PATTERNS = [
-    _re_redact.compile(r"\b[A-Za-z0-9]{30,}\b"),     # API key / token shapes
-    _re_redact.compile(r"sk_(live|test)_[A-Za-z0-9]+"),
-    _re_redact.compile(r"price_[A-Za-z0-9]+"),
-    _re_redact.compile(r"(?i)x-(api|mbx|stripe)-?key:\s*\S+"),
-]
-
-def _redact_exchange_error(msg: str, limit: int = 200) -> str:
-    out = msg
-    for pat in _REDACT_PATTERNS:
-        out = pat.sub("[REDACTED]", out)
-    return out[:limit]
+# _redact_exchange_error lives at the top of this module (it gained
+# Exception/RetryError unwrapping in the 2026-06-10 audit and is shared by
+# test-connection, withdraw-now, and the balance widgets below).
 
 
 async def _safe_get_balances(ex: Exchange) -> tuple[str, list[dict] | dict]:
