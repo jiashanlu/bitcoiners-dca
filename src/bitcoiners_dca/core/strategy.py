@@ -22,7 +22,7 @@ from typing import Optional
 # back to NameError and masked the underlying issue. Audit P1 2026-05-21.
 logger = logging.getLogger(__name__)
 
-from bitcoiners_dca.core.models import Order, Ticker
+from bitcoiners_dca.core.models import Balance, Order, Ticker
 from bitcoiners_dca.core.router import RoutingDecision, SmartRouter
 from bitcoiners_dca.core.routing import TradeRoute
 from bitcoiners_dca.exchanges.base import Exchange, ExchangeError, InsufficientBalanceError
@@ -152,6 +152,64 @@ class StrategyConfig:
     max_pct_of_balance: Decimal = Decimal("0.25")
 
 
+# Asset-name buckets for the post-cycle balance reminder. Upper-cased before
+# lookup. USD-stables are summed together because to a DCA user they are one
+# pile of "dollars waiting to be deployed"; AED is the local-fiat dry powder;
+# BTC is the stack. Anything outside these buckets (alt balances, dust) is
+# intentionally ignored — the reminder answers "how much can I still DCA, and
+# how much have I stacked", not "itemise my whole account".
+_FIAT_ASSETS = frozenset({"AED"})
+_STABLE_USD_ASSETS = frozenset({"USDT", "USDC", "USD"})
+_BTC_ASSETS = frozenset({"BTC", "XBT"})
+
+
+@dataclass
+class BalanceSnapshot:
+    """Holdings reminder, aggregated across every connected exchange.
+
+    Sums each bucket by ``total`` (free + locked). ``per_exchange`` keeps a
+    per-venue breakdown so a multi-exchange user can see where funds sit.
+    ``errors`` names any exchange whose balance call failed — that venue is
+    omitted from the totals rather than zeroed, so the reminder stays honest
+    about being partial instead of silently under-reporting.
+    """
+    aed: Decimal = Decimal(0)
+    usd_stable: Decimal = Decimal(0)
+    btc: Decimal = Decimal(0)
+    per_exchange: dict = field(default_factory=dict)  # name -> {"AED","USD","BTC"}
+    errors: list = field(default_factory=list)
+
+    @property
+    def has_data(self) -> bool:
+        """True when at least one exchange reported balances."""
+        return bool(self.per_exchange)
+
+
+def aggregate_balances(balances_by_exchange: dict) -> BalanceSnapshot:
+    """Fold per-exchange balance lists into one bucketed snapshot.
+
+    Pure function (no I/O) so the bucketing logic is unit-testable without a
+    live exchange. ``balances_by_exchange`` maps an exchange name to its list
+    of ``Balance`` rows.
+    """
+    snap = BalanceSnapshot()
+    for ex_name, balances in balances_by_exchange.items():
+        per = {"AED": Decimal(0), "USD": Decimal(0), "BTC": Decimal(0)}
+        for b in balances:
+            asset = b.asset.upper()
+            if asset in _FIAT_ASSETS:
+                per["AED"] += b.total
+            elif asset in _STABLE_USD_ASSETS:
+                per["USD"] += b.total
+            elif asset in _BTC_ASSETS:
+                per["BTC"] += b.total
+        snap.aed += per["AED"]
+        snap.usd_stable += per["USD"]
+        snap.btc += per["BTC"]
+        snap.per_exchange[ex_name] = per
+    return snap
+
+
 @dataclass
 class ExecutionResult:
     """Everything that happened during one DCA cycle.
@@ -186,6 +244,10 @@ class ExecutionResult:
     orphan_amount: Optional[Decimal] = None
     orphan_ccy: Optional[str] = None
     orphan_exchange: Optional[str] = None
+    # Post-trade holdings snapshot for the Telegram/email balance reminder.
+    # Populated best-effort after a successful cycle; None when balance reads
+    # were skipped or every exchange failed.
+    balances: Optional[BalanceSnapshot] = None
 
     @property
     def order(self) -> Optional[Order]:
@@ -505,7 +567,33 @@ class DCAStrategy:
                 "dashboard /withdrawals page to withdraw manually."
             )
 
+        # 5. Post-trade holdings snapshot for the notification's balance
+        # reminder. Runs AFTER the trade is recorded and is fully isolated —
+        # a balance-read failure can never undo or re-trigger the buy.
+        result.balances = await self._snapshot_balances(exchanges)
+
         return result
+
+    async def _snapshot_balances(self, exchanges: list[Exchange]) -> BalanceSnapshot:
+        """Best-effort holdings snapshot across all connected exchanges.
+
+        Queries each venue's balances and aggregates AED, USD-stablecoins
+        (USDT/USDC/USD) and BTC for the post-cycle balance reminder. Wrapped
+        per-exchange so a single venue's auth/network failure degrades to a
+        partial snapshot (the failing venue is named in ``errors``) instead of
+        breaking the cycle notification. Never raises.
+        """
+        by_exchange: dict[str, list[Balance]] = {}
+        failed: list[str] = []
+        for ex in exchanges:
+            try:
+                by_exchange[ex.name] = await ex.get_balances()
+            except Exception as e:
+                failed.append(ex.name)
+                logger.warning("balance snapshot failed for %s: %s", ex.name, e)
+        snap = aggregate_balances(by_exchange)
+        snap.errors = failed
+        return snap
 
     async def _execute_route(
         self,

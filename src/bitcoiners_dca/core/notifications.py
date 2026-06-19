@@ -97,6 +97,36 @@ def _classify_execution(order: Order) -> str:
     return "Taker (limit crossed spread)"
 
 
+def _format_balances(bal) -> str:
+    """Render the post-cycle holdings reminder.
+
+    Shows aggregated AED, USD-stable (USDT/USDC) and BTC totals. When funds
+    span more than one exchange a per-venue breakdown follows, so a
+    multi-exchange user can see where the dry powder and the stack sit. A
+    partial snapshot (one venue's balance call failed) is flagged rather than
+    silently under-reported.
+    """
+    lines = [
+        "💰 *Balance reminder*",
+        f"*AED:* {_fmt_dec(bal.aed, 2)}",
+        f"*USD (USDT/USDC):* {_fmt_dec(bal.usd_stable, 2)}",
+        f"*BTC:* {_fmt_dec(bal.btc, 8)}",
+    ]
+    contributing = {
+        name: v for name, v in bal.per_exchange.items()
+        if v["AED"] or v["USD"] or v["BTC"]
+    }
+    if len(contributing) > 1:
+        for name, v in contributing.items():
+            lines.append(
+                f"_{name}: {_fmt_dec(v['AED'], 2)} AED · "
+                f"{_fmt_dec(v['USD'], 2)} USD · {_fmt_dec(v['BTC'], 8)} BTC_"
+            )
+    if bal.errors:
+        lines.append(f"_(partial — {', '.join(bal.errors)} unavailable)_")
+    return "\n".join(lines)
+
+
 def _route_taker_fee_pct(route) -> Decimal:
     """Cumulative taker-fee % of a route, compounded across hops.
 
@@ -259,6 +289,14 @@ class Notifier:
                     f"\n_(est. fees taker: chosen "
                     f"{_fmt_dec(chosen_fee, 2)}%, alt {_fmt_dec(alt_fee, 2)}%)_"
                 )
+        # Holdings reminder — AED/USD dry powder + BTC stack, aggregated across
+        # exchanges. Best-effort: only rendered when the snapshot carries data
+        # and the operator hasn't disabled it. getattr guards older configs /
+        # ExecutionResults that predate the field.
+        if getattr(self.config, "include_balance_reminder", True):
+            bal = getattr(result, "balances", None)
+            if bal is not None and bal.has_data:
+                msg += "\n\n" + _format_balances(bal)
         if result.errors:
             msg += "\n\n⚠️ Non-fatal warnings:\n" + "\n".join(f"- {e}" for e in result.errors)
         return msg

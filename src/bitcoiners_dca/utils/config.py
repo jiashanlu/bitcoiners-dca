@@ -45,6 +45,11 @@ class EmailConfig(BaseModel):
 class NotificationsConfig(BaseModel):
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     email: EmailConfig = Field(default_factory=EmailConfig)
+    # Append a holdings reminder (AED + USD-stables + BTC, aggregated across
+    # connected exchanges) to every executed-cycle notification. Best-effort:
+    # a failed balance read degrades to a partial/omitted block and never
+    # affects the trade or the rest of the message.
+    include_balance_reminder: bool = True
 
 
 class ExchangeConfig(BaseModel):
