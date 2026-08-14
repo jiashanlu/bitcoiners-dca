@@ -850,12 +850,12 @@ class DCAStrategy:
             return supplied
         try:
             from bitcoiners_dca.core.onchain import (
-                get_default_client, OnchainSignalError, SUPPORTED_METRICS,
+                get_default_client, OnchainSignalError, ALL_METRIC_NAMES,
             )
             client = get_default_client()
             wanted = {getattr(ov, "metric", None) for ov in self.overlays}
             wanted.discard(None)
-            wanted = {m for m in wanted if m in SUPPORTED_METRICS}
+            wanted = {m for m in wanted if m in ALL_METRIC_NAMES}
             signals: dict = {}
             for metric in wanted:
                 try:
