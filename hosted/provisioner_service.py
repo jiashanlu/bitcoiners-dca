@@ -18,7 +18,9 @@ Why a separate service:
 """
 from __future__ import annotations
 
+import base64
 import hmac
+import json
 import logging
 import os
 import re
@@ -299,9 +301,15 @@ def resign(
     )
     if customer_match:
         customer_email = customer_match.group(1).strip()
+    else:
+        # The dashboard's config-writer re-dumps the YAML when a customer
+        # edits settings, dropping the header comment. Fall back to the
+        # customer_id inside the CURRENT token's payload (base64 JSON —
+        # no signature check needed just to read who it was issued to).
+        customer_email = _customer_from_current_token(contents)
     # Tier lives under the `license:` block; conservative regex grabs the
     # first `tier: <value>` line.
-    tier_match = re.search(r"^\s*tier:\s*(\w+)\s*$", contents, re.MULTILINE)
+    tier_match = re.search(r"^\s*tier:\s*['\"]?(\w+)['\"]?\s*$", contents, re.MULTILINE)
     if tier_match:
         tier = tier_match.group(1).strip()
 
@@ -350,10 +358,13 @@ def resign(
 
     # Write the new token back. Replace the existing `key:` line under
     # the `license:` block. Bounded to one substitution to avoid clobbering
-    # any future nested `key:` (e.g. exchange API keys).
+    # any future nested `key:` (e.g. exchange API keys). The value may be
+    # double-quoted (provision.sh), single-quoted, or bare (the dashboard
+    # config-writer re-dumps YAML unquoted) — accept all three; write back
+    # quoted so the token's dots can never be misparsed.
     new_contents, n_subs = re.subn(
-        r"(^\s*license:\s*\n(?:.*\n)*?\s*key:\s*)\".*?\"",
-        r'\1"' + new_token + '"',
+        r"(^\s*license:\s*\n(?:.*\n)*?^[ \t]*key:[ \t]*)(\"[^\"\n]*\"|'[^'\n]*'|[^\n]*)$",
+        lambda m: m.group(1) + '"' + new_token + '"',
         contents,
         count=1,
         flags=re.MULTILINE,
@@ -380,6 +391,31 @@ def resign(
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────
+
+def _customer_from_current_token(config_contents: str) -> Optional[str]:
+    """customer_id from the config's current license token payload.
+
+    A license token is `base64url(json).base64url(sig)`; reading who it
+    was issued to needs no signature verification. Used as the fallback
+    when the `# Tenant: … Customer: …` header comment has been stripped
+    by the dashboard's YAML re-dump. The token-shape requirement (two
+    base64url segments joined by a dot) keeps this from ever matching a
+    non-license `key:` line.
+    """
+    m = re.search(
+        r"^[ \t]*key:[ \t]*['\"]?([A-Za-z0-9_\-]+)\.[A-Za-z0-9_\-]+['\"]?[ \t]*$",
+        config_contents,
+        re.MULTILINE,
+    )
+    if not m:
+        return None
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(m.group(1) + "=="))
+    except Exception:
+        return None
+    customer_id = str(payload.get("customer_id") or "").strip()
+    return customer_id or None
+
 
 def _parse_port(stdout: str) -> Optional[int]:
     for line in stdout.splitlines():

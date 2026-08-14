@@ -5,9 +5,11 @@ plus polls for arbitrage opportunities at a configurable interval.
 Built on apscheduler.AsyncIOScheduler.
 
 Job structure:
-  - dca_cycle    : runs at user-configured time (cron expression)
-  - arbitrage    : runs every N seconds (poll interval from config)
-  - health_check : every 5 minutes, validates exchange connectivity
+  - dca_cycle     : runs at user-configured time (cron expression)
+  - arbitrage     : runs every N seconds (poll interval from config)
+  - health_check  : every 5 minutes, validates exchange connectivity
+  - license_watch : every 6 hours, warns before license expiry downgrades
+                    the tenant to FREE (and once when it has)
 
 The daemon survives transient errors. Each job logs to the cycle_log table
 in SQLite so you can audit what happened, when, and why.
@@ -620,6 +622,46 @@ class DCAScheduler:
         except Exception as e:
             logger.warning("Failed to write daemon heartbeat: %s", e)
 
+    async def _run_license_watch(self) -> None:
+        """Warn the tenant (and ops) before/when the license expires.
+
+        The 2026-08-12 benbois lapse showed an expiring license fails
+        SILENTLY: the daemon downgrades to FREE, routing loses the
+        USDT path, and the risk manager eventually pauses the bot with
+        nothing telling anyone why. One message per threshold per
+        expiry date (state in db.meta survives restarts; a renewed
+        token re-arms all thresholds).
+        """
+        from bitcoiners_dca.core.license_watch import (
+            META_KEY, customer_message, pending_warning, record_warning,
+        )
+        from bitcoiners_dca.core.notifications import send_admin_alert
+
+        async with self._jobs_lock:
+            try:
+                warned = self.db.get_meta(META_KEY)
+                warning = pending_warning(self.config.license.key, warned)
+                if warning is None:
+                    return
+                await self.notifier.notify_notice(customer_message(warning))
+                send_admin_alert(
+                    f"License {'EXPIRED' if warning.threshold_days == 0 else 'expiring'} "
+                    f"for {warning.customer_id} (tier={warning.tier}, "
+                    f"expires {warning.expires_at.date().isoformat()}, "
+                    f"{warning.days_left:.1f}d left). Hosted renewals should "
+                    f"re-sign automatically on payment — if this tenant is a "
+                    f"paying subscriber, check the Polar→provisioner /resign "
+                    f"path.",
+                    tag="license",
+                )
+                self.db.set_meta(META_KEY, record_warning(warned, warning))
+                logger.warning(
+                    "License expiry warning sent: threshold=%dd expires=%s",
+                    warning.threshold_days, warning.expires_at.isoformat(),
+                )
+            except Exception:
+                logger.exception("license watch failed")
+
     def _install_jobs(self) -> None:
         # DCA cycle on cron schedule
         self._scheduler.add_job(
@@ -658,6 +700,17 @@ class DCAScheduler:
             trigger=IntervalTrigger(minutes=5),
             id="health_check",
             replace_existing=True,
+        )
+
+        # License expiry watch — every 6h, first run right away so a daemon
+        # restarted near (or past) expiry warns immediately. Fired-warning
+        # state lives in db.meta so restarts don't re-spam.
+        self._scheduler.add_job(
+            self._run_license_watch,
+            trigger=IntervalTrigger(hours=6),
+            id="license_watch",
+            replace_existing=True,
+            next_run_time=datetime.now(),
         )
 
         # Funding monitor — opt-in

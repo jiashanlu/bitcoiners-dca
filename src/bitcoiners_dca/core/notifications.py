@@ -233,6 +233,10 @@ class Notifier:
     async def notify_error(self, subject: str, body: str) -> None:
         await self._send(f"❌ *{subject}*\n\n{body}")
 
+    async def notify_notice(self, text: str) -> None:
+        """Preformatted non-error notice (license/lifecycle messages)."""
+        await self._send(text)
+
     # === internals ===
 
     def _format_cycle_message(self, result: ExecutionResult) -> str:
