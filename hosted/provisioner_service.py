@@ -30,8 +30,13 @@ from typing import Optional
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, EmailStr, Field
 
-from bitcoiners_dca.core.license import (
-    LICENSE_PUBLIC_KEY_HEX, LicenseError, parse_license_token,
+# The provisioner runs a MINIMAL image that does NOT bundle the bitcoiners_dca
+# package — do not `import bitcoiners_dca` here. License signature checks go
+# through the generate_license.py subprocess (same mechanism as issuing),
+# which runs under a python that has cryptography. Must match the image's
+# embedded LICENSE_PUBLIC_KEY_HEX; rotate both together with the signing key.
+_LICENSE_PUBLIC_KEY_HEX = (
+    "88e40087b82a3a9b2d2edb41b1e39de92e88a6b3e82727aff51c291846da80c5"
 )
 
 # ─── Config ──────────────────────────────────────────────────────────────
@@ -418,11 +423,27 @@ def _customer_from_current_token(config_contents: str) -> Optional[str]:
     )
     if not m:
         return None
+    token = m.group(1)
+    # Verify the signature via the generate_license.py `verify` subcommand.
+    # Exit 0 = valid signature (expiry is tolerated — a renewal target is
+    # expected to be expired but must still be genuinely ours). Any non-zero
+    # exit (bad signature, malformed, tampered payload) → refuse.
     try:
-        lic = parse_license_token(m.group(1), LICENSE_PUBLIC_KEY_HEX)
-    except LicenseError:
+        result = subprocess.run(
+            [
+                "python3",
+                str(HOSTED_DIR.parent / "scripts" / "generate_license.py"),
+                "verify", "--token", token,
+                "--public-key-hex", _LICENSE_PUBLIC_KEY_HEX,
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+    except Exception:
         return None
-    return lic.customer_id.strip() or None
+    if result.returncode != 0:
+        return None
+    cm = re.search(r"^\s*Customer:\s*(\S+)", result.stdout, re.MULTILINE)
+    return cm.group(1).strip() if cm else None
 
 
 def _parse_port(stdout: str) -> Optional[int]:
