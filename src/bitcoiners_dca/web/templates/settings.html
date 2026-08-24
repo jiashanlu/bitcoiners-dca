@@ -24,8 +24,14 @@
   </div>
   <div class="form-row">
     <label>License key</label>
-    <textarea name="license_key" rows="3" placeholder="(paste signed token here for Pro/Business)">{{ config.license.key or '' }}</textarea>
-    <small>Tier downgrades silently to free if key is missing / invalid / expired.</small>
+    <input name="license_key" type="password"
+      value="{% if license_key_saved %}***{% endif %}"
+      placeholder="(paste signed Pro/Business token here)">
+    <small>
+      Current tier: <strong>{{ license_tier | default('free') }}</strong>{% if license_key_fp %} · key ending <code>…{{ license_key_fp }}</code>{% endif %}.
+      Stored server-side and never shown here. Leave as <code>***</code> to keep the saved key.
+      Tier downgrades to free if the key is missing / invalid / expired.
+    </small>
   </div>
   <div class="form-row">
     <label>Active features</label>

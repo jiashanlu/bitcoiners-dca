@@ -119,7 +119,7 @@ def test_cf_access_header_with_attacker_origin_blocked():
     )
     assert r.status_code == 403
     detail = r.json()["detail"]
-    assert "cf-access-authenticated header present" in detail
+    assert "attacker.example" in detail and "not in" in detail
 
 
 def test_cf_access_header_with_attacker_referer_blocked():

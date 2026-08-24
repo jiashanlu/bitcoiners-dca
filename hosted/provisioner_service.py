@@ -18,9 +18,7 @@ Why a separate service:
 """
 from __future__ import annotations
 
-import base64
 import hmac
-import json
 import logging
 import os
 import re
@@ -31,6 +29,10 @@ from typing import Optional
 
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, EmailStr, Field
+
+from bitcoiners_dca.core.license import (
+    LICENSE_PUBLIC_KEY_HEX, LicenseError, parse_license_token,
+)
 
 # ─── Config ──────────────────────────────────────────────────────────────
 
@@ -379,42 +381,48 @@ def resign(
     except OSError as e:
         raise HTTPException(500, f"cannot write tenant config: {e}")
 
-    log.info(f"RESIGN tenant={body.tenant_id} tier={tier} customer={customer_email}")
+    log.info(f"RESIGN tenant={body.tenant_id} tier={tier}")
+    # Do NOT echo the signed token (audit M-1 2026-08) — it's written to the
+    # tenant config and the caller has no need for it. Returning it turned a
+    # response leak into an entitlement leak.
     return {
         "tenant_id": body.tenant_id,
         "status": "resigned",
         "tier": tier,
         "customer_email": customer_email,
         "expires_iso": expires_iso,
-        "token": new_token,
     }
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────
 
 def _customer_from_current_token(config_contents: str) -> Optional[str]:
-    """customer_id from the config's current license token payload.
+    """customer_id from the config's current license token — SIGNATURE
+    VERIFIED (audit M-1 2026-08).
 
-    A license token is `base64url(json).base64url(sig)`; reading who it
-    was issued to needs no signature verification. Used as the fallback
-    when the `# Tenant: … Customer: …` header comment has been stripped
-    by the dashboard's YAML re-dump. The token-shape requirement (two
-    base64url segments joined by a dot) keeps this from ever matching a
-    non-license `key:` line.
+    config.yaml is writable by the tenant dashboard's config-writer, so the
+    token in it is attacker-influenceable. Previously this decoded the
+    payload without checking the signature, turning /resign into a
+    license-minting oracle: a customer could point customer_id at any value
+    and get a fresh, valid token signed for it. We now require the current
+    token to carry a valid Ed25519 signature from our own key before we
+    trust its customer_id; expiry is ignored (a renewal target is expected
+    to be expired, but must still be genuinely ours). Used only as the
+    fallback when the trusted `# Tenant: … Customer: …` header comment has
+    been stripped by the dashboard's YAML re-dump.
     """
     m = re.search(
-        r"^[ \t]*key:[ \t]*['\"]?([A-Za-z0-9_\-]+)\.[A-Za-z0-9_\-]+['\"]?[ \t]*$",
+        r"^[ \t]*key:[ \t]*['\"]?([A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+)['\"]?[ \t]*$",
         config_contents,
         re.MULTILINE,
     )
     if not m:
         return None
     try:
-        payload = json.loads(base64.urlsafe_b64decode(m.group(1) + "=="))
-    except Exception:
+        lic = parse_license_token(m.group(1), LICENSE_PUBLIC_KEY_HEX)
+    except LicenseError:
         return None
-    customer_id = str(payload.get("customer_id") or "").strip()
-    return customer_id or None
+    return lic.customer_id.strip() or None
 
 
 def _parse_port(stdout: str) -> Optional[int]:

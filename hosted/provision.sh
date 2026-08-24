@@ -42,6 +42,13 @@ if ! [[ "$tenant_id" =~ ^[a-z0-9-]+$ ]]; then
   echo "tenant_id must be lowercase alphanumeric + dashes only" >&2
   exit 1
 fi
+# Validate customer_email in the script too — don't rely on an upstream
+# caller to have done it (audit M-2 2026-08). A stray newline / quote would
+# otherwise corrupt config.yaml, the .env, or the /resign header comment.
+if ! [[ "$customer_email" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+  echo "customer_email is not a valid email address" >&2
+  exit 1
+fi
 case "$tier" in
   pro|business) ;;
   *) echo "tier must be 'pro' or 'business'" >&2; exit 1 ;;
@@ -51,6 +58,10 @@ esac
 : "${PROVISION_IMAGE_TAG:?need PROVISION_IMAGE_TAG}"
 : "${PROVISION_BASE_DIR:?need PROVISION_BASE_DIR}"
 : "${PROVISION_NGINX_DIR:?need PROVISION_NGINX_DIR}"
+# Proof-of-origin secret shared with the bitcoiners-app proxy. The tenant
+# dashboard rejects any request lacking it, so the public tenant origin can't
+# be driven with a forged identity header (2026-08 breach fix).
+: "${PROVISION_PROXY_SECRET:?need PROVISION_PROXY_SECRET}"
 
 tenant_dir="${PROVISION_BASE_DIR}/tenants/${tenant_id}"
 echo "==> Provisioning tenant '${tenant_id}' for ${customer_email} (tier=${tier})"
@@ -161,6 +172,10 @@ risk:
 
 dry_run: true   # SAFETY — customer flips to false after their own audit
 YAML
+# config.yaml holds the signed license token — not world-readable (audit
+# M-3 2026-08). Written after the tenant_dir chmod 700, so tighten it here.
+chmod 600 "${tenant_dir}/config/config.yaml"
+chown 1001:1001 "${tenant_dir}/config/config.yaml"
 
 # Generate a fresh Fernet key for the dashboard's encrypted SecretStore
 # (where customer-typed API credentials live). One per tenant, never
@@ -173,6 +188,13 @@ fernet_key="$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.g
 cat > "${tenant_dir}/.env" <<ENV
 # Tenant API secrets. chmod 600. Never commit.
 DCA_SECRETS_KEY=${fernet_key}
+# Ingress gate (2026-08 breach fix). Fail-closed: the dashboard refuses all
+# traffic in hosted mode unless it carries the proof-of-origin secret AND a
+# CF-Access identity matching the owner. Set here so the gate can never be
+# left half-wired even if the compose template drifts.
+DCA_REQUIRE_CF_HEADER=1
+DCA_TENANT_OWNER_EMAIL=${customer_email}
+DCA_PROXY_SHARED_SECRET=${PROVISION_PROXY_SECRET}
 OKX_API_KEY=
 OKX_API_SECRET=
 OKX_API_PASSPHRASE=
@@ -233,10 +255,16 @@ caddy_sites_dir="${PROVISION_CADDY_SITES_DIR:-}"
 caddy_container="${PROVISION_CADDY_CONTAINER:-caddy}"
 if [[ -n "${caddy_sites_dir}" && -d "${caddy_sites_dir}" ]]; then
   subdomain_base="${PROVISION_TENANT_SUBDOMAIN_BASE:-tenants.bitcoiners.ae}"
-  # tenant_id is validated `^[a-z0-9-]{3,40}$` upstream → safe to interpolate.
-  printf '%s.%s {\n    reverse_proxy http://bitcoiners-dca-%s-dashboard:8000 {\n        header_up X-Forwarded-Proto https\n    }\n}\n' \
-    "${tenant_id}" "${subdomain_base}" "${tenant_id}" \
+  # tenant_id is validated `^[a-z0-9-]+$` upstream → safe to interpolate.
+  # Edge gate (2026-08 breach fix): drop any request that doesn't carry the
+  # proof-of-origin secret BEFORE it reaches the dashboard. Only the
+  # bitcoiners-app proxy sets this header, so a direct hit from the internet
+  # (forged CF identity header or not) is refused at Caddy. The app-side gate
+  # enforces the same secret again as defense-in-depth.
+  printf '%s.%s {\n    @noauth not header X-Dca-Proxy-Secret "%s"\n    respond @noauth "Forbidden" 403\n    reverse_proxy http://bitcoiners-dca-%s-dashboard:8000 {\n        header_up X-Forwarded-Proto https\n    }\n}\n' \
+    "${tenant_id}" "${subdomain_base}" "${PROVISION_PROXY_SECRET}" "${tenant_id}" \
     > "${caddy_sites_dir}/${tenant_id}.caddy"
+  chmod 600 "${caddy_sites_dir}/${tenant_id}.caddy"
   if docker exec "${caddy_container}" caddy reload --config /etc/caddy/Caddyfile >/dev/null 2>&1; then
     echo "    caddy route: ${tenant_id}.${subdomain_base} (reloaded)"
   else

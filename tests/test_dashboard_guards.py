@@ -1,27 +1,21 @@
 """
-Audit 2026-06-10 P1 batch C — withdraw-now moves real BTC, so it gets:
+Dashboard security guards.
 
-  1. an in-flight lock (second request while one is talking to the
-     exchange → rejected, no second transfer);
-  2. a 2-minute same-exchange cooldown backed by the withdrawals table —
-     which previously had ZERO writers, so the audit trail and the
-     existing recent_withdrawal_exists() idempotency gate were dead;
-  3. persisted Withdrawal rows;
-  4. redacted error surfaces (exchange exceptions can echo request
-     details, incl. the API key, into the response/URL).
+Withdrawal capability was REMOVED from the app 2026-08-24 (Ben's directive
+after the tenant-dashboard breach). The endpoint-level withdraw-now tests
+that used to live here are replaced by `test_withdrawal_endpoints_are_removed`,
+which pins that removal so it can't silently regress. The `_redact_exchange_error`
+and strategy-save validator tests are retained — those surfaces still exist.
 """
 from __future__ import annotations
 
-import asyncio
 import os
 import tempfile
 from datetime import datetime, timezone
 from decimal import Decimal
 
-import pytest
 from fastapi.testclient import TestClient
 
-import bitcoiners_dca.web.dashboard as dashboard_module
 from bitcoiners_dca.core.models import Withdrawal, WithdrawalStatus
 from bitcoiners_dca.persistence.db import Database
 from bitcoiners_dca.utils.config import AppConfig
@@ -30,19 +24,18 @@ from bitcoiners_dca.web.dashboard import _redact_exchange_error, create_app
 BTC_ADDR = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
 
 
-class StubWithdrawExchange:
+class StubExchange:
+    """Generic self-host exchange stub (no gate) for endpoint tests."""
     name = "okx"
     dry_run = False
 
-    def __init__(self, fail_with: Exception | None = None):
+    def __init__(self):
         self.calls = 0
-        self._fail_with = fail_with
 
     async def withdraw_btc(self, amount_btc, address, network="bitcoin",
                            rcvr_info=None):
+        # Retained only as dormant adapter plumbing; the app never calls it.
         self.calls += 1
-        if self._fail_with is not None:
-            raise self._fail_with
         return Withdrawal(
             exchange=self.name, withdrawal_id=f"w-{self.calls}",
             asset="BTC", amount=Decimal(str(amount_btc)), address=address,
@@ -51,67 +44,44 @@ class StubWithdrawExchange:
         )
 
 
-def _client(stub) -> tuple[TestClient, Database]:
+def _client(stub=None) -> tuple[TestClient, Database]:
     db = Database(os.path.join(tempfile.mkdtemp(), "w.db"))
     config = AppConfig()
-    app = create_app(config=config, db=db, exchanges=[stub])
+    app = create_app(config=config, db=db, exchanges=[stub or StubExchange()])
     return TestClient(app), db
 
 
-def _post(client: TestClient, amount="0.01"):
-    return client.post("/withdrawals/withdraw-now", data={
-        "exchange": "okx", "destination": BTC_ADDR, "amount_btc": amount,
-    })
+# ─── withdrawal capability is gone ─────────────────────────────────────
 
 
-def test_withdrawal_is_persisted_and_cooldown_blocks_resubmit():
-    stub = StubWithdrawExchange()
-    client, db = _client(stub)
-
-    r1 = _post(client)
-    assert r1.status_code == 200
-    assert "Withdrawal submitted" in r1.text
-    assert stub.calls == 1
-    # Persisted — the table previously had zero writers.
-    assert db.recent_withdrawal_exists("okx", "BTC", since_minutes=2)
-
-    # An immediate resubmit (double-click after the first returned,
-    # browser back-button repost, …) is treated as the same intent.
-    r2 = _post(client)
-    assert "less than" in r2.text and "2 minutes" in r2.text
-    assert stub.calls == 1   # no second transfer
-
-
-def test_in_flight_lock_rejects_concurrent_submit():
-    stub = StubWithdrawExchange()
+def test_withdrawal_endpoints_are_removed():
+    """No web surface may move BTC. Every former withdrawal route 404s and
+    the adapter's withdraw_btc must never be reached."""
+    stub = StubExchange()
     client, _db = _client(stub)
 
-    # Simulate a request currently holding the lock (mid-exchange-call).
-    asyncio.run(dashboard_module._withdraw_in_flight.acquire())
-    try:
-        r = _post(client)
-        assert "already in flight" in r.text
-        assert stub.calls == 0
-    finally:
-        dashboard_module._withdraw_in_flight.release()
+    # POST money-movement endpoint.
+    r = client.post("/withdrawals/withdraw-now", data={
+        "exchange": "okx", "destination": BTC_ADDR, "amount_btc": "0.01",
+    })
+    assert r.status_code == 404, r.status_code
+    # GET page + supporting APIs.
+    for path in ("/withdrawals",
+                 "/api/withdrawable-btc?ex=okx",
+                 "/api/withdrawal-destinations?ex=okx"):
+        assert client.get(path).status_code == 404, path
+    # The adapter withdraw path was never invoked.
+    assert stub.calls == 0
 
 
-def test_failed_withdrawal_error_is_redacted():
-    secret = "AKIA" + "x" * 40
-    stub = StubWithdrawExchange(
-        fail_with=RuntimeError(f"signature rejected for apiKey={secret}")
-    )
-    client, db = _client(stub)
-
-    r = _post(client)
-    assert "rejected the withdrawal" in r.text
-    assert secret not in r.text
-    assert "redacted" in r.text
-    # Nothing persisted on failure.
-    assert not db.recent_withdrawal_exists("okx", "BTC", since_minutes=2)
+def test_nav_has_no_withdrawals_link():
+    client, _db = _client()
+    body = client.get("/").text
+    assert "/withdrawals" not in body
+    assert "Withdrawals" not in body
 
 
-# ─── _redact_exchange_error unit behaviour ─────────────────────────────
+# ─── _redact_exchange_error unit behaviour (still used by test/buy/tg) ──
 
 
 def test_redact_strips_secret_kv_pairs():
@@ -147,7 +117,7 @@ def _strategy_form(budget: str) -> dict:
 
 
 def test_strategy_save_rejects_nan_and_infinity_budget():
-    client, _db = _client(StubWithdrawExchange())
+    client, _db = _client()
     for bad in ("NaN", "Infinity", "-5", "0"):
         r = client.post("/strategy", data=_strategy_form(bad))
         assert r.status_code == 200
@@ -163,8 +133,7 @@ def test_strategy_save_clamps_dip_multiplier(tmp_path):
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text("strategy:\n  amount_aed: '100'\n")
     db = Database(os.path.join(tempfile.mkdtemp(), "s.db"))
-    app = create_app(config_path=str(cfg_path), db=db,
-                     exchanges=[StubWithdrawExchange()])
+    app = create_app(config_path=str(cfg_path), db=db, exchanges=[StubExchange()])
     client = TestClient(app)
 
     form = _strategy_form("1000")

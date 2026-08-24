@@ -30,6 +30,7 @@ Run via:
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import os
 import re
@@ -90,13 +91,6 @@ def _redact_exchange_error(err, limit: int = 200) -> str:
         msg = pat.sub("[redacted]", msg)
     return msg[:limit]
 
-
-# Serialises manual withdrawals within this dashboard process — withdraw-now
-# moves real BTC, and without it a double-click fired two transfers (audit
-# 2026-06-10 P1). One dashboard process per tenant, so a process-local lock
-# is the correct scope; the 2-minute cooldown (withdrawals table) covers
-# resubmits that arrive after the first request finished.
-_withdraw_in_flight = asyncio.Lock()
 
 # Background-task reference set. `asyncio.create_task()` returns a Task,
 # but if the only reference is the local variable it gets garbage-
@@ -251,56 +245,86 @@ def _require_cf_header() -> bool:
     return os.environ.get("DCA_REQUIRE_CF_HEADER", "").strip().lower() in ("1", "true", "yes")
 
 
+# Header the bitcoiners-app proxy injects to prove a request came from it.
+# The identity header (CF_USER_HEADER) is forgeable by anyone who can reach
+# the origin; this secret is not. It is the primary control after the
+# 2026-08 breach (see [[dca_tenant_dashboard_breach_2026_08]]).
+PROXY_SECRET_HEADER = "x-dca-proxy-secret"
+
+
+def _expected_proxy_secret() -> str:
+    return os.environ.get("DCA_PROXY_SHARED_SECRET", "").strip()
+
+
+def _has_valid_proxy_secret(request: Request) -> bool:
+    """True iff the request carries the shared proof-of-origin secret.
+    Constant-time compare. Empty configured secret always returns False so
+    hosted mode fails closed instead of accepting an empty match."""
+    expected = _expected_proxy_secret()
+    if not expected:
+        return False
+    return hmac.compare_digest(request.headers.get(PROXY_SECRET_HEADER, ""), expected)
+
+
 class _CFGateMiddleware(BaseHTTPMiddleware):
-    """Refuse any request missing the CF Access user header when the env
-    flag DCA_REQUIRE_CF_HEADER=1 is set (production hosted mode).
+    """Hosted-mode ingress gate. Fails CLOSED.
 
-    Skips /healthz so the container healthcheck still works internally.
+    In hosted mode (DCA_REQUIRE_CF_HEADER=1) every request except /healthz
+    must satisfy, in order:
 
-    Per-tenant email gate (audit B-P1-6 2026-05-21):
-    Beyond requiring SOME CF-Access-authenticated email, also require
-    that email matches the tenant's configured owner. Without this,
-    a mis-scoped CF Access policy (allows any email, or allows the
-    wrong group) would let any authenticated user reach any tenant.
+      1. Proof-of-origin: a valid PROXY_SECRET_HEADER that only the
+         bitcoiners-app proxy knows. A client that reaches the origin
+         directly and forges the identity header does NOT have this secret
+         and is rejected (403). This is the core fix for the 2026-08 breach:
+         the identity header alone is forgeable, the secret is not.
+      2. Identity: the CF-Access identity header, which the proxy sets from
+         the authenticated session.
+      3. Ownership: the identity must equal DCA_TENANT_OWNER_EMAIL. If that
+         env is unset in hosted mode we REFUSE (503) — a missing owner gate
+         was root-cause (b) of the breach, and silently allowing was wrong.
 
-    Configure via env var DCA_TENANT_OWNER_EMAIL on the tenant container.
-    The provisioner sets it at bootstrap. If absent, this check is
-    skipped (warns once) so non-hosted self-host installs aren't broken.
+    Self-host (DCA_REQUIRE_CF_HEADER unset) skips all of this so a Free-tier
+    user on their own machine needs no proxy.
     """
 
-    _owner_email_logged_once = False
-
     async def dispatch(self, request, call_next):
+        from starlette.responses import PlainTextResponse
+
         if request.url.path == "/healthz":
             return await call_next(request)
-        if _require_cf_header() and not request.headers.get(CF_USER_HEADER):
-            from starlette.responses import PlainTextResponse
+        if not _require_cf_header():
+            return await call_next(request)  # self-host: no gate
+
+        # 1. Proof-of-origin (fail closed if the secret isn't configured).
+        if not _expected_proxy_secret():
+            logger.error(
+                "hosted mode but DCA_PROXY_SHARED_SECRET is unset — refusing all requests"
+            )
+            return PlainTextResponse("Server misconfigured", status_code=503)
+        if not _has_valid_proxy_secret(request):
+            return PlainTextResponse("Forbidden", status_code=403)
+
+        # 2. Identity header present.
+        cf_email = request.headers.get(CF_USER_HEADER)
+        if not cf_email:
             return PlainTextResponse("Unauthorized: missing proxy header", status_code=401)
 
-        # Per-tenant email check. Only enforce when both the CF header
-        # is present AND DCA_TENANT_OWNER_EMAIL is configured.
-        cf_email = request.headers.get(CF_USER_HEADER)
+        # 3. Ownership match (fail closed if the owner isn't configured).
         tenant_owner = os.environ.get("DCA_TENANT_OWNER_EMAIL", "").strip().lower()
-        if cf_email and tenant_owner:
-            if cf_email.strip().lower() != tenant_owner:
-                from starlette.responses import PlainTextResponse
-                logger.warning(
-                    "cross-tenant access attempt: CF-Access user %r != tenant owner %r",
-                    cf_email, tenant_owner,
-                )
-                return PlainTextResponse(
-                    "Forbidden: this dashboard belongs to a different account",
-                    status_code=403,
-                )
-        elif cf_email and not tenant_owner and not _CFGateMiddleware._owner_email_logged_once:
-            # First-time only — don't spam every request.
-            logger.warning(
-                "DCA_TENANT_OWNER_EMAIL not configured — per-tenant email "
-                "gate disabled. Self-hosted: ignore. Hosted: set this in "
-                "the tenant container env so a mis-scoped CF Access "
-                "policy can't grant cross-tenant access. Audit B-P1-6.",
+        if not tenant_owner:
+            logger.error(
+                "hosted mode but DCA_TENANT_OWNER_EMAIL is unset — refusing all requests"
             )
-            _CFGateMiddleware._owner_email_logged_once = True
+            return PlainTextResponse("Server misconfigured", status_code=503)
+        if cf_email.strip().lower() != tenant_owner:
+            logger.warning(
+                "cross-tenant access attempt: CF-Access user %r != tenant owner %r",
+                cf_email, tenant_owner,
+            )
+            return PlainTextResponse(
+                "Forbidden: this dashboard belongs to a different account",
+                status_code=403,
+            )
 
         return await call_next(request)
 
@@ -369,73 +393,46 @@ class _OriginCSRFMiddleware(BaseHTTPMiddleware):
             h.strip().lower() for h in proxy_hosts_env.split(",") if h.strip()
         }
 
-        # Trust requests that came through bitcoiners-app's proxy AND
-        # carry a same-site Origin/Referer. The CF header alone was the
-        # previous trust signal, but that lets a same-site CSRF attempt
-        # ride the proxy — bitcoiners-app's middleware already blocks
-        # those at the edge, but defense-in-depth says we don't rely on
-        # a single layer. Requirements when CF header is present:
-        #   - Origin (preferred) OR Referer matches our allowed_hosts
-        #   - OR no Origin/Referer is sent at all (some HTMX flows do
-        #     this from server-side fetches — proxy already validated
-        #     the session so the absence of these headers is
-        #     interpretable as "internal call").
-        cf_auth = request.headers.get("cf-access-authenticated-user-email")
-        if cf_auth:
-            # Trusted proxy hosts widen the allowed set only when the CF
-            # auth header is present — i.e., the request demonstrably
-            # came through the bitcoiners-app proxy.
-            cf_allowed_hosts = allowed_hosts | trusted_proxy_hosts
-            if origin:
-                if self._host_of(origin) in cf_allowed_hosts:
-                    return await call_next(request)
-                return JSONResponse(
-                    {"error": "csrf",
-                     "detail": "cf-access-authenticated header present but Origin "
-                               f"host {self._host_of(origin)!r} not in {cf_allowed_hosts}"},
-                    status_code=403,
-                )
-            if referer:
-                if self._host_of(referer) in cf_allowed_hosts:
-                    return await call_next(request)
-                return JSONResponse(
-                    {"error": "csrf",
-                     "detail": "cf-access-authenticated header present but Referer "
-                               f"host {self._host_of(referer)!r} not in {cf_allowed_hosts}"},
-                    status_code=403,
-                )
-            # Neither Origin nor Referer — server-to-server style. The
-            # upstream proxy already validated the session, so we
-            # allow this through. Log it so we can SEE if anything
-            # legitimate hits this path in production; if the count
-            # stays at zero for a week, tighten to a 403. Audit B-P1-5
-            # 2026-05-21 — defense-in-depth gap noted but not tightened
-            # yet because some legacy HTMX server-side fetches may
-            # depend on this branch.
-            logger.warning(
-                "csrf: allowing request with CF-auth header but no Origin/Referer (path=%s method=%s ua=%r)",
-                request.url.path, request.method,
-                (request.headers.get("user-agent") or "")[:80],
-            )
+        allowed = allowed_hosts | trusted_proxy_hosts
+
+        # A valid proof-of-origin secret means the request came from the
+        # bitcoiners-app proxy, which enforces its own same-site CSRF at the
+        # edge before it ever forwards here. That secret is unforgeable by a
+        # cross-site attacker, so it is a sufficient CSRF signal on its own —
+        # and it does not depend on the proxy forwarding the browser Origin.
+        # This REPLACES the old "trust the forgeable CF-auth header" branch
+        # (audit B-P1-5 / the 2026-08 breach) that allowed header-only,
+        # no-Origin requests straight through.
+        if _has_valid_proxy_secret(request):
             return await call_next(request)
 
+        # No proof-of-origin: require a genuinely same-site Origin/Referer.
         if origin:
-            if self._host_of(origin) not in allowed_hosts:
-                return JSONResponse(
-                    {"error": "csrf",
-                     "detail": f"origin host {self._host_of(origin)!r} not in {allowed_hosts}"},
-                    status_code=403,
-                )
-            return await call_next(request)
+            if self._host_of(origin) in allowed:
+                return await call_next(request)
+            return JSONResponse(
+                {"error": "csrf",
+                 "detail": f"origin host {self._host_of(origin)!r} not in {allowed}"},
+                status_code=403,
+            )
         if referer:
-            if self._host_of(referer) not in allowed_hosts:
-                return JSONResponse(
-                    {"error": "csrf",
-                     "detail": f"referer host {self._host_of(referer)!r} not in {allowed_hosts}"},
-                    status_code=403,
-                )
-            return await call_next(request)
-        # No Origin AND no Referer: likely server-to-server / curl. Allow.
+            if self._host_of(referer) in allowed:
+                return await call_next(request)
+            return JSONResponse(
+                {"error": "csrf",
+                 "detail": f"referer host {self._host_of(referer)!r} not in {allowed}"},
+                status_code=403,
+            )
+
+        # Neither a proof-of-origin secret nor any Origin/Referer. In hosted
+        # mode this is exactly the curl-with-no-Origin shape the breach used
+        # — refuse it. Self-host (no proxy) still allows local scripting.
+        if _require_cf_header():
+            return JSONResponse(
+                {"error": "csrf",
+                 "detail": "state-changing request without proof-of-origin or same-site Origin/Referer"},
+                status_code=403,
+            )
         return await call_next(request)
 
 
@@ -1420,314 +1417,13 @@ def create_app(
             amount_error=amount_error,
         )))
 
-    # Lightning capability per exchange — drives whether the network
-    # selector + LN destination is offered. Sourced from each adapter's
-    # `supports_lightning_withdrawal` class attribute so a new exchange
-    # can opt in by setting that flag on its class — no edit needed here.
-    def _supports_lightning(name: str) -> bool:
-        for ex in _exchanges():
-            if ex.name == name:
-                return bool(getattr(ex, "supports_lightning_withdrawal", False))
-        return False
-
-    @app.get("/api/withdrawable-btc")
-    async def api_withdrawable_btc(ex: str = ""):
-        """Live BTC available to withdraw on a given exchange.
-
-        Powers the Withdraw-now form's balance display + slider. Reads
-        each adapter's live BTC balance, then for OKX combines Trading +
-        Funding sub-account free balances (the adapter auto-transfers
-        from Trading to Funding inside withdraw_btc, so the user's
-        meaningful "available" is the sum). For Binance and BitOasis
-        the single `free` field already reflects what's withdrawable.
-        """
-        name = (ex or "").strip().lower()
-        target = None
-        for adapter in _exchanges():
-            if adapter.name == name:
-                target = adapter
-                break
-        if target is None:
-            return {"exchange": name, "available_btc": "0", "note": "not configured"}
-        try:
-            if name == "okx":
-                # OKX-specific: sum across Trading + Funding via the raw
-                # ccxt client (the adapter's get_balances returns Trading
-                # only, which would underreport for users who manually
-                # parked BTC in Funding).
-                client = getattr(target, "_client", None)
-                if client is None:
-                    raise RuntimeError("OKX client missing")
-                trading = await client.fetch_balance({"type": "trading"})
-                funding = await client.fetch_balance({"type": "funding"})
-                t = (trading.get("BTC") or {}).get("free") or 0
-                f = (funding.get("BTC") or {}).get("free") or 0
-                avail = Decimal(str(t)) + Decimal(str(f))
-                return {
-                    "exchange": name,
-                    "available_btc": format(avail, "f"),
-                    "note": f"Trading {t} + Funding {f}",
-                }
-            # Generic adapter path.
-            balances = await target.get_balances()
-            for b in balances:
-                if b.asset == "BTC":
-                    return {
-                        "exchange": name,
-                        "available_btc": format(b.free, "f"),
-                    }
-            return {"exchange": name, "available_btc": "0", "note": "no BTC balance"}
-        except Exception as e:
-            return {"exchange": name, "available_btc": "0", "note": f"err: {type(e).__name__}"}
-
-    @app.get("/api/withdrawal-destinations")
-    async def api_withdrawal_destinations(ex: str = ""):
-        """Address book + Binance whitelist for the destination picker.
-
-        Returns:
-          {
-            "exchange": "binance",
-            "destinations": [
-              {"address": "bc1q...", "network": "bitcoin",
-               "label": "Hardware wallet", "source": "manual",
-               "last_used_at": "2026-05-19T..."},
-              ...
-            ]
-          }
-        Sources are merged and de-duplicated by (address, network), with
-        the most recent label winning. Binance also pulls
-        /sapi/v1/capital/withdraw/address/list (the only exchange that
-        exposes a whitelist surface).
-        """
-        name = (ex or "").strip().lower()
-        if not name:
-            return {"exchange": "", "destinations": []}
-        try:
-            local = _db().list_destinations(name, limit=50)
-        except Exception:
-            logger.exception("list_destinations failed")
-            local = []
-
-        merged: dict[tuple[str, str], dict] = {}
-        for row in local:
-            key = (row["address"], row["network"])
-            merged[key] = row
-
-        if name == "binance":
-            target = None
-            for adapter in _exchanges():
-                if adapter.name == "binance":
-                    target = adapter
-                    break
-            if target is not None:
-                try:
-                    whitelist = await target.get_withdrawal_whitelist("BTC")
-                    for entry in whitelist:
-                        key = (entry["address"], entry["network"])
-                        if key in merged:
-                            # Mark existing entry as also whitelisted; keep
-                            # last_used_at from the local row.
-                            merged[key]["whitelisted"] = True
-                            if entry.get("label") and not merged[key].get("label"):
-                                merged[key]["label"] = entry["label"]
-                        else:
-                            merged[key] = {
-                                "exchange": name,
-                                "address": entry["address"],
-                                "network": entry["network"],
-                                "label": entry.get("label"),
-                                "source": "binance_whitelist",
-                                "whitelisted": True,
-                                "last_used_at": None,
-                            }
-                except Exception:
-                    logger.exception("Binance whitelist fetch failed")
-
-        out = list(merged.values())
-        # Most-recently-used first; whitelist-only entries (no last_used_at)
-        # sort after recents.
-        out.sort(key=lambda r: (r.get("last_used_at") or ""), reverse=True)
-        return {"exchange": name, "destinations": out}
-
-    def _withdrawals_ctx_extra():
-        cfg = _config()
-        # Expose the configured-exchange list to the manual Withdraw-now
-        # form's dropdown. Auto-withdraw policy UI was removed — see
-        # feedback-kill-auto-withdraw-until-lightning.
-        ex_names = list(type(cfg.exchanges).model_fields.keys()) if cfg.exchanges else []
-        policies = [{"exchange": name} for name in ex_names]
-        return {"policies": policies}
-
-    @app.get("/withdrawals", response_class=HTMLResponse)
-    async def withdrawals_page(request: Request):
-        return HTMLResponse(jinja.get_template("withdrawals.html").render(_ctx(
-            request, active="withdrawals", **_withdrawals_ctx_extra(),
-        )))
-
-    @app.post("/withdrawals/withdraw-now", response_class=HTMLResponse)
-    async def withdraw_now(request: Request):
-        """One-shot manual withdrawal. Resolves Lightning Address to a
-        BOLT11 invoice if needed, then calls the exchange's withdraw_btc.
-
-        Side-effects of running this on a live exchange: real BTC moves.
-        The dashboard form gates with a confirm() dialog; the route still
-        validates inputs server-side because nothing about the client can
-        be trusted.
-        """
-        from bitcoiners_dca.core.lightning import (
-            detect_network as _detect_network,
-            WithdrawalNetwork as _Net,
-        )
-
-        def _back(kind: str, message: str):
-            return HTMLResponse(jinja.get_template("withdrawals.html").render(_ctx(
-                request, active="withdrawals",
-                flash={"kind": kind, "message": message},
-                **_withdrawals_ctx_extra(),
-            )))
-
-        form = await request.form()
-        ex_name = (form.get("exchange") or "").strip()
-        destination = (form.get("destination") or "").strip()
-        amount_raw = (form.get("amount_btc") or "").strip()
-
-        if not ex_name or not destination or not amount_raw:
-            return _back("err", "Exchange, destination, and amount are all required.")
-        try:
-            amount_btc = Decimal(amount_raw)
-        except InvalidOperation:
-            return _back("err", f"Amount '{amount_raw}' isn't a number.")
-        if amount_btc <= 0:
-            return _back("err", "Amount must be greater than zero.")
-        # Server-side cap matches the UI's documented 1 BTC limit on
-        # the manual flow. Anyone bypassing the form attribute still
-        # hits this. Auto-withdraw uses its own threshold-based cap
-        # configured per-exchange in the policy section above.
-        if amount_btc > Decimal("1"):
-            return _back("err", "Amount exceeds the 1 BTC safety cap for the manual flow.")
-
-        # Find the configured exchange adapter. Re-use the cached list so
-        # we hit the same credentials the bot uses for live cycles.
-        target = None
-        for ex in _exchanges():
-            if ex.name == ex_name:
-                target = ex
-                break
-        if target is None:
-            return _back("err",
-                f"Exchange '{ex_name}' isn't enabled or has no credentials saved.")
-
-        # On-chain BTC only. UAE exchanges (OKX UAE, BitOasis, Binance
-        # UAE) don't expose Lightning withdrawals via their API surface
-        # — even OKX, whose adapter advertises supports_lightning_
-        # withdrawal=True for the global product, doesn't surface LN in
-        # the UAE region. Refuse anything that doesn't fingerprint as a
-        # plain BTC address so the user gets a clear error instead of
-        # a confusing exchange-side rejection.
-        net = _detect_network(destination)
-        if net != _Net.BITCOIN:
-            return _back("err",
-                f"Destination doesn't look like an on-chain BTC address "
-                f"(detected={net.value}). The bot's UAE exchanges only "
-                "support on-chain withdrawals — paste a bc1q… / bc1p… / "
-                "1… / 3… address.")
-        outgoing_destination = destination
-        outgoing_network = "bitcoin"
-
-        # Travel Rule recipient info. OKX UAE always requires it. Binance
-        # UAE (ADGM) also requires it via /sapi/v1/localentity/withdraw/
-        # apply — the adapter routes there automatically. BitOasis ignores
-        # the kwarg.
-        rcvr_first = (form.get("rcvr_first_name") or "").strip()
-        rcvr_last = (form.get("rcvr_last_name") or "").strip()
-        rcvr_country = (form.get("rcvr_country") or "").strip().upper()[:2]
-        rcvr_subdiv = (form.get("rcvr_country_subdivision") or "").strip()
-        # Checkbox; absent in form payload when unchecked.
-        is_self_custody = (form.get("address_owner_self") or "").lower() in ("1", "on", "true", "yes")
-        rcvr_info: Optional[dict] = None
-        if rcvr_first and rcvr_last and rcvr_country:
-            rcvr_info = {
-                "walletType": "private",  # self-custody — supports "exchange" later if needed
-                "rcvrFirstName": rcvr_first,
-                "rcvrLastName": rcvr_last,
-                "rcvrCountry": rcvr_country,
-                # Drives Binance UAE questionnaire (isAddressOwner=1 vs 2)
-                # and is harmless for OKX/BitOasis (they ignore it).
-                "addressOwnerSelf": is_self_custody,
-            }
-            if rcvr_subdiv:
-                rcvr_info["rcvrCountrySubDivision"] = rcvr_subdiv
-
-        # Double-submit guards (audit 2026-06-10 P1) — real BTC moves here,
-        # and before these a double-click or browser form-resubmit fired
-        # TWO transfers.
-        #   1. In-flight lock: reject a second request while the first is
-        #      still talking to the exchange (non-blocking — queueing it
-        #      would just delay the duplicate, not prevent it).
-        #   2. Cooldown: a repeat for the same exchange within 2 minutes is
-        #      treated as a resubmission of the same intent. Reads the
-        #      withdrawals table, which we now actually write (3.).
-        if _withdraw_in_flight.locked():
-            return _back("err",
-                "A withdrawal is already in flight — wait for it to finish, "
-                "then check the history below before retrying.")
-        async with _withdraw_in_flight:
-            try:
-                if _db().recent_withdrawal_exists(ex_name, "BTC", since_minutes=2):
-                    return _back("err",
-                        f"A {ex_name} BTC withdrawal was submitted less than "
-                        f"2 minutes ago. If this is a separate, intentional "
-                        f"withdrawal, wait for the cooldown and submit again.")
-            except Exception:
-                logger.exception("withdrawal cooldown check failed")
-
-            try:
-                withdrawal = await target.withdraw_btc(
-                    amount_btc=amount_btc,
-                    address=outgoing_destination,
-                    network=outgoing_network,
-                    rcvr_info=rcvr_info,
-                )
-            except Exception as e:
-                # Log the full traceback server-side; surface only a
-                # REDACTED message — exchange errors can echo request
-                # details including the API key (audit 2026-06-10 P1).
-                logger.exception("manual withdraw failed")
-                return _back("err",
-                    f"{ex_name} rejected the withdrawal: "
-                    f"{_redact_exchange_error(e, 200)}")
-
-            # 3. Persist the withdrawal — audit trail + the cooldown gate
-            # above. The withdrawals table previously had ZERO writers, so
-            # the dashboard history and the idempotency check were dead.
-            try:
-                _db().record_withdrawal(withdrawal)
-            except Exception:
-                logger.exception("record_withdrawal after manual withdraw failed")
-
-        # Save the address into the local address book so the next
-        # withdrawal can auto-complete it. Failure here must NEVER
-        # surface to the user — the withdrawal itself already succeeded.
-        try:
-            _db().record_destination(
-                exchange=ex_name,
-                address=outgoing_destination,
-                network=outgoing_network,
-                source="manual",
-            )
-        except Exception:
-            logger.exception("record_destination after manual withdraw failed")
-
-        # Surface the exchange's withdrawal ID + TXID so the user can
-        # cross-reference in the exchange UI / on-chain explorer.
-        detail = f"id={withdrawal.withdrawal_id}"
-        if getattr(withdrawal, "txid", None):
-            detail += f", txid={withdrawal.txid}"
-        return _back(
-            "ok",
-            f"Withdrawal submitted on {ex_name}: {amount_btc} BTC via {outgoing_network} → "
-            f"{(destination[:30] + '…') if len(destination) > 30 else destination} ({detail})",
-        )
+    # --- Withdrawal capability REMOVED 2026-08-24 (Ben's directive after the
+    # tenant-dashboard breach). The manual withdraw-now endpoint, the
+    # withdrawable-btc / withdrawal-destinations APIs, and the Withdrawals
+    # page are gone: there is no web surface that can move BTC off an
+    # exchange. Exchange adapters keep withdraw_btc() as dormant plumbing
+    # but nothing in the app calls it. See
+    # [[dca_tenant_dashboard_breach_2026_08]].
 
     def _backtest_default_form(cfg) -> dict:
         # Pre-fill from live strategy config. Falls through to plain defaults
@@ -1847,13 +1543,24 @@ def create_app(
             result=result, baseline=baseline, recent_cycles=recent, error=None,
         )))
 
+    def _license_ctx() -> dict:
+        """Non-secret license fields for the settings template. The signed
+        key itself is never rendered back to the client (H-1, 2026-08 audit);
+        we expose only tier + a last-4 fingerprint."""
+        key = _config().license.key or ""
+        return {
+            "license_tier": _license().tier.value,
+            "license_features": [f.value for f in _license().enabled_features],
+            "license_key_saved": bool(key),
+            "license_key_fp": key[-4:] if len(key) >= 4 else "",
+        }
+
     @app.get("/settings", response_class=HTMLResponse)
     async def settings_page(request: Request):
         sec = _secrets()
         return HTMLResponse(jinja.get_template("settings.html").render(_ctx(
             request, active="settings",
-            license_tier=_license().tier.value,
-            license_features=[f.value for f in _license().enabled_features],
+            **_license_ctx(),
             tg_token_saved=bool(sec and sec.get("telegram.bot_token")),
         )))
 
@@ -1867,9 +1574,17 @@ def create_app(
         # reload. Now: parse the new key, set tier to whatever it
         # validates as, fall back to free on missing/invalid.
         from bitcoiners_dca.core.license import (
-            LicenseManager, LicenseTier, LICENSE_PUBLIC_KEY_HEX,
+            LicenseManager, LICENSE_PUBLIC_KEY_HEX,
         )
-        submitted_key = form.get("license_key") or None
+        # The key field is masked to `***` and never pre-filled with the
+        # real token (H-1). A blank or `***` submission therefore means
+        # "keep the saved key" — it must NOT wipe it (which would downgrade
+        # the tenant to Free). Only a genuinely new token replaces it.
+        raw_key = (form.get("license_key") or "").strip()
+        if raw_key and raw_key != "***":
+            submitted_key = raw_key
+        else:
+            submitted_key = _config().license.key or None
         # `LicenseManager.from_config` already returns LicenseTier.FREE on
         # any failure (missing, malformed, wrong-sig, expired). The
         # `tier_str` param is the REQUESTED tier — but the manager only
@@ -1911,7 +1626,7 @@ def create_app(
 
         return HTMLResponse(jinja.get_template("settings.html").render(_ctx(
             request, active="settings", flash=flash,
-            license_features=[f.value for f in _license().enabled_features],
+            **_license_ctx(),
             tg_token_saved=bool(sec and sec.get("telegram.bot_token")),
         )))
 
@@ -1946,11 +1661,15 @@ def create_app(
                 )
                 flash = {"kind": "ok", "message": f"Test message sent to chat {chat_id}. Check Telegram."}
             except Exception as e:
-                flash = {"kind": "err", "message": f"Test failed: {e}"}
+                # Redact — a python-telegram-bot error string can echo the
+                # bot token (L-2, 2026-08 audit). Log the full error server
+                # side, surface only a redacted one-liner.
+                logger.exception("telegram test failed")
+                flash = {"kind": "err", "message": f"Test failed: {_redact_exchange_error(e, 200)}"}
 
         return HTMLResponse(jinja.get_template("settings.html").render(_ctx(
             request, active="settings", flash=flash,
-            license_features=[f.value for f in _license().enabled_features],
+            **_license_ctx(),
             tg_token_saved=bool(sec and sec.get("telegram.bot_token")),
         )))
 
@@ -2249,10 +1968,12 @@ def create_app(
 
     @app.get("/healthz")
     async def health():
+        # Unauthenticated (the gate skips /healthz for the container
+        # healthcheck), so it must not disclose anything — no exchange list
+        # (M-3, 2026-08 audit). Just enough for `grep -q ok`.
         return {
             "status": "ok",
             "now": datetime.now(timezone.utc).isoformat(),
-            "exchanges_configured": [ex.name for ex in _exchanges()],
         }
 
     return app
