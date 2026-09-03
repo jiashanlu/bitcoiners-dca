@@ -36,7 +36,7 @@ from pydantic import BaseModel, EmailStr, Field
 # which runs under a python that has cryptography. Must match the image's
 # embedded LICENSE_PUBLIC_KEY_HEX; rotate both together with the signing key.
 _LICENSE_PUBLIC_KEY_HEX = (
-    "88e40087b82a3a9b2d2edb41b1e39de92e88a6b3e82727aff51c291846da80c5"
+    "7c2abeb2680f31824767fb62ebd79445a611b324d44c699c7d49690f07c41bd4"
 )
 
 # ─── Config ──────────────────────────────────────────────────────────────
