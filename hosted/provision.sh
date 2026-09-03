@@ -255,13 +255,21 @@ caddy_sites_dir="${PROVISION_CADDY_SITES_DIR:-}"
 caddy_container="${PROVISION_CADDY_CONTAINER:-caddy}"
 if [[ -n "${caddy_sites_dir}" && -d "${caddy_sites_dir}" ]]; then
   subdomain_base="${PROVISION_TENANT_SUBDOMAIN_BASE:-tenants.bitcoiners.ae}"
+  # Ensure the shared JSON access-log snippet exists in the base Caddyfile
+  # (added 2026-09-03 after the Aug breach left no client-IP forensics). The
+  # tenant block below `import`s it, so it must be defined or reload fails on
+  # a freshly-built host. Idempotent — only appended if absent.
+  caddyfile="${PROVISION_CADDYFILE:-/opt/caddy/Caddyfile}"
+  if [[ -f "${caddyfile}" ]] && ! grep -q '(accesslog)' "${caddyfile}"; then
+    printf '\n(accesslog) {\n\tlog {\n\t\toutput file /data/access/access.log {\n\t\t\troll_size 20MiB\n\t\t\troll_keep 12\n\t\t\troll_keep_for 2160h\n\t\t}\n\t\tformat json\n\t}\n}\n' >> "${caddyfile}"
+  fi
   # tenant_id is validated `^[a-z0-9-]+$` upstream → safe to interpolate.
   # Edge gate (2026-08 breach fix): drop any request that doesn't carry the
   # proof-of-origin secret BEFORE it reaches the dashboard. Only the
   # bitcoiners-app proxy sets this header, so a direct hit from the internet
   # (forged CF identity header or not) is refused at Caddy. The app-side gate
   # enforces the same secret again as defense-in-depth.
-  printf '%s.%s {\n    @noauth not header X-Dca-Proxy-Secret "%s"\n    respond @noauth "Forbidden" 403\n    reverse_proxy http://bitcoiners-dca-%s-dashboard:8000 {\n        header_up X-Forwarded-Proto https\n    }\n}\n' \
+  printf '%s.%s {\n    import accesslog\n    @noauth not header X-Dca-Proxy-Secret "%s"\n    respond @noauth "Forbidden" 403\n    reverse_proxy http://bitcoiners-dca-%s-dashboard:8000 {\n        header_up X-Forwarded-Proto https\n    }\n}\n' \
     "${tenant_id}" "${subdomain_base}" "${PROVISION_PROXY_SECRET}" "${tenant_id}" \
     > "${caddy_sites_dir}/${tenant_id}.caddy"
   chmod 600 "${caddy_sites_dir}/${tenant_id}.caddy"
