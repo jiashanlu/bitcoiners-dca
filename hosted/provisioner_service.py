@@ -59,7 +59,15 @@ TENANT_ID_RE = re.compile(r"^[a-z0-9-]{3,40}$")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("provisioner")
 
-app = FastAPI(title="bitcoiners-dca provisioner", version="1.0.0")
+# docs/openapi disabled: this service is internet-reachable and its schema
+# mapped the full attack surface to anyone who found /docs (2026-09 audit).
+app = FastAPI(
+    title="bitcoiners-dca provisioner",
+    version="1.0.0",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 
 # ─── Auth ────────────────────────────────────────────────────────────────
 
