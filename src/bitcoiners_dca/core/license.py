@@ -174,7 +174,9 @@ LICENSE_PUBLIC_KEY_HEX = (
     # keypair rotates, BOTH the image embed (this constant) AND the provisioner's
     # signing key need to update together — and every running tenant needs to
     # be re-issued a license signed by the new private key.
-    "88e40087b82a3a9b2d2edb41b1e39de92e88a6b3e82727aff51c291846da80c5"
+    # Rotated 2026-09-03 (infra audit rec 2) — previous bootstrap/dev key had
+    # been public in the repo since inception. Old key: 88e40087…46da80c5.
+    "7c2abeb2680f31824767fb62ebd79445a611b324d44c699c7d49690f07c41bd4"
 )
 
 
