@@ -67,6 +67,9 @@ jobs:
           # CT113 created 2026-10-07; rotate here if it is ever reinstalled.
           echo '192.168.4.213 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOUr8GRYf0NMTVBWxUN2nUycuHE3eFXNVah8wtDLedEK' \
             >> /root/.ssh/known_hosts
+          # DEPLOY_SSH_KEY = infra/ci_dca_deploy_ed25519. On CT113 that key is
+          # pinned to command="/usr/bin/docker load",restrict, so it can only
+          # load an image (docker load reads the gzip stream directly).
           docker save bitcoiners-dca:latest | gzip -1 | ssh -i /root/.ssh/deploy_key \
-            root@${TARGET_HOST} 'gunzip | docker load'
+            root@${TARGET_HOST}
           shred -u /root/.ssh/deploy_key 2>/dev/null || rm -f /root/.ssh/deploy_key
