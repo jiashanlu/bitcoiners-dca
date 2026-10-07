@@ -43,26 +43,29 @@ mypy src
 Strategy engine → smart router → exchange ABC (OKX/BNB/BitOasis adapters)
 → SQLite (trades, arb, cycles) → notifier (Telegram).
 
-Hosted tenants run the same code; tenant config + secrets live in the
-tenant container's mounted volume on tenants-LXC `192.168.4.160`. Tenants
-are provisioned by `hosted/provision.sh`.
+Hosted DCA (per-customer tenants on Hetzner + `hosted/` provisioner) was
+retired 2026-10-07; the bot is self-host only. Ben's own instance runs on
+home CT113 `dca-bot` (192.168.4.213, proxmox2, HA + */5 replication to
+proxmox1) at `/opt/bitcoiners-dca/tenants/benbois-ae0e0001`. Its
+dashboard is bound to 127.0.0.1:8100 and published only through the
+CT113 cloudflared tunnel at `dca.bitcoiners.ae` behind Cloudflare Access.
+The `hosted/` tree is kept for reference but nothing deploys it.
 
 ## Deploy
 
 Push to Gitea `jiashan-dev/bitcoiners-dca` →
-- CI builds image tarball on dockers-LXC →
-- `dev` branch → tarball lands on tenants-LXC →
-- `main` / tag → tarball also goes to Hetzner prod →
-- **CI does NOT recreate running tenants.** Manual recreate per tenant
-  required after image lands.
+- CI builds the image on dockers-LXC and runs the test gate against it.
+- `dev` → build + test only, nothing is shipped.
+- `main` / `v*` tag → image is loaded onto CT113 (192.168.4.213).
+- **CI does NOT recreate the running bot.** Recreate it manually after
+  the image lands:
 
-Recreate cadence:
 ```bash
-ssh tenants-lxc
-cd /opt/tenants/<tenant>
+ssh root@192.168.4.213
+cd /opt/bitcoiners-dca/tenants/benbois-ae0e0001
 docker compose up -d --force-recreate
 # verify code is live:
-docker exec <container> grep -l '<marker>' /app/src/...
+docker exec bitcoiners-dca-benbois-ae0e0001-dashboard grep -l '<marker>' /app/src/...
 ```
 
 ## Hard rules in this repo

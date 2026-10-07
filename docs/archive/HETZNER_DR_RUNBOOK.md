@@ -1,5 +1,7 @@
 # Hetzner Disaster-Recovery Runbook
 
+> **ARCHIVED 2026-10-07.** Hetzner was decommissioned; hosted DCA is retired. Ben's bot is self-hosted on CT113 (see CLAUDE.md). Kept for history only.
+
 Target RTO: ~45 min from "Hetzner is gone" to "tenant cycles resume."
 Target RPO: ≤24h (last nightly Hetzner backup tarball on dockers-LXC).
 
