@@ -1,5 +1,7 @@
 # v0.5 release notes
 
+> **ARCHIVED 2026-10-07.** Written while bitcoiners-dca had Free/Pro/Business licence tiers and a hosted (Hetzner tenant + provisioner) offering. Both are retired: the bot is free, MIT-licensed, self-host only, with every feature enabled. Kept for history only.
+
 Built overnight on 2026-05-11 → 2026-05-12. Ben asleep, dry-run preserved
 throughout, tests green at every commit, no live trades placed.
 

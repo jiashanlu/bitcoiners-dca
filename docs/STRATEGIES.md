@@ -7,14 +7,14 @@ compound.
 
 ```yaml
 overlays:
-  buy_the_dip:        { enabled: true,  ... }   # Pro+
-  volatility_weighted:{ enabled: false, ... }   # Pro+
-  time_of_day:        { enabled: false, ... }   # Pro+
-  drawdown_aware:     { enabled: false, ... }   # Pro+
+  buy_the_dip:        { enabled: true,  ... }
+  volatility_weighted:{ enabled: false, ... }
+  time_of_day:        { enabled: false, ... }
+  drawdown_aware:     { enabled: false, ... }
 ```
 
-Free tier ignores all overlays — base cycles only. Each overlay is gated
-by the license framework; see `docs/TIERS.md`.
+Every overlay is available to every install — enable the ones you want
+in `config.yaml` or from the dashboard's Strategy page.
 
 ---
 

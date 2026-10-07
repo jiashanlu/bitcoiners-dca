@@ -109,7 +109,7 @@ adapters + localization.
 **v0.8**: Saudi market — Rain adapter once we've cracked their
 Cloudflare layer.
 
-**v0.9**: Multi-asset DCA → Business-tier integration. Multi-strategy
+**v0.9**: Multi-asset DCA → strategy/scheduler integration. Multi-strategy
 family-office mode.
 
 **v1.0**: Public launch with full English/Arabic/Turkish UI.

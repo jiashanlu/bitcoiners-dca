@@ -1,5 +1,7 @@
 # Hosted deployment playbook
 
+> **ARCHIVED 2026-10-07.** Written while bitcoiners-dca had Free/Pro/Business licence tiers and a hosted (Hetzner tenant + provisioner) offering. Both are retired: the bot is free, MIT-licensed, self-host only, with every feature enabled. Kept for history only.
+
 How to run the bot AS A SERVICE for paying customers. Internal doc — not
 shipped in the open-source release.
 

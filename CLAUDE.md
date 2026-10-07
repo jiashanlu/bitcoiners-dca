@@ -5,14 +5,18 @@
 ## What this is
 
 Self-hostable multi-exchange BTC DCA bot for UAE residents. Python 3.11+ long-
-running process. v0.6: customer-facing dashboard, hot-reload daemon, encrypted-
-at-rest credentials (Fernet), license + tier framework.
+running process. v0.6: self-service dashboard, hot-reload daemon, encrypted-
+at-rest credentials (Fernet).
 
-Free = single exchange + DCA + tax CSV + manual on-chain withdraw.
-Pro = multi-exchange smart routing (3-hop), maker mode, advanced strategies, on-chain smart triggers (MVRV-Z), funding monitor.
-Business = basis trade, LN Markets covered calls, multi-asset DCA.
+Free and open source (MIT, see `LICENSE`) with NO tiers — decided
+2026-10-07 ("unlock everything, get rid of Pro"). Every feature
+(multi-exchange smart routing incl. multi-hop, maker mode, all overlays,
+on-chain smart triggers, funding monitor) is always available; the user's
+config is used as-is. There is no licence check and no remote Pro API.
+Legacy `license:` sections in config.yaml are accepted and ignored
+(`utils/config.py::_RETIRED_SECTIONS`).
 
-Note: auto-withdraw is parked until Lightning withdraw lands as a Pro feature — on-chain fees wipe out AED 49 customer savings. Manual withdraw via /withdrawals/withdraw-now is the supported flow. See [[feedback-kill-auto-withdraw-until-lightning]].
+Note: auto-withdraw is parked until Lightning withdraw lands — on-chain fees wipe out small-cycle savings. Manual withdraw via /withdrawals/withdraw-now is the supported flow. See [[feedback-kill-auto-withdraw-until-lightning]].
 
 ## Stack
 
@@ -22,7 +26,7 @@ Note: auto-withdraw is parked until Lightning withdraw lands as a Pro feature �
 - apscheduler (cron-style scheduler)
 - FastAPI + jinja2 (customer dashboard)
 - python-telegram-bot, tenacity, rich, typer
-- cryptography (license signing + Fernet for secret-at-rest)
+- cryptography (Fernet for secret-at-rest)
 - pytest, mypy, ruff (dev)
 
 ## Dev
@@ -33,7 +37,7 @@ bitcoiners-dca init-config         # writes config.yaml
 # export exchange env vars + TG_BOT_TOKEN
 bitcoiners-dca prices              # smoke test
 bitcoiners-dca buy-once            # dry-run unless dry_run: false
-pytest                             # 165+ tests should pass
+pytest                             # 390+ tests should pass
 ruff check src tests
 mypy src
 ```
@@ -44,12 +48,13 @@ Strategy engine → smart router → exchange ABC (OKX/BNB/BitOasis adapters)
 → SQLite (trades, arb, cycles) → notifier (Telegram).
 
 Hosted DCA (per-customer tenants on Hetzner + `hosted/` provisioner) was
-retired 2026-10-07; the bot is self-host only. Ben's own instance runs on
+retired 2026-10-07 and the `hosted/` tree deleted; the bot is self-host
+only. Ben's own instance runs on
 home CT113 `dca-bot` (192.168.4.213, proxmox2, HA + */5 replication to
 proxmox1) at `/opt/bitcoiners-dca/tenants/benbois-ae0e0001`. Its
 dashboard is bound to 127.0.0.1:8100 and published only through the
 CT113 cloudflared tunnel at `dca.bitcoiners.ae` behind Cloudflare Access.
-The `hosted/` tree is kept for reference but nothing deploys it.
+Hosted-era docs live in `docs/archive/` for history.
 
 ## Deploy
 
@@ -73,9 +78,8 @@ docker exec bitcoiners-dca-benbois-ae0e0001-dashboard grep -l '<marker>' /app/sr
 - **DRY_RUN=true** until Ben explicitly toggles it. Same applies to
   `[[feedback_no_destructive_diagnostics]]` — read-only probes only when
   debugging tenant state.
-- **License framework is load-bearing** — Pro/Business features gate on
-  `cryptography`-signed license keys. Never bypass the check "just for
-  local testing"; use a valid signed dev key from `scripts/generate_license.py`.
+- **No tiers, no feature gating** — don't reintroduce licence keys,
+  tier checks or a remote "Pro API" path. Every feature ships to everyone.
 - **Manual withdraw is the only withdraw surface** — auto-withdraw was
   retired (see [[feedback-kill-auto-withdraw-until-lightning]]). Don't
   add a "set auto-withdraw destination" API endpoint or surface auto-
@@ -87,7 +91,7 @@ docker exec bitcoiners-dca-benbois-ae0e0001-dashboard grep -l '<marker>' /app/sr
 - **Exchange API keys**: read from env vars only, never log, never echo
   back to clients in the dashboard. Recommend trade-only scope; document
   withdraw-scope key separately.
-- **Test pyramid is the contract** — 165+ tests; pre-merge run is required.
+- **Test pyramid is the contract** — 390+ tests; pre-merge run is required.
   No skipping integration tests with mocks of exchange responses we
   haven't seen ([[exchange_whitelist_api_surface]] — only Binance exposes
   list-whitelist; OKX/BitOasis don't).
@@ -101,9 +105,8 @@ docker exec bitcoiners-dca-benbois-ae0e0001-dashboard grep -l '<marker>' /app/sr
 - Smart router: `src/bitcoiners_dca/routing/`
 - Strategy engine + overlays: `src/bitcoiners_dca/strategies/`
 - Dashboard (FastAPI + jinja2): `src/bitcoiners_dca/web/`
-- License framework: `src/bitcoiners_dca/license/`
-- Hosted provisioning: `hosted/`
-- Per-feature docs: `docs/TIERS.md`, `docs/HOSTED_DEPLOYMENT.md`, `docs/ROUTING.md`
+- Per-feature docs: `docs/ROUTING.md`, `docs/STRATEGIES.md`, `docs/EXECUTION_MODES.md`, `docs/FUNDING_MONITOR.md`
+- Retired hosted/licensing docs (history only): `docs/archive/`
 
 ## Where to look for more
 

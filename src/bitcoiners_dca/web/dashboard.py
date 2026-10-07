@@ -3,7 +3,7 @@ Customer-facing FastAPI dashboard.
 
 Auth: Cloudflare Access gates the dashboard at the network edge. The
 `Cf-Access-Authenticated-User-Email` header is trusted; if it's absent
-(direct LAN access during self-hosted Free-tier use), we fall back to
+(direct LAN access on a self-hosted install), we fall back to
 "local-operator".
 
 Pages:
@@ -14,7 +14,7 @@ Pages:
   /prices          — Live BTC ticker across all enabled exchanges
   /trades          — Full trade history (paginated)
   /routes-audit    — Show every viable route at a chosen cycle size
-  /settings        — License key, notifications, risk caps
+  /settings        — Notifications, funding monitor, dry-run
   /healthz         — JSON health check
 
 JSON endpoints (machine-readable):
@@ -45,7 +45,6 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
-from bitcoiners_dca.core.license import LicenseManager
 from bitcoiners_dca.exchanges.base import Exchange
 from bitcoiners_dca.persistence.db import Database
 from bitcoiners_dca.persistence.secrets import (
@@ -117,110 +116,6 @@ def _spawn_bg(coro):
     task.add_done_callback(_on_done)
     return task
 
-# Pro API base URL — matches the router's resolution. When set AND the
-# user has a Pro license key, /backtest tries the hosted /api/pro/backtest
-# endpoint first and falls back to the local engine on any failure.
-_DASHBOARD_PRO_API_URL = os.environ.get("BITCOINERS_DCA_PRO_API_URL", "").rstrip("/")
-_DASHBOARD_PRO_API_TIMEOUT = float(
-    os.environ.get("BITCOINERS_DCA_PRO_API_TIMEOUT", "10")
-)
-
-
-async def _remote_backtest(license_token, cfg, points):
-    """Call /api/pro/backtest. Returns a BacktestResult or None on
-    any failure — caller falls back to local logic."""
-    from bitcoiners_dca.core.backtest import BacktestCycle, BacktestResult
-    from bitcoiners_dca.core import pro_api_status
-
-    if not _DASHBOARD_PRO_API_URL or not license_token:
-        return None
-    try:
-        import httpx
-    except ImportError:
-        return None
-
-    body = {
-        "amount_aed": float(cfg.base_amount_aed),
-        "frequency": cfg.frequency,
-        "day_of_week": cfg.day_of_week,
-        "taker_fee_pct": float(cfg.taker_fee_pct),
-        "dip_overlay_enabled": cfg.dip_overlay_enabled,
-        "dip_threshold_pct": float(cfg.dip_threshold_pct),
-        "dip_lookback_days": cfg.dip_lookback_days,
-        "dip_multiplier": float(cfg.dip_multiplier),
-        "points": [
-            {"day": p.day.isoformat(), "price": float(p.price)} for p in points
-        ],
-    }
-    try:
-        async with httpx.AsyncClient(timeout=_DASHBOARD_PRO_API_TIMEOUT) as client:
-            resp = await client.post(
-                f"{_DASHBOARD_PRO_API_URL}/api/pro/backtest",
-                headers={"Authorization": f"Bearer {license_token}"},
-                json=body,
-            )
-    except httpx.HTTPError as e:
-        logger.warning("[pro-api] /api/pro/backtest call failed: %s", e)
-        await pro_api_status.record_fallback("/api/pro/backtest", f"network error: {e}")
-        return None
-
-    if resp.status_code != 200:
-        logger.warning(
-            "[pro-api] /api/pro/backtest HTTP %s — using local engine",
-            resp.status_code,
-        )
-        await pro_api_status.record_fallback(
-            "/api/pro/backtest", f"HTTP {resp.status_code}",
-        )
-        return None
-
-    try:
-        data = resp.json()
-    except Exception as e:  # noqa: BLE001
-        logger.warning("[pro-api] /api/pro/backtest non-JSON: %s", e)
-        await pro_api_status.record_fallback("/api/pro/backtest", "malformed response")
-        return None
-
-    if data.get("stub"):
-        logger.info(
-            "[pro-api] /api/pro/backtest stub:true (%s) — using local engine",
-            data.get("rationale", "no rationale"),
-        )
-        await pro_api_status.record_fallback(
-            "/api/pro/backtest",
-            f"server returned stub: {data.get('rationale', 'no rationale')}",
-        )
-        return None
-
-    # Translate JSON cycles back into BacktestCycle/Result. Decimals on the
-    # way out keep the template's existing %.0f / %.4f formatting happy.
-    from datetime import date as _date
-    try:
-        cycles = [
-            BacktestCycle(
-                day=_date.fromisoformat(c["day"]),
-                price_aed=Decimal(str(c["price_aed"])),
-                aed_spent=Decimal(str(c["aed_spent"])),
-                btc_bought=Decimal(str(c["btc_bought"])),
-                overlay_applied=bool(c.get("overlay_applied", False)),
-            )
-            for c in data.get("cycles", [])
-        ]
-        result = BacktestResult(
-            config=cfg,
-            cycles=cycles,
-            start_day=_date.fromisoformat(data["start_day"]) if data.get("start_day") else None,
-            end_day=_date.fromisoformat(data["end_day"]) if data.get("end_day") else None,
-        )
-        await pro_api_status.record_success("/api/pro/backtest")
-        return result
-    except (KeyError, ValueError, TypeError) as e:
-        logger.warning("[pro-api] malformed /api/pro/backtest response: %s", e)
-        await pro_api_status.record_fallback(
-            "/api/pro/backtest", "malformed response (decode failed)",
-        )
-        return None
-
 
 CF_USER_HEADER = "Cf-Access-Authenticated-User-Email"
 
@@ -235,7 +130,7 @@ def _authenticated_user(request: Request) -> str:
     function only ever sees an authenticated request.
 
     In dev/self-host (the default), we fall back to "local-operator" so
-    Free-tier users running on their own machine don't need to set up
+    users running on their own machine don't need to set up
     Cloudflare Access at all.
     """
     return request.headers.get(CF_USER_HEADER, "local-operator")
@@ -283,8 +178,8 @@ class _CFGateMiddleware(BaseHTTPMiddleware):
          env is unset in hosted mode we REFUSE (503) — a missing owner gate
          was root-cause (b) of the breach, and silently allowing was wrong.
 
-    Self-host (DCA_REQUIRE_CF_HEADER unset) skips all of this so a Free-tier
-    user on their own machine needs no proxy.
+    Self-host (DCA_REQUIRE_CF_HEADER unset) skips all of this so a user
+    on their own machine needs no proxy.
     """
 
     async def dispatch(self, request, call_next):
@@ -468,8 +363,8 @@ def create_app(
     app.add_middleware(_OriginCSRFMiddleware)
     # Outer gate: when running in the hosted multi-tenant setup, refuse any
     # request that didn't come through the bitcoiners-app proxy (which sets
-    # Cf-Access-Authenticated-User-Email). Opt-in via env so self-host /
-    # Free tier still works without it.
+    # Cf-Access-Authenticated-User-Email). Opt-in via env so self-host
+    # still works without it.
     app.add_middleware(_CFGateMiddleware)
 
     # Serve vendored htmx + chart.js from /static. Hosting these locally
@@ -524,10 +419,6 @@ def create_app(
         if state["exchanges"] is None:
             state["exchanges"] = _build_dashboard_exchanges(_config(), _secrets())
         return state["exchanges"]
-
-    def _license() -> LicenseManager:
-        cfg = _config()
-        return LicenseManager.from_config(cfg.license.tier, cfg.license.key)
 
     def _prefix(request: Request) -> str:
         """Strip trailing slash; "" if not behind a reverse proxy."""
@@ -629,7 +520,7 @@ def create_app(
         # the proxy sets X-Forwarded-Prefix=/dca/console. Templates use
         # this to render all internal links + htmx URLs as
         # /dca/console/<path> so nav stays inside the iframe. Empty
-        # string for direct LAN/Free-tier access — links resolve to /.
+        # string for direct LAN access — links resolve to /.
         prefix = _prefix(request)
         # Onboarding checklist: surfaces until all 5 steps are done.
         # Each step's "done" flag is derived from real config + DB state,
@@ -652,16 +543,9 @@ def create_app(
         except Exception:
             orphan = None
 
-        # Pro API health — surfaces a non-blocking banner when the most
-        # recent attempt fell back to local. Cleared on next success or
-        # explicit dismiss.
-        from bitcoiners_dca.core import pro_api_status
-        pro_api = pro_api_status.snapshot()
-
         return {
             "request": request,
             "user_email": _authenticated_user(request),
-            "license_tier": _license().tier.value,
             "config": cfg,
             "prefix": prefix,
             "bot_status": _bot_status(),
@@ -669,7 +553,6 @@ def create_app(
             "onboarding": onboarding,
             "can_go_live": _can_go_live(cfg),
             "orphan": orphan,
-            "pro_api": pro_api,
             "flash": extra.pop("flash", None),
             "active": extra.pop("active", ""),
             **extra,
@@ -926,14 +809,6 @@ def create_app(
             bot_status=_bot_status(), prefix=_prefix(request),
             can_go_live=_can_go_live(_config()),
         ))
-
-    @app.post("/htmx/pro-api-banner/dismiss", response_class=HTMLResponse)
-    async def htmx_pro_api_dismiss(request: Request):
-        """User clicked × on the Pro API fallback banner. Marks it dismissed
-        in-memory; banner stays hidden until the next real fallback."""
-        from bitcoiners_dca.core import pro_api_status
-        pro_api_status.dismiss()
-        return HTMLResponse("")  # swap with empty so banner disappears
 
     @app.get("/htmx/trades-list", response_class=HTMLResponse)
     async def htmx_trades_list(request: Request, page: int = Query(1, ge=1)):
@@ -1391,7 +1266,6 @@ def create_app(
             decision = await router.pick(
                 _exchanges(), pair="BTC/AED",
                 required_quote_amount=amount,
-                license_token=getattr(getattr(cfg, "license", None), "key", None),
             )
             # Audit shows only routes that start from AED. Intermediate-
             # direct routes (e.g. BTC/USDT when there's idle USDT) are an
@@ -1518,21 +1392,7 @@ def create_app(
                 error=str(e),
             )))
 
-        # Try the hosted Pro API first if configured + the user has a Pro
-        # license. Any failure (network, 4xx/5xx, stub:true) falls back
-        # silently to the local engine — same pattern as router.pick().
-        # LicenseManager doesn't carry the raw token (only the parsed
-        # claims), so read the key straight from config.
-        license_token = getattr(getattr(cfg, "license", None), "key", None)
-        try:
-            remote_result = await _remote_backtest(license_token, cfg, points)
-        except Exception:
-            # A buggy remote-API client must NEVER black-screen the page.
-            # The local backtest engine is the source of truth; any
-            # remote failure just means "use local".
-            logger.exception("remote backtest call raised; falling back to local engine")
-            remote_result = None
-        result = remote_result if remote_result is not None else run_backtest(cfg, points)
+        result = run_backtest(cfg, points)
         baseline = naive_baseline(cfg, points) if form["dip_overlay"] else None
         # Show last 30 cycles in the recent table; full history available
         # via the CLI's --show-cycles flag.
@@ -1543,62 +1403,18 @@ def create_app(
             result=result, baseline=baseline, recent_cycles=recent, error=None,
         )))
 
-    def _license_ctx() -> dict:
-        """Non-secret license fields for the settings template. The signed
-        key itself is never rendered back to the client (H-1, 2026-08 audit);
-        we expose only tier + a last-4 fingerprint."""
-        key = _config().license.key or ""
-        return {
-            "license_tier": _license().tier.value,
-            "license_features": [f.value for f in _license().enabled_features],
-            "license_key_saved": bool(key),
-            "license_key_fp": key[-4:] if len(key) >= 4 else "",
-        }
-
     @app.get("/settings", response_class=HTMLResponse)
     async def settings_page(request: Request):
         sec = _secrets()
         return HTMLResponse(jinja.get_template("settings.html").render(_ctx(
             request, active="settings",
-            **_license_ctx(),
             tg_token_saved=bool(sec and sec.get("telegram.bot_token")),
         )))
 
     @app.post("/settings", response_class=HTMLResponse)
     async def settings_save(request: Request):
         form = await request.form()
-        # Derive tier from the validated key — do NOT trust a tier value
-        # from the form. Previously a `<select name="license_tier">` let
-        # any user save `tier=pro` without a corresponding key, unlocking
-        # Pro-tier overlays in the strategy form until the next process
-        # reload. Now: parse the new key, set tier to whatever it
-        # validates as, fall back to free on missing/invalid.
-        from bitcoiners_dca.core.license import (
-            LicenseManager, LICENSE_PUBLIC_KEY_HEX,
-        )
-        # The key field is masked to `***` and never pre-filled with the
-        # real token (H-1). A blank or `***` submission therefore means
-        # "keep the saved key" — it must NOT wipe it (which would downgrade
-        # the tenant to Free). Only a genuinely new token replaces it.
-        raw_key = (form.get("license_key") or "").strip()
-        if raw_key and raw_key != "***":
-            submitted_key = raw_key
-        else:
-            submitted_key = _config().license.key or None
-        # `LicenseManager.from_config` already returns LicenseTier.FREE on
-        # any failure (missing, malformed, wrong-sig, expired). The
-        # `tier_str` param is the REQUESTED tier — but the manager only
-        # honors the request when the key actually validates to it. We
-        # pass "business" so the manager validates against the strongest
-        # tier the key claims; if the key is for Pro, it'll downgrade.
-        resolved_tier = LicenseManager.from_config(
-            tier_str="business",
-            license_key=submitted_key,
-            public_key_hex=LICENSE_PUBLIC_KEY_HEX,
-        ).tier.value
         patch = {
-            "license.tier": resolved_tier,
-            "license.key": submitted_key,
             "notifications.telegram.enabled": form.get("tg_enabled") == "on",
             "notifications.telegram.chat_id":
                 form.get("tg_chat_id") or None,
@@ -1626,7 +1442,6 @@ def create_app(
 
         return HTMLResponse(jinja.get_template("settings.html").render(_ctx(
             request, active="settings", flash=flash,
-            **_license_ctx(),
             tg_token_saved=bool(sec and sec.get("telegram.bot_token")),
         )))
 
@@ -1669,7 +1484,6 @@ def create_app(
 
         return HTMLResponse(jinja.get_template("settings.html").render(_ctx(
             request, active="settings", flash=flash,
-            **_license_ctx(),
             tg_token_saved=bool(sec and sec.get("telegram.bot_token")),
         )))
 

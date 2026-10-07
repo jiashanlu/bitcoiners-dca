@@ -1,5 +1,7 @@
 # DCA dashboard — mobile UI audit (Pixel 5, 393×851)
 
+> **ARCHIVED 2026-10-07.** Written while bitcoiners-dca had Free/Pro/Business licence tiers and a hosted (Hetzner tenant + provisioner) offering. Both are retired: the bot is free, MIT-licensed, self-host only, with every feature enabled. Kept for history only.
+
 **Captured:** 2026-05-16 via Playwright against `dev-app.bitcoiners.ae/dca/console/*` with Ben's session cookie.
 **Spec:** `bitcoiners-app/tests/e2e/prod-mobile-smoke.dca-audit.spec.ts`
 **Screenshots:** `bitcoiners-app/mobile-audit/<route>.png`

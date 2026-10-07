@@ -1,5 +1,7 @@
 # Overnight build plan — v0.5
 
+> **ARCHIVED 2026-10-07.** Written while bitcoiners-dca had Free/Pro/Business licence tiers and a hosted (Hetzner tenant + provisioner) offering. Both are retired: the bot is free, MIT-licensed, self-host only, with every feature enabled. Kept for history only.
+
 Started 2026-05-11 ~midnight (Ben going to sleep). Goal: ship v0.5 fully
 shipped + documentation refreshed, ready for Ben to wake up to.
 

@@ -1,5 +1,7 @@
 # v0.6 release notes — Customer dashboard
 
+> **ARCHIVED 2026-10-07.** Written while bitcoiners-dca had Free/Pro/Business licence tiers and a hosted (Hetzner tenant + provisioner) offering. Both are retired: the bot is free, MIT-licensed, self-host only, with every feature enabled. Kept for history only.
+
 Shipped 2026-05-12. The bot is now a real self-service product.
 
 ## What's new

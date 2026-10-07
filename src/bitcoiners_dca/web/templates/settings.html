@@ -2,48 +2,9 @@
 {% block title %}Settings · bitcoiners-dca{% endblock %}
 {% block content %}
 <h1>Settings</h1>
-<p class="subtitle">License, notifications, master flags.</p>
+<p class="subtitle">Notifications, master flags.</p>
 
 <form method="post" action="{{ prefix }}/settings">
-
-<div class="card">
-  <h2>License</h2>
-  <p class="help">Free tier is genuinely useful (single-exchange DCA + tax CSV). Pro / Business unlock multi-exchange routing, advanced overlays, and more. See <a href="https://bitcoiners.ae/dca-bot" target="_blank">tiers</a>.</p>
-  <div class="form-row">
-    <label>Tier</label>
-    <div>
-      <span class="pill {% if license_tier in ('pro', 'business') %}accent{% else %}muted{% endif %}">
-        {{ license_tier }}
-      </span>
-      <small style="display:block;margin-top:6px;color:var(--text-muted)">
-        Tier is derived from your validated license key below — invalid or
-        missing keys downgrade to Free automatically. To upgrade, paste a
-        Pro/Business token in the field below and save.
-      </small>
-    </div>
-  </div>
-  <div class="form-row">
-    <label>License key</label>
-    <input name="license_key" type="password"
-      value="{% if license_key_saved %}***{% endif %}"
-      placeholder="(paste signed Pro/Business token here)">
-    <small>
-      Current tier: <strong>{{ license_tier | default('free') }}</strong>{% if license_key_fp %} · key ending <code>…{{ license_key_fp }}</code>{% endif %}.
-      Stored server-side and never shown here. Leave as <code>***</code> to keep the saved key.
-      Tier downgrades to free if the key is missing / invalid / expired.
-    </small>
-  </div>
-  <div class="form-row">
-    <label>Active features</label>
-    <div style="display:flex;flex-wrap:wrap;gap:6px">
-      {% for f in license_features %}
-        <span class="pill accent">{{ f }}</span>
-      {% else %}
-        <span class="muted">Free tier — base features only.</span>
-      {% endfor %}
-    </div>
-  </div>
-</div>
 
 <div class="card">
   <h2>Notifications</h2>

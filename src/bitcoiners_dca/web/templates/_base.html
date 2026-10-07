@@ -155,12 +155,6 @@ td { padding: 10px 12px; border-bottom: 1px solid #181818; }
   color: var(--text-muted);
   font-size: 12px;
 }
-/* Pro-locked overlay rows on the strategy page (Free tier). */
-.form-row.locked label,
-.form-row.locked small {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
 /* Mobile — UAE traffic is ~70% mobile and the 200px label column
    crushed input width below readable on a 375px screen. Stack to a
    single column under 700px. */
@@ -182,30 +176,6 @@ td { padding: 10px 12px; border-bottom: 1px solid #181818; }
   .status-banner .btn-primary-sm,
   .status-banner .btn-secondary-sm { flex: 1; text-align: center; }
 }
-.pro-lock {
-  display: inline-block;
-  margin-left: 8px;
-  padding: 1px 8px;
-  border-radius: 999px;
-  background: var(--accent-soft);
-  color: var(--accent);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-  vertical-align: middle;
-}
-.upgrade-pitch {
-  margin-top: 16px;
-  padding: 12px 16px;
-  background: var(--accent-soft);
-  border: 1px solid rgba(247, 147, 26, 0.3);
-  border-radius: 8px;
-  font-size: 13px;
-  color: var(--text);
-  line-height: 1.55;
-}
-.upgrade-pitch a { color: var(--accent); font-weight: 600; }
 button, .btn {
   background: var(--accent);
   color: #000;
@@ -450,7 +420,6 @@ a { color: var(--accent); text-decoration: none; }
     <div class="user">
       <div>Signed in as</div>
       <strong>{{ user_email }}</strong>
-      <div style="margin-top:6px"><span class="pill {% if license_tier == 'pro' or license_tier == 'business' %}accent{% else %}muted{% endif %}">{{ license_tier }}</span></div>
       {# Absolute path on purpose — breaks out of the /dca/console/
          proxy and lands on app.bitcoiners.ae/account, where the Auth.js
          "Sign out" button lives. Only render when running behind the
@@ -516,31 +485,6 @@ a { color: var(--accent); text-decoration: none; }
          hx-swap="innerHTML">
       {% include "partials/status_banner.html" %}
     </div>
-
-    {# Pro API fallback banner — shown when the most recent remote Pro
-       call fell back to local. Auto-hides after 30 min of no failures,
-       on the next successful call, or when the user dismisses. Non-
-       blocking; just informational so paying customers know they're
-       getting local logic instead of hosted Pro. #}
-    {% if pro_api and pro_api.banner_visible %}
-    <div id="pro-api-banner" class="flash warn"
-         style="display:flex; align-items:center; gap:12px; line-height:1.5">
-      <span style="flex:1">
-        <strong>Pro API unavailable.</strong> Last call to
-        <code>{{ pro_api.endpoint }}</code> fell back to local logic —
-        {{ pro_api.reason }}. Your bot is still running normally on
-        embedded routing/backtest. Status updates on next cycle.
-      </span>
-      <button type="button"
-              class="btn-secondary-sm"
-              hx-post="{{ prefix }}/htmx/pro-api-banner/dismiss"
-              hx-target="#pro-api-banner"
-              hx-swap="outerHTML"
-              style="padding:4px 10px">
-        Dismiss
-      </button>
-    </div>
-    {% endif %}
 
     {# Multi-hop orphan — funds stuck in an intermediate currency on an
        exchange because a hop failed after the previous hop settled. The

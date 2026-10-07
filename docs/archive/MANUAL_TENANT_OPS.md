@@ -1,5 +1,7 @@
 # Manual Tenant Ops
 
+> **ARCHIVED 2026-10-07.** Written while bitcoiners-dca had Free/Pro/Business licence tiers and a hosted (Hetzner tenant + provisioner) offering. Both are retired: the bot is free, MIT-licensed, self-host only, with every feature enabled. Kept for history only.
+
 Procedures for adding, modifying, or destroying a DCA tenant outside
 the normal Stripe → webhook → provisioner-tick flow.
 

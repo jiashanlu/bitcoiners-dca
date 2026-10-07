@@ -5,6 +5,7 @@ The config file is checked into the user's own system (with secrets blank).
 Secrets resolved at runtime from environment.
 """
 from __future__ import annotations
+import logging
 import os
 from decimal import Decimal
 from pathlib import Path
@@ -15,16 +16,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-
-class LicenseConfig(BaseModel):
-    """Licensing — gates premium features. See `docs/TIERS.md`.
-
-    `tier: free` always works without a key.
-    `tier: pro` / `tier: business` require a key signed by the publisher.
-    Invalid or expired keys silently downgrade to free with a warning log.
-    """
-    tier: str = "free"                 # free | pro | business
-    key: Optional[str] = None          # base64 signed token (see scripts/generate_license.py)
+logger = logging.getLogger(__name__)
 
 
 class TelegramConfig(BaseModel):
@@ -136,8 +128,7 @@ class StrategyYamlConfig(BaseModel):
             # this in practice; keep the stored amount rather than crash.
             return self
         if derived != self.amount_aed:
-            import logging
-            logging.getLogger(__name__).warning(
+            logger.warning(
                 "strategy.amount_aed (%s) disagrees with the configured "
                 "budget (%s %s at %s/every_n=%s) — re-derived to %s. The "
                 "budget is the source of truth.",
@@ -301,7 +292,7 @@ class AutoWithdrawConfig(BaseModel):
 
     Per `feedback-kill-auto-withdraw-until-lightning`: on-chain fees
     wipe out the AED 49 customer's savings on small cycles. The
-    feature returns once Lightning lands as a Pro-tier feature.
+    feature returns once Lightning withdraw lands.
 
     DO NOT WIRE — these fields are kept ONLY so legacy config.yaml
     files from before 2026-05 still parse cleanly. Don't add new
@@ -369,8 +360,31 @@ class PersistenceConfig(BaseModel):
     db_path: str = "./data/dca.db"
 
 
+# Top-level sections that older releases understood but that no longer do
+# anything. `license:` held the tier + signed key from the retired Free/Pro/
+# Business licensing (removed 2026-10-07 — every feature is now available to
+# everyone). Existing config.yaml files still carry it, so it is accepted and
+# dropped rather than rejected.
+_RETIRED_SECTIONS = ("license",)
+_retired_sections_warned: set[str] = set()
+
+
+def _drop_retired_sections(raw: dict) -> dict:
+    """Strip retired top-level sections, logging once per section per process."""
+    present = [key for key in _RETIRED_SECTIONS if key in raw]
+    if not present:
+        return raw
+    for key in present:
+        if key not in _retired_sections_warned:
+            _retired_sections_warned.add(key)
+            logger.warning(
+                "config.yaml: the `%s:` section is no longer used (all features "
+                "are free and enabled) and is ignored — you can delete it.", key,
+            )
+    return {k: v for k, v in raw.items() if k not in _RETIRED_SECTIONS}
+
+
 class AppConfig(BaseModel):
-    license: LicenseConfig = Field(default_factory=LicenseConfig)
     strategy: StrategyYamlConfig = Field(default_factory=StrategyYamlConfig)
     overlays: OverlaysConfig = Field(default_factory=OverlaysConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
@@ -385,6 +399,13 @@ class AppConfig(BaseModel):
     persistence: PersistenceConfig = Field(default_factory=PersistenceConfig)
 
     dry_run: bool = False    # global dry-run flag overrides everything
+
+    @model_validator(mode="before")
+    @classmethod
+    def _ignore_retired_sections(cls, data):
+        if isinstance(data, dict):
+            return _drop_retired_sections(data)
+        return data
 
 
 def load_config(path: str | Path = "./config.yaml") -> AppConfig:

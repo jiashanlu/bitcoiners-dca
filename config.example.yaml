@@ -1,13 +1,7 @@
 # bitcoiners-dca starter config — copy to config.yaml and edit.
 
-# ─── LICENSE ────────────────────────────────────────────────────────────────
-# Free tier = no key needed, single-exchange DCA + tax CSV + risk circuit
-# breakers + manual withdraw via the dashboard. Pro / Business tiers unlock
-# multi-exchange routing, maker mode, advanced strategies, etc.
-# See docs/TIERS.md for the full feature matrix.
-license:
-  tier: free                  # free | pro | business
-  key: null                   # base64 token from https://bitcoiners.ae/dca-bot
+# Every feature below is free and available to everyone — no licence key.
+# (A `license:` section left over from older releases is ignored.)
 
 # ─── STRATEGY ───────────────────────────────────────────────────────────────
 strategy:
@@ -29,7 +23,7 @@ overlays:
     multiplier: 2.0         # 2x buys when triggered
 
   # Reduce buy size when realized volatility is high, increase when low.
-  # Smooths spending across vol regimes. Pro/Business tier only.
+  # Smooths spending across vol regimes.
   volatility_weighted:
     enabled: false
     target_vol_pct: 50      # BTC's rough long-run norm
@@ -40,7 +34,6 @@ overlays:
   # Avoid the wide-spread overnight hours. Two modes:
   #   skip_if_not_best: skip cycles not in preferred_hours
   #   scale_by_spread:  scale buy size by hour-of-day median spread
-  # Pro/Business tier only.
   time_of_day:
     enabled: false
     mode: skip_if_not_best
@@ -49,7 +42,6 @@ overlays:
     spread_scale_max: 1.5
 
   # Extra buys at significant drawdowns from ATH. Bear-market accumulation tool.
-  # Pro/Business tier only.
   drawdown_aware:
     enabled: false
     tiers:

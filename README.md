@@ -5,9 +5,9 @@ buys to the cheapest exchange, surfaces arbitrage opportunities, and produces
 UAE-tax-ready reports. Manual on-chain withdraw from the dashboard when you're
 ready to sweep to your hardware wallet.
 
-**Status:** v0.6 — customer-facing self-service dashboard. Edit strategy + exchanges + secrets entirely from the browser; daemon hot-reloads config every cycle. Encrypted-at-rest credentials (Fernet). Cloudflare Access gates the hosted dashboard. Builds on v0.5 (license + tier framework · composable strategy overlays · hosted-tenant template) and v0.4 (multi-hop smart routing · maker-mode · funding monitor). 165 tests passing.
+**Status:** v0.6 — self-service dashboard. Edit strategy + exchanges + secrets entirely from the browser; daemon hot-reloads config every cycle. Encrypted-at-rest credentials (Fernet). Optional Cloudflare Access gate for an internet-facing dashboard. Builds on v0.5 (composable strategy overlays) and v0.4 (multi-hop smart routing · maker-mode · funding monitor). 390+ tests passing.
 
-**Free** = self-host, single exchange, base DCA + tax CSV + manual on-chain withdraw. **Pro** (AED 49/mo) unlocks multi-exchange routing (3-hop), maker mode, advanced strategies, on-chain smart triggers (MVRV-Z), funding-rate monitor. **Business** (AED 499+/mo) adds basis-trade execution, LN Markets covered calls, multi-asset DCA, family-office multi-strategy mode. See `docs/TIERS.md` for the full matrix.
+**Free and open source (MIT), with no tiers.** Every feature is included for everyone: multi-exchange smart routing (incl. multi-hop), maker-mode execution, all strategy overlays (buy-the-dip, volatility-weighted, time-of-day, drawdown-aware, on-chain smart triggers), funding-rate monitor, backtest, tax CSV and manual on-chain / Lightning withdraw. No licence key, no subscription. Older configs with a `license:` section still load; the section is ignored.
 
 ---
 
@@ -171,7 +171,7 @@ Only opportunities with **positive net profit after all costs** are alerted on.
 | Surface | What we do |
 |---|---|
 | **Your exchange API keys** | Read from env vars; never logged, never sent over network except to exchanges |
-| **Withdrawals** | Manual only. Use the dashboard's Withdraw-now flow when you want to sweep. Unattended auto-withdraw is parked until Lightning withdraw lands (on-chain-only sweeps cost too much for AED 49 customers). |
+| **Withdrawals** | Manual only. Use the dashboard's Withdraw-now flow when you want to sweep. Unattended auto-withdraw is parked until Lightning withdraw lands (on-chain-only sweeps cost too much on small cycles). |
 | **Withdrawal scope** | Most exchanges support trade-only API keys. We strongly recommend that scope for the bot's key. Add Withdraw scope only when you're ready to use the dashboard's manual Withdraw-now flow. |
 | **State storage** | SQLite on your machine. No telemetry, no cloud sync. |
 | **Tax reports** | Generated locally, never shipped anywhere. |
@@ -205,12 +205,10 @@ Only opportunities with **positive net profit after all costs** are alerted on.
 - [x] Cross-exchange route alerts (Telegram-only; manual execution above 25k AED)
 - [x] Maker-mode execution (taker / maker_only / maker_fallback)
 - [x] Funding-rate monitor (basis-trade signals, detection only)
-- [x] `routes` + `funding` + `license` audit CLIs
-- [x] License framework — Ed25519-signed offline-verifiable tokens; tier gating throughout
+- [x] `routes` + `funding` audit CLIs
 - [x] Volatility-weighted DCA overlay (buy less when realized vol is high)
 - [x] Time-of-day overlay (skip cycles outside cheapest hours; or scale by hourly spread)
 - [x] Drawdown-aware sizing (extra buys at -20% / -40% / -60% from ATH)
-- [x] Hosted-tenant deployment template (`hosted/provision.sh` + per-tenant compose + nginx fragment)
 - [ ] On-chain consolidation across multiple exchange outputs
 - [x] Umbrel community-app package (manifest + compose ready at `umbrel/` — pending Docker image push)
 - [x] Risk-manager circuit breakers (daily cap, single-buy cap, auto-pause on consecutive failures)
@@ -252,9 +250,9 @@ bitcoiners-dca/
 
 ## License
 
-MIT. Software you run on your hardware with your keys. If we sold this as a
-hosted service, that would be a VASP-licensed activity in the UAE. Selling it
-as software is not.
+MIT — see [`LICENSE`](LICENSE). Software you run on your hardware with your
+keys. Running it for others as a hosted service would be a VASP-licensed
+activity in the UAE; publishing it as software is not.
 
 ---
 

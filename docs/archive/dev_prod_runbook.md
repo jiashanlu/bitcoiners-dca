@@ -1,5 +1,7 @@
 # Dev / Prod runbook — bitcoiners-dca + bitcoiners-app
 
+> **ARCHIVED 2026-10-07.** Written while bitcoiners-dca had Free/Pro/Business licence tiers and a hosted (Hetzner tenant + provisioner) offering. Both are retired: the bot is free, MIT-licensed, self-host only, with every feature enabled. Kept for history only.
+
 Current as of 2026-05-15 (post-Vercel-cutover, post-Hetzner-migration).
 
 ## Topology

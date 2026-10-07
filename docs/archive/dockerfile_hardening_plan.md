@@ -1,5 +1,7 @@
 # Dockerfile non-root hardening plan (#150)
 
+> **ARCHIVED 2026-10-07.** Written while bitcoiners-dca had Free/Pro/Business licence tiers and a hosted (Hetzner tenant + provisioner) offering. Both are retired: the bot is free, MIT-licensed, self-host only, with every feature enabled. Kept for history only.
+
 Status: **✅ IMPLEMENTED 2026-05-xx** (see current Dockerfile — verified
 audit 2026-05-21 / I-P3-1). Document retained as historical context for
 the design decisions. The current Dockerfile follows Approach A

@@ -8,8 +8,6 @@ Job structure:
   - dca_cycle     : runs at user-configured time (cron expression)
   - arbitrage     : runs every N seconds (poll interval from config)
   - health_check  : every 5 minutes, validates exchange connectivity
-  - license_watch : every 6 hours, warns before license expiry downgrades
-                    the tenant to FREE (and once when it has)
 
 The daemon survives transient errors. Each job logs to the cycle_log table
 in SQLite so you can audit what happened, when, and why.
@@ -20,7 +18,7 @@ import asyncio
 import logging
 import signal
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal
 from typing import Optional
 
@@ -522,46 +520,9 @@ class DCAScheduler:
                 logger.warning("Funding monitor poll failed: %s", e)
 
     async def _funding_readings(self):
-        """Try the hosted Pro API first (one central poll across all
-        tenants). Fall back to a direct OKX poll on any failure — the
-        bot's local monitor was the original source of truth and
-        remains the canonical fallback. Returns a list of
+        """Poll every configured funding instrument. Returns a list of
         FundingReading."""
-        from decimal import Decimal
-        from datetime import datetime
-        from bitcoiners_dca.core.funding_monitor import FundingReading
-        from bitcoiners_dca.core.pro_api_client import remote_funding_readings
-
-        license_token = getattr(
-            getattr(self.config, "license", None), "key", None,
-        )
-        # Match the bot's configured instrument list — call the server for
-        # each. The server currently only supports BTC-USDT-SWAP, so other
-        # instruments naturally fall back to local. Cheap, no contention.
-        out = []
-        for inst in self.funding_monitor.instruments:
-            ex = inst["exchange"].lower()
-            sym = inst["symbol"]
-            remote = await remote_funding_readings(
-                license_token, exchange=ex, instrument=sym, hours=1,
-            )
-            if remote and remote[0]:
-                top = remote[0]
-                out.append(FundingReading(
-                    instrument=top["instrument"],
-                    exchange=top["exchange"],
-                    rate_per_period=Decimal(str(top["rate_per_period"])),
-                    annualized_pct=Decimal(str(top["annualized_pct"])),
-                    settles_at=datetime.fromisoformat(top["settles_at"].replace("Z", "+00:00")),
-                ))
-                continue
-            # Fall back to local poll for this instrument.
-            local = await self.funding_monitor.poll()
-            for r in local:
-                if r.instrument == sym and r.exchange == ex:
-                    out.append(r)
-                    break
-        return out
+        return await self.funding_monitor.poll()
 
     async def _run_health_check(self) -> None:
         """Verify each exchange is reachable + authenticated.
@@ -622,46 +583,6 @@ class DCAScheduler:
         except Exception as e:
             logger.warning("Failed to write daemon heartbeat: %s", e)
 
-    async def _run_license_watch(self) -> None:
-        """Warn the tenant (and ops) before/when the license expires.
-
-        The 2026-08-12 benbois lapse showed an expiring license fails
-        SILENTLY: the daemon downgrades to FREE, routing loses the
-        USDT path, and the risk manager eventually pauses the bot with
-        nothing telling anyone why. One message per threshold per
-        expiry date (state in db.meta survives restarts; a renewed
-        token re-arms all thresholds).
-        """
-        from bitcoiners_dca.core.license_watch import (
-            META_KEY, customer_message, pending_warning, record_warning,
-        )
-        from bitcoiners_dca.core.notifications import send_admin_alert
-
-        async with self._jobs_lock:
-            try:
-                warned = self.db.get_meta(META_KEY)
-                warning = pending_warning(self.config.license.key, warned)
-                if warning is None:
-                    return
-                await self.notifier.notify_notice(customer_message(warning))
-                send_admin_alert(
-                    f"License {'EXPIRED' if warning.threshold_days == 0 else 'expiring'} "
-                    f"for {warning.customer_id} (tier={warning.tier}, "
-                    f"expires {warning.expires_at.date().isoformat()}, "
-                    f"{warning.days_left:.1f}d left). Hosted renewals should "
-                    f"re-sign automatically on payment — if this tenant is a "
-                    f"paying subscriber, check the Polar→provisioner /resign "
-                    f"path.",
-                    tag="license",
-                )
-                self.db.set_meta(META_KEY, record_warning(warned, warning))
-                logger.warning(
-                    "License expiry warning sent: threshold=%dd expires=%s",
-                    warning.threshold_days, warning.expires_at.isoformat(),
-                )
-            except Exception:
-                logger.exception("license watch failed")
-
     def _install_jobs(self) -> None:
         # DCA cycle on cron schedule
         self._scheduler.add_job(
@@ -700,17 +621,6 @@ class DCAScheduler:
             trigger=IntervalTrigger(minutes=5),
             id="health_check",
             replace_existing=True,
-        )
-
-        # License expiry watch — every 6h, first run right away so a daemon
-        # restarted near (or past) expiry warns immediately. Fired-warning
-        # state lives in db.meta so restarts don't re-spam.
-        self._scheduler.add_job(
-            self._run_license_watch,
-            trigger=IntervalTrigger(hours=6),
-            id="license_watch",
-            replace_existing=True,
-            next_run_time=datetime.now(),
         )
 
         # Funding monitor — opt-in

@@ -22,112 +22,12 @@ from rich.console import Console
 from rich.table import Table
 
 from bitcoiners_dca.core.arbitrage import ArbitrageMonitor
-from bitcoiners_dca.core.license import Feature, LicenseManager
 from bitcoiners_dca.core.notifications import Notifier
 from bitcoiners_dca.core.router import SmartRouter
 from bitcoiners_dca.core.strategy import DCAStrategy, StrategyConfig
 from bitcoiners_dca.exchanges.base import Exchange
 from bitcoiners_dca.persistence.db import Database
 from bitcoiners_dca.utils.config import AppConfig, load_config
-
-
-def _license_manager(cfg: AppConfig) -> LicenseManager:
-    return LicenseManager.from_config(cfg.license.tier, cfg.license.key)
-
-
-def _load_runtime_config(config_path: str) -> AppConfig:
-    """Load config + apply license filter. Use this everywhere except in the
-    `license` CLI itself (which needs to show what the user asked for).
-    """
-    raw = load_config(config_path)
-    mgr = _license_manager(raw)
-    return _apply_license_filter(raw, mgr)
-
-
-def _apply_license_filter(cfg: AppConfig, mgr: LicenseManager) -> AppConfig:
-    """Downgrade config to what the licensed tier actually allows.
-
-    This is the SINGLE PLACE in the codebase where tier-gating happens.
-    All downstream code reads from the post-filter config and doesn't need
-    to know about licensing. Premium features the user enabled in config
-    but didn't pay for are silently disabled — a warning is logged.
-
-    Returns a modified copy of `cfg`; the original is untouched so the
-    `license` CLI can still show what the user asked for.
-    """
-    import logging
-    log = logging.getLogger(__name__)
-    cfg = cfg.model_copy(deep=True)
-
-    # Multi-exchange gate
-    if not mgr.is_feature_enabled(Feature.MULTI_EXCHANGE):
-        enabled_names = [
-            n for n, ex in (("okx", cfg.exchanges.okx),
-                            ("binance", cfg.exchanges.binance),
-                            ("bitoasis", cfg.exchanges.bitoasis))
-            if ex.enabled
-        ]
-        if len(enabled_names) > 1:
-            log.warning(
-                "License tier %s allows 1 exchange; keeping %s, disabling %s",
-                mgr.tier.value, enabled_names[0], enabled_names[1:],
-            )
-            # Keep the first enabled, disable the rest
-            for n in enabled_names[1:]:
-                getattr(cfg.exchanges, n).enabled = False
-
-    # Multi-hop routing gate
-    if not mgr.is_feature_enabled(Feature.MULTI_HOP_ROUTING):
-        if cfg.routing.enable_two_hop:
-            log.warning("License tier %s does not include multi-hop routing — disabling", mgr.tier.value)
-            cfg.routing.enable_two_hop = False
-
-    # Cross-exchange alerts gate
-    if not mgr.is_feature_enabled(Feature.CROSS_EXCHANGE_ALERTS):
-        if cfg.routing.enable_cross_exchange_alerts:
-            log.warning("License tier %s does not include cross-exchange alerts — disabling", mgr.tier.value)
-            cfg.routing.enable_cross_exchange_alerts = False
-
-    # Maker-mode execution gate
-    if not mgr.is_feature_enabled(Feature.MAKER_MODE):
-        if cfg.execution.mode != "taker":
-            log.warning(
-                "License tier %s does not include maker-mode execution — "
-                "falling back to taker", mgr.tier.value,
-            )
-            cfg.execution.mode = "taker"
-
-    # Dip overlay gate
-    if not mgr.is_feature_enabled(Feature.DIP_OVERLAY):
-        if cfg.overlays.buy_the_dip.enabled:
-            log.warning("License tier %s does not include buy-the-dip overlay — disabling", mgr.tier.value)
-            cfg.overlays.buy_the_dip.enabled = False
-
-    # Volatility-weighted overlay gate
-    if not mgr.is_feature_enabled(Feature.VOLATILITY_WEIGHTED):
-        if cfg.overlays.volatility_weighted.enabled:
-            log.warning("License tier %s does not include volatility-weighted DCA — disabling", mgr.tier.value)
-            cfg.overlays.volatility_weighted.enabled = False
-
-    # Time-of-day overlay gate
-    if not mgr.is_feature_enabled(Feature.TIME_OF_DAY):
-        if cfg.overlays.time_of_day.enabled:
-            log.warning("License tier %s does not include time-of-day DCA — disabling", mgr.tier.value)
-            cfg.overlays.time_of_day.enabled = False
-
-    # Drawdown overlay gate
-    if not mgr.is_feature_enabled(Feature.DRAWDOWN_SIZING):
-        if cfg.overlays.drawdown_aware.enabled:
-            log.warning("License tier %s does not include drawdown-aware sizing — disabling", mgr.tier.value)
-            cfg.overlays.drawdown_aware.enabled = False
-
-    # Funding monitor gate
-    if not mgr.is_feature_enabled(Feature.FUNDING_MONITOR):
-        if cfg.funding_monitor.enabled:
-            log.warning("License tier %s does not include funding-rate monitor — disabling", mgr.tier.value)
-            cfg.funding_monitor.enabled = False
-
-    return cfg
 
 
 app = typer.Typer(help="bitcoiners-dca: self-hosted multi-exchange DCA bot")
@@ -217,8 +117,7 @@ def _build_router(cfg: AppConfig) -> SmartRouter:
 
 
 def _build_overlays(cfg: AppConfig) -> list:
-    """Construct the active overlay stack from config + license filter has
-    already disabled any not-allowed-on-this-tier overlay configs."""
+    """Construct the active overlay stack from the overlays enabled in config."""
     from bitcoiners_dca.strategies import (
         BuyTheDipOverlay, DrawdownOverlay, OnchainSmartTriggerOverlay,
         TimeOfDayOverlay, VolatilityWeightedOverlay,
@@ -331,7 +230,7 @@ def prices(
 
 
 async def _prices(config_path: str, pair: str):
-    cfg = _load_runtime_config(config_path)
+    cfg = load_config(config_path)
     exchanges = _build_exchanges(cfg)
     if not exchanges:
         console.print("[red]No exchanges configured. Run `bitcoiners-dca init-config` first.[/red]")
@@ -365,7 +264,7 @@ def buy_once(
 async def _buy_once(config_path: str, dry: bool):
     from bitcoiners_dca.core.market_data import MarketDataProvider
     from bitcoiners_dca.core.risk import RiskManager
-    cfg = _load_runtime_config(config_path)
+    cfg = load_config(config_path)
     if dry:
         cfg.dry_run = True
     exchanges = _build_exchanges(cfg)
@@ -480,7 +379,7 @@ def arb_check(
 
 
 async def _arb_check(config_path: str):
-    cfg = _load_runtime_config(config_path)
+    cfg = load_config(config_path)
     exchanges = _build_exchanges(cfg)
     if len(exchanges) < 2:
         console.print("[red]Need at least 2 exchanges configured for arbitrage detection.[/red]")
@@ -521,7 +420,7 @@ def status(
 
 
 async def _status(config_path: str):
-    cfg = _load_runtime_config(config_path)
+    cfg = load_config(config_path)
     db = Database(cfg.persistence.db_path)
     exchanges = _build_exchanges(cfg)
 
@@ -563,7 +462,7 @@ async def _run_daemon(config_path: str):
     from bitcoiners_dca.core.arbitrage import ArbitrageMonitor
     from bitcoiners_dca.core.scheduler import DCAScheduler
 
-    cfg = _load_runtime_config(config_path)
+    cfg = load_config(config_path)
     exchanges = _build_exchanges(cfg)
     if not exchanges:
         # New tenant before they paste any API keys — the dashboard is the
@@ -577,7 +476,7 @@ async def _run_daemon(config_path: str):
         while not exchanges:
             await asyncio.sleep(15)
             try:
-                cfg = _load_runtime_config(config_path)
+                cfg = load_config(config_path)
                 exchanges = _build_exchanges(cfg)
             except Exception as e:
                 logging.warning("config reload failed while idle: %s", e)
@@ -597,7 +496,7 @@ async def _run_daemon(config_path: str):
         component the scheduler depends on. Called at the top of every
         scheduled task so dashboard edits to config.yaml take effect on
         the next cycle without a daemon restart."""
-        fresh_cfg = _load_runtime_config(config_path)
+        fresh_cfg = load_config(config_path)
         fresh_exchanges = _build_exchanges(fresh_cfg)
         fresh_router = _build_router(fresh_cfg)
         # Reuse the long-lived db connection so the rebuilt strategy
@@ -638,7 +537,7 @@ def export_tax_csv(
     """Export trade history as a CSV — useful for record-keeping."""
     from bitcoiners_dca.persistence.reports import export_uae_tax_csv
 
-    cfg = _load_runtime_config(config_path)
+    cfg = load_config(config_path)
     db = Database(cfg.persistence.db_path)
     out = export_uae_tax_csv(db, cfg.reports.uae_tax_csv_path, year=year)
     db.close()
@@ -683,7 +582,7 @@ def backup(
     import sqlite3
     from datetime import datetime as _dt
 
-    cfg = _load_runtime_config(config_path)
+    cfg = load_config(config_path)
     db_path = Path(cfg.persistence.db_path)
     if not db_path.exists():
         console.print(f"[red]No DB at {db_path} — nothing to back up.[/red]")
@@ -766,13 +665,6 @@ def doctor(
         raise typer.Exit(code=1)
 
     cfg = load_config(config_path)
-    mgr = _license_manager(cfg)
-
-    # License
-    console.print(
-        f"  License tier: [cyan]{mgr.tier.value}[/cyan]  "
-        f"(features: {len(mgr.enabled_features)})"
-    )
 
     # Exchanges configured
     enabled = [
@@ -819,9 +711,6 @@ def doctor(
 
     # Suggested next steps
     console.print("\n[bold]Suggested next steps:[/bold]")
-    if mgr.tier.value == "free" and len(enabled) > 1:
-        console.print("  • Free tier limits you to 1 exchange — the license filter")
-        console.print(f"    will disable all but the first. Get a Pro key to use {len(enabled)} live.")
     if cfg.dry_run:
         console.print("  • Run a few `bitcoiners-dca buy-once` cycles to dry-run end-to-end.")
         console.print("  • Then `bitcoiners-dca validate` for a config audit.")
@@ -829,35 +718,6 @@ def doctor(
     else:
         console.print("  • Live trading is ENABLED. Cycles will place real orders.")
         console.print("  • Start the daemon: `bitcoiners-dca run` (or `docker compose up -d`)")
-
-
-@app.command()
-def license(
-    config_path: str = typer.Option("./config.yaml", "--config", "-c"),
-):
-    """Show the current license tier + enabled feature set."""
-    from bitcoiners_dca.core.license import LicenseManager
-
-    cfg = load_config(config_path)
-    mgr = LicenseManager.from_config(cfg.license.tier, cfg.license.key)
-    info = mgr.describe()
-
-    console.print(f"[bold]License tier:[/bold] [cyan]{info['tier']}[/cyan]")
-    if "customer_id" in info:
-        console.print(f"  Customer:    {info['customer_id']}")
-        console.print(f"  Issued:      {info['issued_at']}")
-        console.print(f"  Expires:     {info['expires_at']}")
-        if info.get('notes'):
-            console.print(f"  Notes:       {info['notes']}")
-    console.print()
-    console.print(f"[bold]Features enabled ({info['feature_count']}):[/bold]")
-    if not info['features']:
-        console.print("  [dim]Free tier — base DCA + tax CSV + risk circuit breakers + manual withdraw.[/dim]")
-        console.print("  [dim]Upgrade for multi-exchange routing, multi-hop, maker mode, on-chain triggers, more strategies.[/dim]")
-        console.print("  [dim]Visit https://bitcoiners.ae/dca-bot to get a Pro/Business key.[/dim]")
-    else:
-        for f in info['features']:
-            console.print(f"  ✓ {f}")
 
 
 @app.command()
@@ -878,7 +738,7 @@ async def _funding(config_path: str, show_history: bool):
     import httpx
     from decimal import Decimal as D
 
-    cfg = _load_runtime_config(config_path)
+    cfg = load_config(config_path)
     table = Table(title="BTC perpetual funding (live)")
     table.add_column("Exchange"); table.add_column("Instrument")
     table.add_column("8h rate"); table.add_column("Annualized"); table.add_column("Next settle (UTC)")
@@ -947,7 +807,7 @@ def routes(
 
 
 async def _routes(config_path: str, amount_aed: Decimal, pair: str):
-    cfg = _load_runtime_config(config_path)
+    cfg = load_config(config_path)
     exchanges = _build_exchanges(cfg)
     if not exchanges:
         console.print("[red]No exchanges configured.[/red]")
@@ -1154,7 +1014,7 @@ def risk(
 ):
     """Inspect or toggle the bot's risk-manager pause state."""
     from bitcoiners_dca.core.risk import RiskManager
-    cfg = _load_runtime_config(config_path)
+    cfg = load_config(config_path)
     db = Database(cfg.persistence.db_path)
     rm = RiskManager(
         db=db,
@@ -1403,7 +1263,7 @@ async def _withdraw(
 ):
     from bitcoiners_dca.core.lightning import detect_network as _detect
 
-    cfg = _load_runtime_config(config_path)
+    cfg = load_config(config_path)
     exchanges = _build_exchanges(cfg)
     ex = next((e for e in exchanges if e.name == exchange_name), None)
     if ex is None:
@@ -1443,10 +1303,6 @@ async def _withdraw(
 
 
 _INLINE_TEMPLATE = """# bitcoiners-dca starter config
-license:
-  tier: free                  # free | pro | business; see docs/TIERS.md
-  key: null
-
 # Edit this file; set secrets via environment variables.
 
 strategy:

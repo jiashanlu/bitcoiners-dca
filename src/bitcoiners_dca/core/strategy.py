@@ -393,21 +393,12 @@ class DCAStrategy:
         result.intended_amount_aed = amount
 
         # 2. Route to best exchange — balance-aware (skips exchanges that
-        # can't fund the intended buy). Passes the license token through
-        # so the router can try the hosted Pro API first when configured
-        # (see workspace/bitcoiners-pro-api-plan.md). License is optional;
-        # Free-tier, self-host, and test fixtures that don't have a
-        # `.license` section pass None and stay on local logic.
-        # Double getattr because StrategyConfig (used in unit tests) has
-        # no `.license` attribute at all — direct access raises.
-        _lic_section = getattr(self.config, "license", None)
-        license_token = getattr(_lic_section, "key", None)
+        # can't fund the intended buy).
         try:
             decision = await self.router.pick(
                 exchanges,
                 self.config.pair,
                 required_quote_amount=amount,
-                license_token=license_token,
             )
             result.routing_decision = decision
             result.notes.append(decision.reason)
@@ -554,9 +545,9 @@ class DCAStrategy:
             result.errors.append(f"Route execution failed: {e}")
             return result
 
-        # 4. Auto-withdraw: parked until Lightning withdraw lands as a Pro
-        # feature. On-chain-only auto-withdraw burns ~0.0002 BTC (~$15-20)
-        # per sweep, which eats AED 49 customer savings. Manual withdraw
+        # 4. Auto-withdraw: parked until Lightning withdraw lands.
+        # On-chain-only auto-withdraw burns ~0.0002 BTC (~$15-20) per
+        # sweep, which eats small-cycle savings. Manual withdraw
         # via the /withdrawals dashboard page is the supported flow.
         # The exchange withdraw_btc() adapters, DB schema, address book,
         # and SecretStore stay in place as plumbing for re-enablement.

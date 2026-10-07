@@ -1,5 +1,5 @@
 """
-Multi-asset DCA — Business-tier feature. Allocate a single cycle budget
+Multi-asset DCA. Allocate a single cycle budget
 across multiple base assets (BTC + ETH + SOL + …) according to user
 weights, then run separate routing decisions for each leg.
 
@@ -9,8 +9,8 @@ exposure to other large caps. Or they want to DCA a "Lindy basket" (BTC
 cycle is annoying — this overlay automates it.
 
 DESIGN STATUS: scaffold only — the model + config wiring lives here but
-the strategy/scheduler integration ships in v0.7. Free + Pro tiers ignore
-this entirely; Business tier sees it active.
+the strategy/scheduler integration ships in v0.7. Until then the daemon
+ignores it.
 
 The math is straightforward:
     for asset, weight in allocations:
