@@ -361,6 +361,12 @@ class DCAScheduler:
 
         # Risk pre-check — paused state + daily/single-buy caps.
         decision = self.risk.evaluate(self.config.strategy.amount_aed)
+        if decision.paused:
+            # Paused on purpose (HA / dashboard / CLI) or by auto-pause, which
+            # already alerts once on the transition. Skip without a message
+            # every cycle.
+            logger.info("DCA cycle skipped: %s", "; ".join(decision.reasons))
+            return
         if not decision.allow:
             logger.warning(
                 "DCA cycle skipped by risk manager: %s", "; ".join(decision.reasons)

@@ -50,11 +50,15 @@ class RiskDecision:
       every boost multiplier (dip 2x, drawdown 4x, MVRV 1.5x bought exactly
       the base on every production path — audit 2026-06-10 P1).
     - `reasons` contains every factor considered, for audit + notifications.
+    - `paused` is True when the skip is because the bot is paused (manually or
+      by auto-pause). Callers skip quietly: the pause itself was already
+      announced, so a message on every cycle is just noise.
     """
     allow: bool
     amount_aed: Decimal
     reasons: list[str] = field(default_factory=list)
     cap_aed: Optional[Decimal] = None
+    paused: bool = False
 
 
 class RiskManager:
@@ -190,6 +194,7 @@ class RiskManager:
                 allow=False,
                 amount_aed=Decimal("0"),
                 reasons=[f"paused: {self.paused_reason() or 'unspecified'}"],
+                paused=True,
             )
 
         amount = intended_amount_aed

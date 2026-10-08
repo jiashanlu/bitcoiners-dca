@@ -43,6 +43,7 @@ def test_paused_blocks_everything(db):
     assert not decision.allow
     assert "paused" in decision.reasons[0]
     assert decision.amount_aed == Decimal("0")
+    assert decision.paused
 
 
 def test_resume_clears_state(db):
@@ -97,6 +98,7 @@ def test_daily_cap_blocks_when_exhausted(db):
     decision = rm.evaluate(Decimal("500"))
 
     assert not decision.allow
+    assert not decision.paused
     assert any("daily cap reached" in r for r in decision.reasons)
 
 

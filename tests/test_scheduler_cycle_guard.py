@@ -286,7 +286,7 @@ async def test_notify_crash_does_not_mark_successful_cycle_failed():
     s = _bare_scheduler()
     s.risk = MagicMock()
     s.risk.evaluate = MagicMock(return_value=MagicMock(
-        allow=True, amount_aed=D("100"), cap_aed=None, reasons=[],
+        allow=True, paused=False, amount_aed=D("100"), cap_aed=None, reasons=[],
     ))
     s.config = MagicMock()
     s.config.strategy.amount_aed = D("100")
@@ -369,3 +369,44 @@ async def test_shutdown_waits_for_inflight_cycle():
     # close() only ran after the cycle flag cleared.
     assert s._cycle_in_progress is False
     ex.close.assert_awaited_once()
+
+
+# ─── risk skips ────────────────────────────────────────────────────────
+
+
+def _cycle_scheduler(decision) -> DCAScheduler:
+    s = _bare_scheduler()
+    s.risk = MagicMock()
+    s.risk.evaluate = MagicMock(return_value=decision)
+    s.config = MagicMock()
+    return s
+
+
+@pytest.mark.asyncio
+async def test_paused_cycle_skips_without_notifying():
+    from decimal import Decimal
+    from bitcoiners_dca.core.risk import RiskDecision
+
+    s = _cycle_scheduler(RiskDecision(
+        allow=False, amount_aed=Decimal("0"),
+        reasons=["paused: Ben via Home Assistant"], paused=True,
+    ))
+
+    await s._run_dca_cycle_inner()
+
+    s.notifier.notify_error.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_daily_cap_skip_still_notifies():
+    from decimal import Decimal
+    from bitcoiners_dca.core.risk import RiskDecision
+
+    s = _cycle_scheduler(RiskDecision(
+        allow=False, amount_aed=Decimal("0"),
+        reasons=["daily cap reached: AED 1000/1000"],
+    ))
+
+    await s._run_dca_cycle_inner()
+
+    s.notifier.notify_error.assert_awaited_once()
