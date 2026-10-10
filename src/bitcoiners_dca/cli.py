@@ -452,12 +452,26 @@ def run(
     asyncio.run(_run_daemon(config_path))
 
 
+# httpx logs every request URL at INFO. Telegram's Bot API puts the bot token
+# in the URL path, so INFO-level httpx lines leaked it into the daemon logs.
+_SECRET_BEARING_HTTP_LOGGERS = ("httpx", "httpcore")
+
+
+def _quiet_http_client_logs() -> None:
+    """Keep HTTP client libraries at WARNING so request URLs (and the tokens
+    some APIs embed in them) never reach the logs."""
+    import logging
+    for name in _SECRET_BEARING_HTTP_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 async def _run_daemon(config_path: str):
     import logging
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
+    _quiet_http_client_logs()
 
     from bitcoiners_dca.core.arbitrage import ArbitrageMonitor
     from bitcoiners_dca.core.scheduler import DCAScheduler
